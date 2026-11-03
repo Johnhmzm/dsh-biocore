@@ -1,0 +1,46 @@
+{
+  "name": "dsh-biocore-ui",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "BioCore DSH UI skeleton: right-sidebar tab plus a read-only /api/biocore/state projection of the dsh_adapter state JSON.",
+  "main": "lib/index.js",
+  "files": [
+    "lib",
+    "cordis.patch.yml",
+    "README.md"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "immediately": true
+    },
+    "marketplace": {
+      "profiles": [
+        "web"
+      ],
+      "requiresRestart": true
+    },
+    "permissions": {
+      "files": "read-only",
+      "network": "none",
+      "commands": "none",
+      "credentials": []
+    },
+    "compatibility": {
+      "dsh": ">=0.2.0 <0.3.0",
+      "node": ">=22"
+    }
+  },
+  "exports": {
+    ".": "./lib/index.js",
+    "./client": "./lib/client.js",
+    "./package.json": "./package.json"
+  },
+  "scripts": {
+    "selftest": "node test/selftest.mjs"
+  }
+}

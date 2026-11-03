@@ -1,0 +1,7 @@
+# dsh-biocore-ui bundle layer: insert our plugin with its defaults.
+- insert:
+    - id: dsh-biocore-ui
+      name: dsh-biocore-ui
+      config:
+        # Empty -> default <home>/Desktop/deepseek/dsh_adapter/data/demo_state.json
+        stateFile: ''
