@@ -1,4 +1,7 @@
-node_modules/
-data/
+.backups/
+_shots/
+*.tgz
 *.log
-.pnpm-store/
+node_modules/
+__pycache__/
+*.pyc

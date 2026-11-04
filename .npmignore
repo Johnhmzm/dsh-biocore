@@ -1,0 +1,10 @@
+__pycache__/
+**/__pycache__/
+*.pyc
+**/*.pyc
+_shots/
+*.log
+*.tgz
+test/
+docs/
+data/

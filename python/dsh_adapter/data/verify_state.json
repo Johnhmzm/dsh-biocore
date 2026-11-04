@@ -1,0 +1,164 @@
+{
+  "autonomy": {
+    "cooldown_until": 0.0,
+    "enabled": false,
+    "hourly_cap": 3,
+    "next_window_s": null,
+    "ready": null,
+    "sent_today": 0
+  },
+  "core": {
+    "a": 0.4,
+    "allostatic_load": 0.0,
+    "arousal_decay_minutes": 30.0,
+    "boundary_pressure": 0.0,
+    "circadian_alertness": 0.75,
+    "conflict_ema": 0.0,
+    "d": 0.55,
+    "emotion_decay_factors": {},
+    "energy": 0.3544,
+    "intero": {
+      "clarity": 0.709,
+      "heaviness": 0.293,
+      "tension": 0.2967,
+      "ts": 900.0,
+      "warmth": 0.5959
+    },
+    "labels": {
+      "emotion": "neutral"
+    },
+    "last_bio_tick_ts": 900.0,
+    "mood_arousal": 0.4,
+    "mood_valence": 0.0,
+    "needs": {
+      "belonging": 0.5966,
+      "control": 0.6,
+      "last_tick_ts": 900.0,
+      "meaningful_existence": 0.6,
+      "self_esteem": 0.6
+    },
+    "pending_intent": null,
+    "self_esteem": 0.64,
+    "sleep_debt": 0.084,
+    "social": 0.6083,
+    "social_decay_minutes": 180.0,
+    "social_pain": 0.01,
+    "stress": 0.2358,
+    "v": 0.0142,
+    "valence_decay_minutes": 120.0
+  },
+  "days_known": 30.0,
+  "errors": [],
+  "history": [
+    {
+      "clarity": 0.7,
+      "heaviness": 0.3,
+      "tension": 0.3,
+      "ts": 300.0,
+      "v": 0.02,
+      "warmth": 0.6
+    },
+    {
+      "clarity": 0.7047,
+      "heaviness": 0.2965,
+      "tension": 0.2983,
+      "ts": 600.0,
+      "v": 0.0146,
+      "warmth": 0.5979
+    },
+    {
+      "clarity": 0.709,
+      "heaviness": 0.293,
+      "tension": 0.2967,
+      "ts": 900.0,
+      "v": 0.0142,
+      "warmth": 0.5959
+    }
+  ],
+  "last_turn": {
+    "intent": "hold",
+    "length_source": [
+      "exit_or_silence",
+      "metacog",
+      "state"
+    ],
+    "metacog_band": "中",
+    "prompt_diff": [
+      {
+        "chars": 53,
+        "position": "before_history"
+      },
+      {
+        "chars": 10,
+        "position": "before_history"
+      }
+    ],
+    "state_delta": [
+      {
+        "after": 0.6083,
+        "before": 0.5794,
+        "field": "social",
+        "source": "user"
+      },
+      {
+        "after": 0.2358,
+        "before": 0.2416,
+        "field": "stress",
+        "source": "user"
+      },
+      {
+        "after": 0.3544,
+        "before": 0.3516,
+        "field": "energy",
+        "source": "bio_tick"
+      },
+      {
+        "after": 0.084,
+        "before": 0.042,
+        "field": "sleep_debt",
+        "source": "bio_tick"
+      }
+    ],
+    "turn": {
+      "allow_correction": false,
+      "cap": 31,
+      "directive_sources": [
+        "exit_or_silence",
+        "metacog",
+        "state"
+      ],
+      "initiative": 0.446,
+      "length_factor": 1.025,
+      "target": 10
+    }
+  },
+  "memory": {
+    "count": 0,
+    "last_recall": null,
+    "pinned": 0,
+    "recent": [],
+    "tombstones": 0
+  },
+  "now": 900.0,
+  "relationship": {
+    "attachment_style": "secure",
+    "bids": 0.0,
+    "closeness": 0.5,
+    "conflict": 0.0,
+    "trust": 0.5
+  },
+  "seen": {
+    "8b336750aac42a94": 300.0,
+    "ba120377e35c39e3": 600.0,
+    "dfb0354180674cd9": 900.0
+  },
+  "session_id": "cli-demo",
+  "settings": {
+    "boundary_enabled": true,
+    "crisis_safety_enabled": true,
+    "proactive_send": false,
+    "safety_enabled": false
+  },
+  "turn": 3,
+  "version": 1
+}

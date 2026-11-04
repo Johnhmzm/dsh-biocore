@@ -1,14 +1,15 @@
 {
-  "name": "dsh-biocore-ui",
-  "version": "0.1.0",
-  "private": true,
+  "name": "dsh-biocore",
+  "version": "0.2.0",
   "type": "module",
-  "description": "BioCore DSH UI skeleton: right-sidebar tab plus a read-only /api/biocore/state projection of the dsh_adapter state JSON.",
+  "description": "BioCore DSH UI: per-session state tab, standalone instrument panel, /api/biocore/state, session/event one_turn updates, /bio sync.",
   "main": "lib/index.js",
   "files": [
     "lib",
     "cordis.patch.yml",
-    "README.md"
+    "README.md",
+    "ui",
+    "python"
   ],
   "dsh": {
     "bundle": {
@@ -25,7 +26,7 @@
       "requiresRestart": true
     },
     "permissions": {
-      "files": "read-only",
+      "files": "read-write",
       "network": "none",
       "commands": "none",
       "credentials": []
@@ -41,6 +42,15 @@
     "./package.json": "./package.json"
   },
   "scripts": {
-    "selftest": "node test/selftest.mjs"
-  }
+    "selftest": "node test/selftest.mjs",
+    "selftest:204": "node test/selftest-task204.mjs",
+    "selftest:210": "node test/selftest-task210.mjs",
+    "hook": "node test/hook-wiring.mjs",
+    "demo": "node test/bio-sync.mjs"
+  },
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "biocore"
+  ]
 }
