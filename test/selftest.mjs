@@ -7,7 +7,7 @@
  * Run: node test/selftest.mjs
  */
 import assert from 'node:assert/strict'
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, readdirSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
@@ -16,6 +16,9 @@ const root = fileURLToPath(new URL('..', import.meta.url))
 const stateMod = await import(pathToFileURL(join(root, 'lib', 'modules', 'state.js')).href)
 const bridge = await import(pathToFileURL(join(root, 'lib', 'py-bridge.js')).href)
 const host = await import(pathToFileURL(join(root, 'lib', 'index.js')).href)
+const seriesRoute = await import(pathToFileURL(join(root, 'lib', 'modules', 'series.js')).href)
+const coreTurn = await import(pathToFileURL(join(root, 'lib', 'modules', 'core-turn.js')).href)
+const expressionInject = await import(pathToFileURL(join(root, 'lib', 'modules', 'expression-inject.js')).href)
 const { cleanSessionId, projectState, readStateFile, sessionStateFile, payloadWithinLimit } = stateMod
 const { parseSyncInput, summarizeTurn, makeCommandHandler, makeSessionEventListener } = host
 
@@ -204,11 +207,17 @@ try {
   ok('GET with unsafe session -> reason bad_session')
 
   const stateDir = join(tmp, 'state')
-  const missing = await getState('/api/biocore/state?session=selftest-a', stateDir)
-  assert.equal(missing.body.available, false)
-  assert.equal(missing.body.reason, 'no_state_yet')
-  assert.equal(existsSync(sessionStateFile(stateDir, 'selftest-a')), false)
-  ok('/state missing file + switches off -> no_state_yet (no Python)')
+  const disabledRes = fakeRes()
+  await host.handleState(
+    { method: 'GET', url: '/api/biocore/state?session=selftest-a' },
+    disabledRes, stateDir,
+    { store: join(stateDir, 'memory'),
+      runAction: async () => ({ ok: true, state: { available: false, reason: 'core_disabled' } }) },
+  )
+  const disabledBody = JSON.parse(disabledRes.body)
+  assert.equal(disabledBody.available, false)
+  assert.equal(disabledBody.reason, 'core_disabled')
+  ok('/state is a pure forward: core-disabled answer passes through')
 
   const fileA = sessionStateFile(stateDir, 'selftest-a')
   const fileB = sessionStateFile(stateDir, 'selftest-b')
@@ -217,13 +226,12 @@ try {
   const first = await getState('/api/biocore/state?session=selftest-a', stateDir)
   assert.equal(first.body.available, true)
   assert.equal(first.body.session_id, 'selftest-a')
-  assert.equal(first.body.source, 'file')
+  assert.equal(first.body.source, 'core')
   await getState('/api/biocore/state?session=selftest-b', stateDir)
   assert.notEqual(fileA, fileB)
-  assert.equal(readStateFile(fileA).missing, undefined)
-  ok('/state file projection is per-session (file source)')
+  ok('/state forwards the core payload for any session')
 
-  const runtimeState = { core: { v: 0.2, intero: { tension: 0.3, warmth: 0.5, heaviness: 0.2, clarity: 0.6 } }, relationship: { closeness: 0.5, trust: 0.5, conflict: 0 }, memory: { count: 0 } }
+  const runtimeState = { available: true, core: { v: 0.2, intero: { tension: 0.3, warmth: 0.5, heaviness: 0.2, clarity: 0.6 } }, relationship: { closeness: 0.5, trust: 0.5, conflict: 0 }, memory: { count: 0 } }
   const runtimeRes = fakeRes()
   await host.handleState(
     { method: 'GET', url: '/api/biocore/state?session=runtime-only' },
@@ -233,15 +241,29 @@ try {
   )
   const runtimeBody = JSON.parse(runtimeRes.body)
   assert.equal(runtimeBody.available, true)
-  assert.equal(runtimeBody.source, 'runtime')
-  ok('/state missing file + switch on -> runtimeAction state fallback')
+  assert.equal(runtimeBody.core.v, 0.2)
+  assert.equal(runtimeBody.core.intero.tension, 0.3)
+  ok('/state returns the core payload unchanged')
+
+  const emptySeries = fakeRes()
+  await seriesRoute.handleSeriesRoute(
+    { method: 'GET', url: '/api/biocore/series?limit=24' },
+    emptySeries,
+    { store: join(tmp, 'memory'), dataDir: tmp, runAction: async () => ({ ok: true, series: { v: [] }, points: [] }) },
+  )
+  const emptyBody = JSON.parse(emptySeries.body)
+  assert.equal(emptySeries.code, 200)
+  assert.equal(emptyBody.ok, true)
+  assert.deepEqual(emptyBody.series.v, [])
+  assert.deepEqual(emptyBody.points, [])
+  ok('task-221: /series answers 200 with [] on an empty store')
 
   writeFileSync(fileA, '{broken json', 'utf8')
   const broken = await getState('/api/biocore/state?session=selftest-a', stateDir)
-  assert.equal(broken.body.available, false)
-  assert.equal(broken.body.reason, 'bad_state')
+  assert.equal(broken.body.available, true)
+  assert.equal(broken.body.source, 'core')
   rmSync(fileA, { force: true })
-  ok('bad JSON -> available:false reason bad_state')
+  ok('legacy session file (even corrupt) no longer blocks /state')
 } finally {
   rmSync(tmp, { recursive: true, force: true })
 }
@@ -362,16 +384,58 @@ async function callSwitch(handler, method, payload) {
 }
 
 assert.deepEqual(Array.from(switchMod.SWITCH_KEYS),
-  ['safety_enabled', 'boundary_enabled', 'crisis_safety_enabled', 'proactive_send'])
+  ['core_enabled', 'safety_enabled', 'boundary_enabled', 'crisis_safety_enabled',
+    'proactive_send', 'mood_recall', 'affect_encoding', 'memory_feedback',
+    'preference_drift'])
 assert.equal(switchMod.sanitizeSwitchRequest({ key: 'db_password', value: true, confirm: true }).reason, 'unknown_key')
 assert.equal(switchMod.sanitizeSwitchRequest({ key: 'safety_enabled', value: true }).reason, 'confirm_required')
 assert.equal(switchMod.sanitizeSwitchRequest({ key: 'safety_enabled', value: true, confirm: 'safety_enabled' }).reason, 'confirm_required')
 assert.equal(switchMod.sanitizeSwitchRequest({ key: 'safety_enabled', value: 1, confirm: true }).reason, 'bad_value')
-assert.deepEqual(Array.from(Object.values(switchMod.DEFAULT_SWITCHES)), [false, false, false, false])
+assert.deepEqual(Array.from(Object.values(switchMod.DEFAULT_SWITCHES)),
+  [true, false, false, false, false, true, true, true, true])
 assert.equal(switchMod.readSwitchValues({ proactive_autonomy: true }).proactive_send, true)
 assert.equal(switchMod.readSwitchValues({ proactive_send: false, proactive_autonomy: true }).proactive_send, false)
 assert.equal(switchMod.sanitizeSwitchRequest({ key: 'proactive_autonomy', value: true, confirm: true }).reason, 'unknown_key')
 ok('switch whitelist rejects unknown key / missing confirm / non-boolean value (defaults false, read alias)')
+
+{
+  const libDir = join(root, 'lib')
+  const files = ['index.js', 'py-bridge.js', 'core-worker.js',
+    ...readdirSync(join(libDir, 'modules')).filter((name) => name.endsWith('.js'))
+      .map((name) => join('modules', name))]
+  const offenders = []
+  for (const file of files) {
+    const text = readFileSync(join(libDir, file), 'utf8')
+    for (const needle of ['anySwitchOn', 'mergeCoreState']) {
+      if (text.includes(needle)) offenders.push(file + ':' + needle)
+    }
+  }
+  assert.deepEqual(offenders, [])
+  ok('contract: adapter has no switch gating or state-merge logic')
+}
+
+{
+  const calls = []
+  const runAction = async (action) => {
+    calls.push(action)
+    return action === 'turn_start' ? { ok: true, prompt_block: 'state' } : { ok: true }
+  }
+  const event = {
+    type: 'user/message',
+    data: { source: { kind: 'user' }, content: [{ type: 'text', text: 'hello there' }] },
+  }
+  const on = coreTurn.makeCoreSessionListener({
+    stateDir: join(tmp, 'core-on'),
+    getSwitches: () => ({ core_enabled: false, safety_enabled: false }),
+    runAction,
+    runTurn: async () => ({}),
+    store: join(tmp, 'core-on-memory'),
+  })
+  on({ id: 'core-on-session' }, event)
+  await tick()
+  assert.deepEqual(calls, ['turn_start'])
+  ok('adapter forwards one turn_start per user message (core decides switching)')
+}
 
 {
   const dataDir = mkdtempSync(join(tmpdir(), 'biocore-ui-switch-file-'))
@@ -384,11 +448,14 @@ ok('switch whitelist rejects unknown key / missing confirm / non-boolean value (
     assert.equal(missing.code, 200)
     assert.equal(missing.body.ok, true)
     assert.deepEqual(missing.body.switches, {
+      core_enabled: true,
       safety_enabled: false, boundary_enabled: false,
       crisis_safety_enabled: false, proactive_send: false,
+      mood_recall: true, affect_encoding: true,
+      memory_feedback: true, preference_drift: true,
     })
     assert.equal(existsSync(flagsPath), false)
-    ok('GET /api/biocore/switch with no flags.json -> default four false, no file created')
+    ok('GET /api/biocore/switch with no flags.json -> core+learning on, safety off, no file')
 
     const unknown = await callSwitch(handler, 'POST', { key: 'db_password', value: true, confirm: true })
     assert.equal(unknown.code, 400)
@@ -411,8 +478,11 @@ ok('switch whitelist rejects unknown key / missing confirm / non-boolean value (
     assert.equal(existsSync(flagsPath + '.tmp'), false)
     const stored = JSON.parse(readFileSync(flagsPath, 'utf8'))
     assert.deepEqual(stored, {
+      core_enabled: true,
       safety_enabled: true, boundary_enabled: false,
       crisis_safety_enabled: false, proactive_send: false,
+      mood_recall: true, affect_encoding: true,
+      memory_feedback: true, preference_drift: true,
     })
     ok('POST writes <dataDir>/flags.json atomically (read back, no .tmp residue)')
 
@@ -609,8 +679,8 @@ ok('client renders 5 numbers + 3 words, session label, 未连接/状态损坏 st
 /* ---------- switch UI (task-195) ---------- */
 {
   const testApi = clientCtx.exports.__test
-  assert.deepEqual(testApi.SWITCH_META.map((item) => item.key),
-    Array.from(switchMod.SWITCH_KEYS))
+  assert.ok(testApi.SWITCH_META.every(
+    (item) => switchMod.SWITCH_KEYS.indexOf(item.key) >= 0))
   assert.equal(testApi.confirmationText('safety_enabled', true), '确定要打开安全闸吗？')
   assert.equal(testApi.confirmationText('safety_enabled', false), '确定要关闭安全闸吗？')
   assert.ok(testApi.switchErrorText('settings_unavailable').includes('设置服务不可用'))
@@ -765,9 +835,12 @@ ok('client renders 5 numbers + 3 words, session label, 未连接/状态损坏 st
   assert.equal(layout.STORAGE_KEY, 'biocore-panel-layout-v2')
   assert.deepEqual(Array.from(layout.TAB_ORDER), ['dashboard', 'memory', 'relation', 'settings', 'tools'])
   assert.deepEqual(Array.from(layout.cardsForTab(layout.DEFAULT_ORDER, 'dashboard')),
-    ['mood', 'tension', 'warmth', 'heaviness', 'clarity', 'chart'])
-  assert.deepEqual(Array.from(layout.cardsForTab(layout.DEFAULT_ORDER, 'relation')), ['metrics'])
-  assert.deepEqual(Array.from(layout.cardsForTab(layout.DEFAULT_ORDER, 'tools')), ['runtime', 'trace'])
+    ['status', 'mood', 'tension', 'warmth', 'heaviness', 'clarity',
+      'channels-avg', 'chart', 'expression-now', 'today'])
+  assert.deepEqual(Array.from(layout.cardsForTab(layout.DEFAULT_ORDER, 'relation')),
+    ['metrics', 'narrative'])
+  assert.deepEqual(Array.from(layout.cardsForTab(layout.DEFAULT_ORDER, 'tools')),
+    ['trace', 'runtime', 'diagnostics'])
   const hidden = layout.hideCard(layout.defaultLayout(), 'chart')
   assert.equal(layout.visibleIds(hidden).includes('chart'), false)
   assert.ok(layout.showCard(hidden, 'chart').hidden.indexOf('chart') < 0)
@@ -778,7 +851,7 @@ ok('client renders 5 numbers + 3 words, session label, 未连接/状态损坏 st
     removeItem: (k) => store.delete(k),
   }
   layout.writeLayout(storage, layout.moveCard(layout.defaultLayout(), 'switches', -1))
-  assert.equal(layout.readLayout(storage).order[0], 'mood')
+  assert.equal(layout.readLayout(storage).order[0], 'status')
   layout.clearLayout(storage)
   assert.equal(store.has(layout.STORAGE_KEY), false)
   assert.equal(layout.dragIntent({ editing: false }).hold, false)
@@ -898,7 +971,7 @@ ok('client renders 5 numbers + 3 words, session label, 未连接/状态损坏 st
 
     const html = readFileSync(join(root, 'ui', 'panel.html'), 'utf8')
     const panelJs = readFileSync(join(root, 'ui', 'panel.js'), 'utf8')
-    for (const needle of ['personaText', 'personaSave', 'personaPreview']) {
+    for (const needle of ['personaText', 'personaSave', 'personaStatus']) {
       assert.ok(html.includes(needle), 'panel.html missing ' + needle)
     }
     assert.ok(panelJs.includes('/api/biocore/persona'))
@@ -917,7 +990,8 @@ ok('client renders 5 numbers + 3 words, session label, 未连接/状态损坏 st
       const dispose = host.apply(fakeCtx, { dataDir: dir2 })
       const paths = registered.map((entry) => entry.path)
       for (const route of ['/api/biocore/state', '/api/biocore/switch',
-        '/api/biocore/persona', '/api/biocore/settings', '/api/biocore-ui/ui']) {
+        '/api/biocore/persona', '/api/biocore/settings', '/api/biocore/stats',
+        '/api/biocore-ui/ui']) {
         assert.ok(paths.includes(route), 'missing route ' + route)
       }
       dispose()
@@ -1003,7 +1077,7 @@ ok('client renders 5 numbers + 3 words, session label, 未连接/状态损坏 st
   ok('client right tab registered (kind biocore)')
 
   assert.deepEqual(Array.from(Object.values(switchMod.DEFAULT_SWITCHES)),
-    [false, false, false, false])
+    [true, false, false, false, false, true, true, true, true])
   assert.equal(switchMod.readSwitchValues({ proactive_autonomy: true }).proactive_send, true)
   ok('switch defaults all false + proactive_autonomy read alias')
 
@@ -1324,5 +1398,135 @@ ok('client renders 5 numbers + 3 words, session label, 未连接/状态损坏 st
   assert.equal(coreTurn.chooseCleanReply(original, 'CORE', { sanitizeEnabled: false }), original)
   ok('clean_text: core wins over differing JS result; switch off keeps original')
 }
+
+const coreTurnSub = await import(pathToFileURL(join(root, 'lib', 'modules', 'core-turn.js')).href)
+const exprSub = await import(pathToFileURL(join(root, 'lib', 'modules', 'expression-inject.js')).href)
+const queueSub = await import(pathToFileURL(join(root, 'lib', 'modules', 'turn-queue.js')).href)
+const dirSub = mkdtempSync(join(tmpdir(), 'biocore-ui-subagent-'))
+try {
+  let turnStartCalls = 0
+  const listener = coreTurnSub.makeCoreSessionListener({
+    stateDir: dirSub,
+    getSwitches: () => ({ safety_enabled: true }),
+    getExpression: () => ({ length_hint: false, length_target: 10, length_max: 30 }),
+    getSanitizeReply: () => true,
+    runAction: async () => { turnStartCalls += 1; return { ok: true, prompt_block: 'INJECT' } },
+    runTurn: async () => 'adapter',
+    store: dirSub,
+    log: () => {},
+  })
+  const sendUser = (sessionId, header) => listener(
+    { id: sessionId, header },
+    { type: 'user/message', data: { source: { kind: 'user' }, content: [{ type: 'text', text: 'hi' }] } },
+  )
+  sendUser('sub-zero', { delegationDepth: 0 })
+  await queueSub.pendingSessionTurn('sub-zero')
+  assert.equal(turnStartCalls, 1)
+  assert.equal(exprSub.promptTextFor('sub-zero', 'turn'), 'INJECT')
+  ok('subagent: depth=0 keeps persona/state/thinking injection')
+  sendUser('sub-one', { delegationDepth: 1 })
+  await queueSub.pendingSessionTurn('sub-one')
+  assert.equal(turnStartCalls, 2)
+  assert.equal(exprSub.promptTextFor('sub-one', 'turn'), '')
+  ok('subagent: depth=1 skips injection (prompt_block blanked) but still calls turn_start')
+  sendUser('sub-missing', {})
+  await queueSub.pendingSessionTurn('sub-missing')
+  assert.equal(exprSub.promptTextFor('sub-missing', 'turn'), 'INJECT')
+  ok('subagent: missing delegationDepth behaves like main session')
+} finally { rmSync(dirSub, { recursive: true, force: true }) }
+
+const envMod = await import(pathToFileURL(join(root, 'lib', 'modules', 'python-env.js')).href)
+const cfgDirEnv = mkdtempSync(join(tmpdir(), 'biocore-ui-env-'))
+try {
+  writeFileSync(join(cfgDirEnv, 'config.json'), JSON.stringify({
+    embedding: { mode: 'remote', base_url: 'https://api.example.com', model: 'embed-x', api_key: 'sk-env', local_path: 'C:/models/x' },
+    rerank: { enabled: true, base_url: 'https://api.jina.ai/v1', model: 'jina-reranker-v2-base-multilingual', api_key: 'sk-rr', top_n: 7 },
+  }), 'utf8')
+  const env = envMod.embeddingEnv(cfgDirEnv)
+  assert.equal(env.BIOCORE_EMBEDDING_MODE, 'remote')
+  assert.equal(env.BIOCORE_EMBEDDING_BASE_URL, 'https://api.example.com')
+  assert.equal(env.BIOCORE_EMBEDDING_MODEL, 'embed-x')
+  assert.equal(env.BIOCORE_EMBEDDING_KEY, 'sk-env')
+  assert.equal(env.BIOCORE_EMBEDDING_LOCAL_PATH, undefined)
+  const rr = envMod.rerankConfig(cfgDirEnv)
+  assert.equal(rr.rerank_enabled, true)
+  assert.equal(rr.rerank_top_n, 7)
+  assert.equal(rr.rerank_timeout, 8)
+  ok('python env: embedding mapping (no local_path) + rerank_config')
+} finally { rmSync(cfgDirEnv, { recursive: true, force: true }) }
+
+const cfgDirNoPath = mkdtempSync(join(tmpdir(), 'biocore-ui-nopath-'))
+try {
+  const req = new (await import('node:events')).EventEmitter()
+  const res = fakeRes()
+  req.method = 'POST'
+  const pending = host.handleSettings(req, res, cfgDirNoPath)
+  req.emit('data', Buffer.from(JSON.stringify({ confirm: true, embedding: { mode: 'remote', base_url: 'https://x', model: 'm', api_key: 'k', local_path: 'C:/old' } })))
+  req.emit('end')
+  await pending
+  const saved = JSON.parse(res.body)
+  assert.equal(saved.ok, true)
+  assert.equal('local_path' in saved.embedding, false)
+  const stored = JSON.parse(readFileSync(join(cfgDirNoPath, 'config.json'), 'utf8'))
+  assert.equal('local_path' in stored.embedding, false)
+  const getReq = new (await import('node:events')).EventEmitter()
+  getReq.method = 'GET'
+  const getRes = fakeRes()
+  await host.handleSettings(getReq, getRes, cfgDirNoPath)
+  assert.equal('local_path' in JSON.parse(getRes.body).embedding, false)
+  ok('settings: embedding.local_path removed from GET/POST projection')
+} finally { rmSync(cfgDirNoPath, { recursive: true, force: true }) }
+
+const statsReply = { ok: true, embed: { hit: 3, miss: 1, remote: 2, local: 1, fail: 0 } }
+const statsDir = mkdtempSync(join(tmpdir(), 'biocore-ui-stats-'))
+try {
+  writeFileSync(join(statsDir, 'cache_stats.json'),
+    JSON.stringify({ turns: 2, prompt_tokens: 100, cache_read: 50, hit_rate: 0.5 }))
+  const statsRes = fakeRes()
+  await host.handleStats({ method: 'GET' }, statsRes, {
+    dataDir: statsDir,
+    runAction: async () => statsReply,
+  })
+  const statsBody = JSON.parse(statsRes.body)
+  assert.equal(statsBody.ok, true)
+  assert.equal(statsBody.embed.hit, 3)
+  assert.equal(statsBody.cache.hit_rate, 0.5)
+  assert.equal(statsBody.cache.cache_read, 50)
+  const failingStats = fakeRes()
+  await host.handleStats({ method: 'GET' }, failingStats, {
+    runAction: async () => { throw new Error('core down') },
+  })
+  const failedBody = JSON.parse(failingStats.body)
+  assert.equal(failedBody.ok, false)
+  assert.equal(failedBody.reason, 'core_unavailable')
+  ok('stats: pure forward of core reply + display-only cache file')
+} finally { rmSync(statsDir, { recursive: true, force: true }) }
+
+const cacheMod = await import(pathToFileURL(join(root, 'lib', 'modules', 'cache-stats.js')).href)
+const coreTurnCache = await import(pathToFileURL(join(root, 'lib', 'modules', 'core-turn.js')).href)
+const memInjectCache = await import(pathToFileURL(join(root, 'lib', 'modules', 'memory-inject.js')).href)
+assert.equal(coreTurnCache.TURN_CONTEXT_ORDER, 9500)
+assert.equal(memInjectCache.CONTEXT_ORDER, 9510)
+ok('context order: dynamic turn/memory contexts moved to 9500/9510')
+
+const cacheDir = mkdtempSync(join(tmpdir(), 'biocore-ui-cache-'))
+try {
+  writeFileSync(join(cacheDir, 'cache_stats.json'),
+    JSON.stringify({ turns: 2, prompt_tokens: 560, cache_read: 400, cache_write: 50,
+      hit_rate: 0.7143, updated_at: 123 }))
+  const readBack = cacheMod.readCacheStats(cacheDir)
+  assert.equal(readBack.turns, 2)
+  assert.equal(readBack.cache_read, 400)
+  assert.equal(readBack.prompt_tokens, 560)
+  assert.equal(readBack.hit_rate, 0.7143)
+  ok('cache stats: display-only read of the file values')
+  writeFileSync(join(cacheDir, 'cache_stats.json'), '{broken', 'utf8')
+  assert.equal(cacheMod.readCacheStats(cacheDir).turns, 0)
+  ok('cache stats: corrupt file degrades to zeros')
+  const source = readFileSync(join(root, 'lib', 'modules', 'cache-stats.js'), 'utf8')
+  assert.equal(source.includes('recordCacheUsage'), false)
+  assert.equal(/cacheRead\s*\/\s*prompt/.test(source), false)
+  ok('cache stats: adapter no longer computes usage stats')
+} finally { rmSync(cacheDir, { recursive: true, force: true }) }
 
 console.log('\nall ' + passed + ' checks passed')

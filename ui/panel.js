@@ -1,27 +1,97 @@
-/** BioCore instrument panel: vanilla JS, no external dependencies.
+/** BioCore instrument panel runtime — vanilla JS, no dependencies.
  *
- * Reads GET /api/biocore/state?session=<id> every 2 seconds. The /series
- * endpoint is optional: if it is absent we draw from the state extras
- * (history / memory_recent) and never block rendering on it.
+ * Data contract (unchanged): GET /api/biocore/state?session=<id> is the single
+ * polling source; /series /stats /trace /persona /settings /switch are additive
+ * reads plus the two write paths the panel is allowed to touch.
+ *
+ * Pages are classified once, hard:
+ *   dashboard data only  memory data only  relation data only
+ *   settings controls only  tools diagnostics only
  */
 (function () {
   'use strict'
 
+  var QUERY = new URLSearchParams(window.location.search)
+  var SESSION = (QUERY.get('session') || '').trim()
+  var INITIAL_TAB = (QUERY.get('tab') || 'dashboard').trim()
+  var THEME = (QUERY.get('theme') || '').trim()
+
   var POLL_MS = 5000
-  var SESSION = (new URLSearchParams(window.location.search).get('session') || '').trim()
+  var STATS_MS = 30000
+  var PAGE_START = Date.now()
+
   var SWITCHES = [
-    { key: 'safety_enabled', label: '安全闸', desc: '打开后可能拦截/改写回复' },
-    { key: 'boundary_enabled', label: '底线', desc: '越界时先守住边界' },
-    { key: 'crisis_safety_enabled', label: '危机兜底', desc: '危机信号优先安全' },
-    { key: 'proactive_send', label: '主动回复', desc: '允许私聊主动发消息' },
+    { key: 'core_enabled', label: '核心', desc: '关掉后整条核心链不运行', group: '总开关' },
+    { key: 'safety_enabled', label: '安全闸', desc: '可能拦截或改写回复', group: '安全' },
+    { key: 'boundary_enabled', label: '底线', desc: '越界时先守边界', group: '安全' },
+    { key: 'crisis_safety_enabled', label: '危机兜底', desc: '危机信号优先安全', group: '安全' },
+    { key: 'proactive_send', label: '主动回复', desc: '允许私聊主动发消息', group: '主动' },
+    { key: 'mood_recall', label: '情绪匹配召回', desc: '召回偏向当前心情', group: '学习' },
+    { key: 'affect_encoding', label: '编码带情绪', desc: '写记忆时带情绪强度', group: '学习' },
+    { key: 'memory_feedback', label: '回忆回灌情绪', desc: '召回的记忆小幅回灌心情', group: '学习' },
+    { key: 'preference_drift', label: '主题偏好漂移', desc: '重复主题缓慢调整偏好', group: '学习' },
   ]
+
+  var EMPTY_COPY = {
+    no_state_yet: ['这个会话还没聊过', '发一条消息后就有状态'],
+    request_failed: ['连不上宿主', '确认 DSH 与插件已加载，面板每 5 秒自动重试'],
+    bad_state: ['状态文件坏了', '删掉该会话的状态文件后重试'],
+  }
+  var STAT_WORDS = {
+    tension: ['松弛', '适中', '略紧'],
+    warmth: ['偏冷', '适中', '偏暖'],
+    heaviness: ['轻', '适中', '偏沉'],
+    clarity: ['模糊', '适中', '清醒'],
+  }
+  var STAT_NOTES = {
+    tension: ['松下来了', '还压得住', '明显绷着'],
+    warmth: ['有点冷，想靠近', '温度刚好', '心里暖，愿意靠近'],
+    heaviness: ['轻一些，能提劲', '有点分量，还扛得住', '沉下去了，先放一放'],
+    clarity: ['有点糊，慢一点', '还算清楚，能接话', '想得清楚，状态在线'],
+  }
+  var KNOWN_SINCE_KEY = 'biocore-known-since-v1'
+  var MODEL_DRAFT_KEY = 'biocore-panel-model-draft-v1'
+  var TRACE_LIMIT = 5
+  var LONG_PRESS_MS = 400
+  var MOVE_CANCEL_PX = 8
+
   var lastSuccess = 0
   var lastData = null
   var seriesPoints = null
-  var localPoints = []
   var switchBusy = false
+  var personaText = ''
+  var personaDirty = false
+  var toastTimer = null
+  var bootDone = false
 
   function $(id) { return document.getElementById(id) }
+
+  /** Theme: the host may pin <html data-theme>; ?theme= wins for previews,
+   *  otherwise prefers-color-scheme decides inside CSS. */
+  function applyTheme() {
+    if (THEME === 'light' || THEME === 'dark') {
+      document.documentElement.setAttribute('data-theme', THEME)
+    }
+    var scheme = window.matchMedia ? window.matchMedia('(prefers-color-scheme: dark)') : null
+    if (!scheme || !scheme.addEventListener) return
+    scheme.addEventListener('change', function () {
+      if (THEME === 'light' || THEME === 'dark') return
+      renderChart(lastData)
+    })
+  }
+
+  function chartPalette() {
+    var styles = window.getComputedStyle(document.documentElement)
+    var read = function (name, fallback) {
+      var value = styles.getPropertyValue(name)
+      return value && value.trim() ? value.trim() : fallback
+    }
+    return {
+      accent: read('--accent', '#6d5dfc'),
+      ink: read('--ink', '#333333'),
+      grid: read('--shadow-dark', '#b8bcc2'),
+    }
+  }
 
   function fmt(value, digits) {
     var number = Number(value)
@@ -32,6 +102,16 @@
   function setText(id, value) {
     var el = $(id)
     if (el) el.textContent = value
+  }
+
+  function clamp01(value) {
+    var number = Number(value)
+    if (!Number.isFinite(number)) return 0
+    return Math.max(0, Math.min(1, number))
+  }
+
+  function pct(value) {
+    return Math.round(clamp01(value) * 100) + '%'
   }
 
   /** Presentation helper: pick a one-line label out of string/object payloads. */
@@ -63,15 +143,15 @@
 
   function updateStatusClock() {
     if (!lastSuccess) return
+    if (lastData && lastData.available === false) return
     var seconds = Math.max(0, Math.round((Date.now() - lastSuccess) / 1000))
-    setStatus(true, '已连接 · ' + seconds + ' 秒前')
+    setStatus(true, '已连接 ' + seconds + ' 秒前')
   }
 
   function setBar(id, ratio) {
     var el = $(id)
     if (!el) return
-    var value = Math.max(0, Math.min(1, Number(ratio) || 0))
-    el.style.width = Math.round(value * 100) + '%'
+    el.style.width = pct(ratio)
   }
 
   function formatDelta(previous, current) {
@@ -102,10 +182,13 @@
     el.classList.toggle('down', delta.charAt(0) === '-')
   }
 
-  var EMPTY_COPY = {
-    no_state_yet: ['这个会话还没聊过', '发一条消息后就有状态'],
-    request_failed: ['连不上宿主', '确认 3081 上的 DSH 与插件已加载'],
-    bad_state: ['状态文件坏了', '删掉该会话的状态文件后重试'],
+  function paintArrow(id, delta) {
+    var el = $(id)
+    if (!el) return
+    var direction = arrowFor(delta)
+    el.textContent = direction
+    el.classList.toggle('up', direction === '↑')
+    el.classList.toggle('down', direction === '↓')
   }
 
   function renderEmpty(kind) {
@@ -122,34 +205,8 @@
 
   function shortSession() {
     if (!SESSION) return '-'
-    return SESSION.length > 10 ? SESSION.slice(0, 8) : SESSION
+    return SESSION.length > 12 ? SESSION.slice(0, 10) + '…' : SESSION
   }
-
-  function isPlausibleMs(ts) {
-    return Number.isFinite(ts) && ts > 1000000000000
-  }
-
-  function timeLabel(ts) {
-    if (!isPlausibleMs(ts)) return '--:--'
-    var date = new Date(ts)
-    var hh = String(date.getHours()).padStart(2, '0')
-    var mm = String(date.getMinutes()).padStart(2, '0')
-    return hh + ':' + mm
-  }
-
-  var STAT_WORDS = {
-    tension: ['松弛', '适中', '略紧'],
-    warmth: ['偏冷', '适中', '偏暖'],
-    heaviness: ['轻', '适中', '偏沉'],
-    clarity: ['模糊', '适中', '清醒'],
-  }
-  var STAT_NOTES = {
-    tension: ['松下来了，不紧绷', '还压得住，但不太放松', '明显绷着，先缓一缓'],
-    warmth: ['有点冷，想要靠近', '温度刚好，慢慢热', '心里暖，愿意靠近'],
-    heaviness: ['轻一些，能提起劲', '有点分量，还扛得住', '沉下去了，先放一放'],
-    clarity: ['有点糊，慢一点', '还算清楚，能接话', '想得清楚，状态在线'],
-  }
-  var KNOWN_SINCE_KEY = 'biocore-known-since-v1'
 
   function statLevel(value) {
     var number = Number(value)
@@ -159,26 +216,12 @@
     return 2
   }
 
-  function paintStatDelta(channel, data, available) {
-    var delta = available ? historyDelta(data, channel) : '—'
-    paintDelta('delta-' + channel, delta)
-    var arrow = $('arrow-' + channel)
-    if (!arrow) return
-    var direction = arrowFor(delta)
-    arrow.textContent = direction
-    arrow.classList.toggle('up', direction === '↑')
-    arrow.classList.toggle('down', direction === '↓')
-  }
-
-  function setStatBar(channel, value) {
-    var ratio = Number.isFinite(Number(value)) ? Math.max(0, Math.min(1, Number(value))) : 0
-    var fill = $('bar-' + channel)
-    if (fill) fill.style.width = Math.round(ratio * 100) + '%'
-    var over = $('over-' + channel)
-    if (over) {
-      over.style.left = '65%'
-      over.style.width = ratio > 0.65 ? Math.round((ratio - 0.65) * 100) + '%' : '0%'
-    }
+  function moodWord(value) {
+    var number = Number(value)
+    if (!Number.isFinite(number)) return '—'
+    if (number > 0.25) return '偏高'
+    if (number < -0.25) return '偏低'
+    return '平稳'
   }
 
   function knownDays() {
@@ -201,16 +244,6 @@
     return '焦虑型'
   }
 
-  function closenessNote(value) {
-    var level = statLevel(value)
-    return ['还不太熟，慢慢来', '挺自然，不装', '很亲近，想粘着'][level]
-  }
-
-  function trustNote(value) {
-    var level = statLevel(value)
-    return ['还在观察你', '慢慢信你', '信你，能交底'][level]
-  }
-
   function memoryKind(text) {
     var value = String(text || '')
     if (/(喜欢|爱|讨厌|偏好|习惯|最怕|想要|想吃)/.test(value)) return '偏好'
@@ -228,164 +261,192 @@
     return Math.round(seconds / 86400) + ' 天前'
   }
 
-  function renderNumbers(data) {
-    var available = data && data.available !== false
-    var intero = (available && data.intero) || {}
-    setText('num-v', available ? fmt(data.v) : '–')
-    setText('num-tension', available ? fmt(intero.tension) : '–')
-    setText('num-warmth', available ? fmt(intero.warmth) : '–')
-    setText('num-heaviness', available ? fmt(intero.heaviness) : '–')
-    setText('num-clarity', available ? fmt(intero.clarity) : '–')
-    setBar('bar-v', available ? (Number(data.v) + 1) / 2 : 0)
-
-    var channels = ['tension', 'warmth', 'heaviness', 'clarity']
-    for (var channelIndex = 0; channelIndex < channels.length; channelIndex += 1) {
-      var channel = channels[channelIndex]
-      var rawValue = available ? intero[channel] : null
-      setText('status-' + channel, available ? STAT_WORDS[channel][statLevel(rawValue)] : '—')
-      setText('note-' + channel, available ? STAT_NOTES[channel][statLevel(rawValue)] : '—')
-      setStatBar(channel, rawValue)
-      paintStatDelta(channel, data, available)
-    }
-
-    // 情绪卡右侧「张力」复用同一份数据（只换 DOM 节点，不改数据）。
-    var emotionTension = available ? intero.tension : null
-    setText('num-emotion-tension', available ? fmt(emotionTension) : '–')
-    setText('note-emotion-tension', available ? STAT_NOTES.tension[statLevel(emotionTension)] : '—')
-    setBar('bar-emotion-tension', emotionTension)
-    paintDelta('delta-emotion-tension', available ? historyDelta(data, 'tension') : '—')
-    var emotionArrow = $('arrow-emotion-tension')
-    if (emotionArrow) {
-      var emotionDirection = arrowFor(available ? historyDelta(data, 'tension') : '—')
-      emotionArrow.textContent = emotionDirection
-      emotionArrow.classList.toggle('up', emotionDirection === '↑')
-      emotionArrow.classList.toggle('down', emotionDirection === '↓')
-    }
-    setText('moodAside', available ? emotionMoodWord(data.v) : '—')
-    setText('moodNote', available ? emotionMoodWord(data.v) : '—')
-
-    var tone = available ? scalarLabel(data.tone, '') : ''
-    setText('word-tone', tone || (available ? '正常' : '–'))
-    setText('word-relation', available ? (scalarLabel(data.relation, '') || '–') : '–')
-    setText('word-autonomy', available ? (scalarLabel(data.autonomy, '') || '–') : '–')
-    if (available) {
-      setText('motivation', data.motivation || '安静待着，等你开口')
-    }
-    var fields = ['v', 'tension', 'warmth', 'heaviness', 'clarity']
-    for (var index = 0; index < fields.length; index += 1) {
-      var delta = available ? historyDelta(data, fields[index]) : '—'
-      paintDelta('delta-' + fields[index], delta)
-    }
-    var arrow = $('arrow-v')
-    if (arrow) {
-      var direction = arrowFor(available ? historyDelta(data, 'v') : '—')
-      arrow.textContent = direction
-      arrow.classList.toggle('up', direction === '↑')
-      arrow.classList.toggle('down', direction === '↓')
-    }
-  }
-
-  function emotionMoodWord(value) {
-    var number = Number(value)
-    if (!Number.isFinite(number)) return '—'
-    if (number > 0.25) return '偏高'
-    if (number < -0.25) return '偏低'
-    return '平稳'
-  }
-
-  function renderMetrics(data) {
-    var box = $('metrics')
-    if (!box) return
-    box.textContent = ''
-    var available = data && data.available !== false
-    var rel = (available && data.relationship_metrics) || {}
-    var closeness = Number(rel.closeness)
-    var trust = Number(rel.trust)
-    var conflict = Number(rel.conflict)
-    var safeCloseness = Number.isFinite(closeness) ? closeness : null
-    var safeTrust = Number.isFinite(trust) ? trust : null
-    var safeConflict = Number.isFinite(conflict) ? conflict : 0
-
-    var grid = document.createElement('div')
-    grid.className = 'relation-grid'
-    var columns = [
-      ['亲近', safeCloseness, closenessNote(safeCloseness)],
-      ['信任', safeTrust, trustNote(safeTrust)],
-    ]
-    for (var i = 0; i < columns.length; i += 1) {
-      var column = document.createElement('div')
-      column.className = 'relation-col'
-      var label = document.createElement('span')
-      label.className = 'relation-label'
-      label.textContent = columns[i][0]
-      var value = document.createElement('strong')
-      value.className = 'relation-value'
-      value.textContent = available && columns[i][1] !== null ? fmt(columns[i][1]) : '–'
-      var note = document.createElement('p')
-      note.className = 'relation-note'
-      note.textContent = available ? columns[i][2] : '—'
-      column.appendChild(label)
-      column.appendChild(value)
-      column.appendChild(note)
-      grid.appendChild(column)
-    }
-    box.appendChild(grid)
-
-    var count = Number(rel.conflict_count)
-    if (!Number.isFinite(count)) count = safeConflict > 0 ? Math.round(safeConflict * 10) : 0
-    var foot = document.createElement('div')
-    foot.className = 'relation-foot'
-    foot.textContent = available
-      ? '认识 ' + knownDays() + ' 天 · 冲突 ' + count + ' 次 · 依恋 ' + attachmentOf(safeTrust || 0, safeCloseness || 0, safeConflict)
-      : '认识 — 天 · 冲突 — 次 · 依恋 —'
-    box.appendChild(foot)
-  }
-
-  function renderStats(data) {
-    var available = data && data.available !== false
-    setText('statMood', available ? fmt(data.v) : '–')
-    var relation = available && data.relation ? data.relation.stage : ''
-    var rel = available && data.relationship_metrics ? Number(data.relationship_metrics.closeness) : NaN
-    setText('statRelation', relation || (Number.isFinite(rel) ? fmt(rel) : '–'))
-    setText('statMemory', String(available && typeof data.memory_count === 'number' ? data.memory_count : 0))
-    var total = available && typeof data.memory_count === 'number' ? data.memory_count : 0
-    var capacity = Math.max(0, Math.min(1, total / 200))
-    var fill = $('capFill')
-    if (fill) fill.style.width = Math.round(capacity * 100) + '%'
-    setText('capText', total + ' / 200')
-  }
-
-  function renderMemorySummary(data) {
-    var available = data && data.available !== false
-    var rows = available && Array.isArray(data.memory_recent) ? data.memory_recent : []
-    var total = available && typeof data.memory_count === 'number' ? data.memory_count : rows.length
-    var today = 0
+  function startOfToday() {
     var dayStart = new Date()
     dayStart.setHours(0, 0, 0, 0)
-    for (var i = 0; i < rows.length; i += 1) {
-      var ts = Number(rows[i] && rows[i].ts)
-      if (Number.isFinite(ts) && ts > 1000000000000 && ts >= dayStart.getTime()) today += 1
-    }
-    setText('memTotal', String(total))
-    setText('memToday', String(available ? today : '—'))
-    setText('memRecall', '—')
+    return dayStart.getTime()
   }
 
-  function renderRuntime(data) {
+  /* ------------------------------------------------------------ 仪表盘 --- */
+
+  function renderMetrics(data) {
     var available = data && data.available !== false
-    var seconds = Math.max(0, Math.round((Date.now() - PAGE_START) / 1000))
-    var uptime = seconds < 60 ? seconds + ' 秒'
-      : (seconds < 3600 ? Math.round(seconds / 60) + ' 分钟' : Math.round(seconds / 3600) + ' 小时')
-    setText('runtimeUptime', uptime)
-    var turns = available && Array.isArray(data.history) ? data.history.length : '—'
-    setText('runtimeTurns', String(turns))
-    var mode = $('embeddingMode')
-    setText('runtimeVector', mode ? (mode.value || 'auto') : '—')
+    var intero = (available && data.intero) || {}
+
+    setText('moodValue', available ? fmt(data.v) : '—')
+    setText('moodWord', available ? moodWord(data.v) : '')
+    setBar('moodBar', available ? (Number(data.v) + 1) / 2 : 0)
+    var moodDelta = available ? historyDelta(data, 'v') : '—'
+    paintDelta('moodDelta', moodDelta)
+    paintArrow('moodArrow', moodDelta)
+
+    setText('tensionValue', available ? fmt(intero.tension) : '—')
+    setText('tensionWord', available ? STAT_WORDS.tension[statLevel(intero.tension)] : '')
+    setBar('tensionBar', intero.tension)
+    var tensionDelta = available ? historyDelta(data, 'tension') : '—'
+    paintDelta('tensionDelta', tensionDelta)
+    paintArrow('tensionArrow', tensionDelta)
+    var over = $('tensionOver')
+    if (over) {
+      var ratio = clamp01(intero.tension)
+      over.style.width = ratio > 0.65 ? Math.round((ratio - 0.65) * 100) + '%' : '0%'
+    }
+
+    var channels = ['warmth', 'heaviness', 'clarity']
+    for (var i = 0; i < channels.length; i += 1) {
+      var channel = channels[i]
+      var raw = available ? intero[channel] : null
+      setText(channel + 'Value', available ? fmt(raw) : '—')
+      setText(channel + 'Status', available ? STAT_WORDS[channel][statLevel(raw)] : '')
+      setText(channel + 'Note', available ? STAT_NOTES[channel][statLevel(raw)] : '')
+      setBar(channel + 'Bar', raw)
+      var channelDelta = available ? historyDelta(data, channel) : '—'
+      paintArrow(channel + 'Arrow', channelDelta)
+      paintDelta(channel + 'Delta', channelDelta)
+    }
+
+    var averages = [
+      ['avgTension', 'tension'], ['avgWarmth', 'warmth'],
+      ['avgHeaviness', 'heaviness'], ['avgClarity', 'clarity'],
+    ]
+    for (var a = 0; a < averages.length; a += 1) {
+      var value = Number(intero[averages[a][1]])
+      setText(averages[a][0], available && Number.isFinite(value) ? fmt(value) : '—')
+    }
+    setText('avgHint', available && Array.isArray(data.history) && data.history.length
+      ? data.history.length + ' 个采样' : '—')
+
+    setText('toneWord', available ? (scalarLabel(data.tone, '') || '正常') : '–')
+    setText('relationWord', available ? (scalarLabel(data.relation, '') || '–') : '–')
+    setText('autonomyWord', available ? (scalarLabel(data.autonomy, '') || '–') : '–')
+    if (available) setText('motivation', data.motivation || '安静待着，等你开口')
   }
+
+  function renderNow(data) {
+    var available = data && data.available !== false
+    var narrative = (available && data.narrative) || {}
+    setText('nowIntent', available ? (String(narrative.intent || '').trim() || '—') : '—')
+    setText('nowLength', available && narrative.length_factor !== undefined
+      ? fmt(narrative.length_factor) : '—')
+    setText('nowInitiative', available && narrative.initiative !== undefined
+      ? fmt(narrative.initiative) : '—')
+    setText('nowBand', available ? (String(narrative.metacog_band || '').trim() || '—') : '—')
+    setText('nowHint', available ? '只读' : '无数据')
+  }
+
+  function renderToday(data) {
+    var available = data && data.available !== false
+    var rows = available && Array.isArray(data.memory_recent) ? data.memory_recent : []
+    var dayStart = startOfToday()
+    var fresh = 0
+    for (var i = 0; i < rows.length; i += 1) {
+      var ts = Number(rows[i] && rows[i].ts)
+      if (Number.isFinite(ts) && ts >= dayStart) fresh += 1
+    }
+    setText('todayMem', available ? String(fresh) : '—')
+    setText('todayTurns', available && Array.isArray(data.history) ? String(data.history.length) : '—')
+    var proactive = available ? Number(data.proactive_sent_today) : NaN
+    setText('todayProactive', Number.isFinite(proactive) ? String(Math.round(proactive)) : '—')
+  }
+
+  function mergePoints(data) {
+    var extras = data && data.available !== false ? data : {}
+    var history = Array.isArray(extras.history) ? extras.history : []
+    if (history.length) {
+      return history.map(function (item) {
+        var ts = Number(item.ts) || 0
+        return { ts: ts < 1e12 ? ts * 1000 : ts, v: Number(item.v) || 0 }
+      })
+    }
+    if (seriesPoints && seriesPoints.length) {
+      return seriesPoints.map(function (item) {
+        var ts = Number(item.ts) || 0
+        return { ts: ts < 1e12 ? ts * 1000 : ts, v: Number(item.v) || 0 }
+      })
+    }
+    return []
+  }
+
+  function drawChartThrough(canvas, points) {
+    if (!canvas) return
+    var width = Math.max(120, Math.round(canvas.clientWidth || 320))
+    var height = Math.max(90, Math.round(canvas.clientHeight || 150))
+    var dpr = window.devicePixelRatio || 1
+    canvas.width = Math.round(width * dpr)
+    canvas.height = Math.round(height * dpr)
+    var ctx = canvas.getContext('2d')
+    if (!ctx) return
+    var palette = chartPalette()
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
+    ctx.clearRect(0, 0, width, height)
+
+    ctx.strokeStyle = palette.grid
+    ctx.globalAlpha = 0.45
+    ctx.lineWidth = 1
+    for (var g = 1; g <= 3; g += 1) {
+      var y = Math.round((height / 4) * g) + 0.5
+      ctx.beginPath()
+      ctx.moveTo(0, y)
+      ctx.lineTo(width, y)
+      ctx.stroke()
+    }
+
+    if (!points.length) return
+
+    var minTs = points[0].ts
+    var maxTs = points[points.length - 1].ts
+    var span = Math.max(1, maxTs - minTs)
+    var pad = 6
+    var usable = height - pad * 2
+
+    function xOf(ts) { return ((ts - minTs) / span) * (width - 2) + 1 }
+    function yOf(v) { return pad + (1 - (Math.max(-1, Math.min(1, v)) + 1) / 2) * usable }
+
+    ctx.globalAlpha = 1
+
+    ctx.beginPath()
+    ctx.moveTo(xOf(points[0].ts), yOf(points[0].v))
+    for (var i = 1; i < points.length; i += 1) ctx.lineTo(xOf(points[i].ts), yOf(points[i].v))
+    ctx.lineTo(xOf(points[points.length - 1].ts), height)
+    ctx.lineTo(xOf(points[0].ts), height)
+    ctx.closePath()
+    ctx.globalAlpha = 0.14
+    ctx.fillStyle = palette.accent
+    ctx.fill()
+    ctx.globalAlpha = 1
+
+    ctx.beginPath()
+    ctx.moveTo(xOf(points[0].ts), yOf(points[0].v))
+    for (var j = 1; j < points.length; j += 1) ctx.lineTo(xOf(points[j].ts), yOf(points[j].v))
+    ctx.strokeStyle = palette.accent
+    ctx.lineWidth = 2
+    ctx.lineJoin = 'round'
+    ctx.lineCap = 'round'
+    ctx.stroke()
+
+    var last = points[points.length - 1]
+    ctx.beginPath()
+    ctx.arc(xOf(last.ts), yOf(last.v), 3.4, 0, Math.PI * 2)
+    ctx.fillStyle = palette.ink
+    ctx.fill()
+  }
+
+  function renderChart(data) {
+    var canvas = $('moodChart')
+    if (!canvas) return
+    var points = mergePoints(data)
+    var empty = $('chartEmpty')
+    setText('chartHint', points.length ? points.length + ' 个采样点' : '—')
+    if (empty) empty.hidden = points.length > 0
+    canvas.hidden = !points.length
+    if (!points.length) return
+    drawChartThrough(canvas, points)
+  }
+
+  /* -------------------------------------------------------------- 记忆 --- */
 
   function renderMemories(data) {
     var list = $('memoryList')
-    var hint = $('memoryHint')
     if (!list) return
     list.textContent = ''
     var rows = data && data.available !== false && Array.isArray(data.memory_recent)
@@ -402,344 +463,278 @@
     }
     for (var i = 0; i < rows.length; i += 1) {
       var item = rows[i] || {}
-      var text = String(item.text || '').slice(0, 40)
       var li = document.createElement('li')
-      var head = document.createElement('div')
-      head.className = 'memory-head'
       var time = document.createElement('time')
       time.textContent = relativeTime(Number(item.ts))
-      var tag = document.createElement('span')
-      tag.className = 'memory-tag'
-      tag.textContent = memoryKind(item.text)
-      head.appendChild(time)
-      head.appendChild(tag)
+      var kind = document.createElement('span')
+      kind.className = 'memory-kind'
+      kind.textContent = memoryKind(item.text)
       var body = document.createElement('span')
       body.className = 'memory-text'
-      body.textContent = text
-      li.appendChild(head)
+      body.textContent = String(item.text || '').slice(0, 80)
+      li.appendChild(time)
+      li.appendChild(kind)
       li.appendChild(body)
       list.appendChild(li)
     }
   }
 
-  function mergePoints(data) {
-    var extras = data && data.available !== false ? data : {}
-    var history = Array.isArray(extras.history) ? extras.history : []
-    if (history.length) {
-      return history.map(function (item) {
-        return { ts: Number(item.ts) || 0, v: Number(item.v) || 0 }
-      })
-    }
-    if (seriesPoints && seriesPoints.length) {
-      return seriesPoints.map(function (item) {
-        return { ts: Number(item.ts) / 1000, v: Number(item.value) || 0 }
-      })
-    }
-    if (data && data.available !== false) {
-      localPoints.push({ ts: Date.now() / 1000, v: Number(data.v) || 0 })
-      if (localPoints.length > 120) localPoints = localPoints.slice(-120)
-    }
-    return localPoints.slice()
-  }
-
-  function drawChartInto(canvas, data) {
-    if (!canvas) return
-    var points = mergePoints(data)
-    var wrapWidth = canvas.clientWidth || canvas.parentElement.clientWidth || 600
-    var wrapHeight = 170
-    var dpr = window.devicePixelRatio || 1
-    canvas.width = Math.round(wrapWidth * dpr)
-    canvas.height = Math.round(wrapHeight * dpr)
-    var ctx = canvas.getContext('2d')
-    if (!ctx) return
-    ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
-    ctx.clearRect(0, 0, wrapWidth, wrapHeight)
-
-    var styles = window.getComputedStyle(document.documentElement)
-    var lineColor = styles.getPropertyValue('--accent').trim() || '#4176e6'
-    var gridColor = styles.getPropertyValue('--line').trim() || 'rgba(127,127,127,.2)'
-    var mutedColor = styles.getPropertyValue('--text-3').trim() || '#81858c'
-    var amber = styles.getPropertyValue('--amber').trim() || '#f7ad31'
-
-    var padL = 34
-    var padR = 12
-    var padT = 12
-    var padB = 20
-    var plotW = Math.max(10, wrapWidth - padL - padR)
-    var plotH = Math.max(10, wrapHeight - padT - padB)
-
-    ctx.strokeStyle = gridColor
-    ctx.lineWidth = 1
-    ctx.font = '10px -apple-system, "Microsoft YaHei", sans-serif'
-    ctx.fillStyle = mutedColor
-    for (var g = 0; g < 5; g += 1) {
-      var y = padT + (plotH * g) / 4
-      ctx.beginPath()
-      ctx.moveTo(padL, y)
-      ctx.lineTo(padL + plotW, y)
-      ctx.stroke()
-      if (g === 0 || g === 4) {
-        var label = g === 0 ? '1.0' : '-1.0'
-        ctx.fillText(label, 6, y + 3)
-      }
-    }
-    if (points.length > 1) {
-      var minTs = points[0].ts
-      var maxTs = points[points.length - 1].ts
-      var span = maxTs - minTs || 1
-      var toX = function (ts) { return padL + ((ts - minTs) / span) * plotW }
-      var toY = function (v) { return padT + ((1 - Math.max(-1, Math.min(1, v))) / 2) * plotH }
-
-      ctx.beginPath()
-      for (var i = 0; i < points.length; i += 1) {
-        var x = toX(points[i].ts)
-        var py = toY(points[i].v)
-        if (i === 0) ctx.moveTo(x, py)
-        else ctx.lineTo(x, py)
-      }
-      ctx.strokeStyle = lineColor
-      ctx.lineWidth = 2
-      ctx.lineJoin = 'round'
-      ctx.stroke()
-
-      var last = points[points.length - 1]
-      ctx.fillStyle = lineColor
-      ctx.beginPath()
-      ctx.arc(toX(last.ts), toY(last.v), 3, 0, Math.PI * 2)
-      ctx.fill()
-
-      var events = data && data.available !== false && Array.isArray(data.memory_recent)
-        ? data.memory_recent : []
-      ctx.fillStyle = amber
-      for (var e = 0; e < events.length; e += 1) {
-        var eventTs = Number(events[e].ts) / 1000
-        if (!Number.isFinite(eventTs) || eventTs < minTs || eventTs > maxTs) continue
-        var eventY = toY(last.v)
-        for (var p = 0; p < points.length; p += 1) {
-          if (points[p].ts >= eventTs) { eventY = toY(points[p].v); break }
-        }
-        ctx.beginPath()
-        ctx.arc(toX(eventTs), eventY, 2.6, 0, Math.PI * 2)
-        ctx.fill()
-      }
-      setText(canvas.id === 'deskChart' ? 'deskChartHint' : 'chartHint', '单线 + ' + events.length + ' 个事件点')
-    } else {
-      ctx.strokeStyle = lineColor
-      ctx.lineWidth = 2
-      var midY = padT + plotH / 2
-      ctx.beginPath()
-      ctx.moveTo(padL, midY)
-      ctx.lineTo(padL + plotW, midY)
-      ctx.stroke()
-      if (points.length === 1) {
-        ctx.fillStyle = lineColor
-        ctx.beginPath()
-        ctx.arc(padL + plotW - 3, padT + ((1 - Math.max(-1, Math.min(1, points[0].v))) / 2) * plotH, 3, 0, Math.PI * 2)
-        ctx.fill()
-      }
-      setText(canvas.id === 'deskChart' ? 'deskChartHint' : 'chartHint', '积累中 · 单点')
-    }
-    ctx.fillStyle = mutedColor
-    ctx.fillText('24 小时', padL, wrapHeight - 5)
-  }
-
-  function renderChart(data) {
-    drawChartInto($('moodChart'), data)
-    drawChartInto($('deskChart'), data)
-  }
-
-  var DESK_HIDDEN_KEY = 'biocore-desk-hidden'
-  var RAIL_KEY = 'biocore-rail-collapsed'
-
-  function copyText(fromId, toId) {
-    var from = $(fromId)
-    var to = $(toId)
-    if (from && to) to.textContent = from.textContent
-  }
-
-  function copyBar(fromId, toId) {
-    var from = $(fromId)
-    var to = $(toId)
-    if (from && to) to.style.width = from.style.width
-  }
-
-  /** Desktop grid mirrors the mobile DOM (single data source, no duplicate state). */
-  function deskSync(data) {
-    copyText('motivation', 'deskMotivation')
-    copyText('statusText', 'deskStatusText')
-    var mobileStatus = $('status')
-    var deskStatus = $('deskStatus')
-    if (mobileStatus && deskStatus) {
-      deskStatus.className = 'status' + (mobileStatus.classList.contains('on') ? ' on' : (mobileStatus.classList.contains('off') ? ' off' : ''))
-    }
-    copyText('num-v', 'deskNumV')
-    copyText('moodNote', 'deskWordV')
-    copyText('arrow-v', 'deskArrowV')
-    copyText('delta-v', 'deskDeltaV')
-    copyBar('bar-v', 'deskBarV')
-    copyText('num-emotion-tension', 'deskNumTension')
-    copyText('status-tension', 'deskWordTension')
-    copyText('arrow-emotion-tension', 'deskArrowTension')
-    copyText('delta-emotion-tension', 'deskDeltaTension')
-    copyBar('bar-emotion-tension', 'deskBarTension')
-    copyText('runtimeUptime', 'deskUptime')
-    copyText('runtimeTurns', 'deskTurns')
-    copyText('runtimeVector', 'deskVector')
-    copyText('capText', 'deskCapText')
-    copyBar('capFill', 'deskCapFill')
-    copyText('dataDirText', 'deskDataDir')
-    copyText('memTotal', 'deskTodayMem')
-    copyText('runtimeTurns', 'deskTodayTurns')
-    copyText('memoryHint', 'deskMemoryHint')
-    var memoryFrom = $('memoryList')
-    var memoryTo = $('deskMemoryList')
-    if (memoryFrom && memoryTo) memoryTo.innerHTML = memoryFrom.innerHTML
+  function renderMemorySummary(data) {
     var available = data && data.available !== false
-    var intero = (available && data.intero) || {}
-    var channels = [['tension', 'deskAvgTension'], ['warmth', 'deskAvgWarmth'], ['heaviness', 'deskAvgHeaviness'], ['clarity', 'deskAvgClarity']]
-    for (var i = 0; i < channels.length; i += 1) {
-      var value = Number(intero[channels[i][0]])
-      setText(channels[i][1], Number.isFinite(value) ? fmt(value) : '—')
+    var rows = available && Array.isArray(data.memory_recent) ? data.memory_recent : []
+    var total = available && typeof data.memory_count === 'number' ? data.memory_count : rows.length
+    var dayStart = startOfToday()
+    var today = 0
+    for (var i = 0; i < rows.length; i += 1) {
+      var ts = Number(rows[i] && rows[i].ts)
+      if (Number.isFinite(ts) && ts >= dayStart) today += 1
     }
+    setText('memTotal', String(total))
+    setText('memToday', String(available ? today : '—'))
+    var recall = available ? Number(data.recall_count) : NaN
+    setText('memRecall', Number.isFinite(recall) && recall > 0 ? String(Math.round(recall)) : '—')
+    var ratio = clamp01(total / 200)
+    setBar('capFill', ratio)
+    setText('capFillText', pct(ratio))
+    setText('capText', total + ' / 200')
+  }
+
+  /* -------------------------------------------------------------- 关系 --- */
+
+  function relationRow(label, value, note, available) {
+    var row = document.createElement('div')
+    var dt = document.createElement('dt')
+    dt.textContent = label
+    var dd = document.createElement('dd')
+    dd.textContent = available ? fmt(value) : '—'
+    if (note && available) {
+      var small = document.createElement('small')
+      small.textContent = note
+      dd.appendChild(small)
+    }
+    row.appendChild(dt)
+    row.appendChild(dd)
+    return row
+  }
+
+  function renderRelation(data) {
+    var box = $('metrics')
+    if (!box) return
+    box.textContent = ''
+    var available = data && data.available !== false
     var rel = (available && data.relationship_metrics) || {}
-    setText('deskRelCloseness', available && Number.isFinite(Number(rel.closeness)) ? fmt(rel.closeness) : '—')
-    setText('deskRelTrust', available && Number.isFinite(Number(rel.trust)) ? fmt(rel.trust) : '—')
-    setText('deskRelConflict', available && Number.isFinite(Number(rel.conflict)) ? fmt(rel.conflict) : '—')
-    setText('deskTodayProactive', '—')
-    var personaBox = $('personaText')
-    var personaChars = personaBox ? String(personaBox.value || '').replace(/s+/g, '').length : 0
-    setText('deskPersona', personaChars ? '已载入' : '未载入')
-    setText('deskPersonaNote', personaChars ? (personaChars + ' 字 · 编译后只改倾向') : '还没有写人设')
+    var closeness = Number(rel.closeness)
+    var trust = Number(rel.trust)
+    var conflict = Number(rel.conflict)
+    var safeCloseness = Number.isFinite(closeness) ? closeness : 0
+    var safeTrust = Number.isFinite(trust) ? trust : 0
+    var safeConflict = Number.isFinite(conflict) ? conflict : 0
+
+    var list = document.createElement('dl')
+    list.className = 'data-list'
+    list.appendChild(relationRow('亲近', safeCloseness, '', available))
+    list.appendChild(relationRow('信任', safeTrust, '', available))
+    list.appendChild(relationRow('冲突', safeConflict, '', available))
+    box.appendChild(list)
+
+    var count = Number(rel.conflict_count)
+    if (!Number.isFinite(count)) count = safeConflict > 0 ? Math.round(safeConflict * 10) : 0
+    var foot = document.createElement('div')
+    foot.className = 'relation-foot'
+    var facts = [
+      ['认识', available ? knownDays() + ' 天' : '— 天'],
+      ['冲突', available ? count + ' 次' : '— 次'],
+      ['依恋', available ? attachmentOf(safeTrust, safeCloseness, safeConflict) : '—'],
+    ]
+    for (var i = 0; i < facts.length; i += 1) {
+      var cell = document.createElement('span')
+      cell.textContent = facts[i][0]
+      var value = document.createElement('b')
+      value.textContent = facts[i][1]
+      cell.appendChild(value)
+      foot.appendChild(cell)
+    }
+    box.appendChild(foot)
+    setText('relationHint', available ? '只读' : '无数据')
   }
 
-  function deskCards() {
-    return Array.prototype.slice.call(document.querySelectorAll('#deskGrid .desk-card'))
+  function renderNarrative(data) {
+    var box = $('narrative')
+    if (!box) return
+    box.textContent = ''
+    var available = data && data.available !== false
+    var narrative = (available && data.narrative) || {}
+    var rows = [
+      ['意图', available ? (String(narrative.intent || '').trim() || '—') : '—'],
+      ['主动性', available && narrative.initiative !== undefined ? fmt(narrative.initiative) : '—'],
+      ['长度因子', available && narrative.length_factor !== undefined ? fmt(narrative.length_factor) : '—'],
+      ['元认知带', available ? (String(narrative.metacog_band || '').trim() || '—') : '—'],
+      ['允许纠偏', available ? (narrative.allow_correction === true ? '是' : '否') : '—'],
+    ]
+    for (var i = 0; i < rows.length; i += 1) {
+      var wrap = document.createElement('div')
+      var dt = document.createElement('dt')
+      dt.textContent = rows[i][0]
+      var dd = document.createElement('dd')
+      dd.textContent = rows[i][1]
+      wrap.appendChild(dt)
+      wrap.appendChild(dd)
+      box.appendChild(wrap)
+    }
+    setText('narrativeHint', available ? '上一轮' : '无数据')
   }
 
-  function deskCardId(card, index) {
-    if (!card.id) card.id = 'desk-card-' + index
-    return card.id
+  /* -------------------------------------------------------------- 工具 --- */
+
+  function renderRuntime(data) {
+    var available = data && data.available !== false
+    var seconds = Math.max(0, Math.round((Date.now() - PAGE_START) / 1000))
+    var uptime = seconds < 60 ? seconds + ' 秒'
+      : (seconds < 3600 ? Math.round(seconds / 60) + ' 分钟' : Math.round(seconds / 3600) + ' 小时')
+    setText('runtimeUptime', uptime)
+    setText('runtimeTurns', available && Array.isArray(data.history) ? String(data.history.length) : '—')
+    var mode = $('embeddingMode')
+    setText('runtimeVector', mode ? (mode.value || 'auto') : '—')
+    setText('runSession', '会话 ' + shortSession())
+    setText('diagSession', SESSION || '未指定')
   }
 
-  function readDeskHidden() {
-    try {
-      var raw = window.localStorage.getItem(DESK_HIDDEN_KEY)
-      var list = raw ? JSON.parse(raw) : []
-      return Array.isArray(list) ? list : []
-    } catch (e) { return [] }
-  }
-
-  function writeDeskHidden(list) {
-    try { window.localStorage.setItem(DESK_HIDDEN_KEY, JSON.stringify(list)) } catch (e) { /* ignore */ }
-  }
-
-  function applyDeskHidden() {
-    var hidden = readDeskHidden()
-    deskCards().forEach(function (card, index) {
-      card.classList.toggle('is-desk-hidden', hidden.indexOf(deskCardId(card, index)) >= 0)
+  function renderDiagnostics(data) {
+    var available = data && data.available !== false
+    var degraded = available && Array.isArray(data.degraded) ? data.degraded : []
+    var errors = available && Array.isArray(data.errors) ? data.errors : []
+    var parts = degraded.concat(errors).filter(Boolean).map(function (item) {
+      return String(item).slice(0, 40)
     })
+    setText('diagDegraded', parts.length ? parts.join('，') : '无')
+    var generated = available ? Number(data.generated_at) : NaN
+    setText('diagGenerated', Number.isFinite(generated) && generated > 0
+      ? new Date(generated).toLocaleTimeString() : '—')
+    setText('diagAdapter', available && data.adapter && data.adapter.version
+      ? String(data.adapter.version) : '—')
   }
 
-  function ensureDeskHides() {
-    deskCards().forEach(function (card, index) {
-      deskCardId(card, index)
-      if (card.querySelector('[data-desk-hide]')) return
-      var button = document.createElement('button')
-      button.type = 'button'
-      button.className = 'desk-hide'
-      button.setAttribute('data-desk-hide', '')
-      button.setAttribute('aria-label', '隐藏这张卡片')
-      button.textContent = '−'
-      card.appendChild(button)
-    })
+  function loadStats() {
+    var rate = $('cacheStatText')
+    var detail = $('cacheDetail')
+    if (!rate) return
+    fetch('/api/biocore/stats', { headers: { accept: 'application/json' } })
+      .then(function (response) { return response.ok ? response.json() : null })
+      .then(function (body) {
+        var cache = body && body.cache ? body.cache : null
+        if (cache && Number(cache.turns) > 0) {
+          var hitRate = Number(cache.hit_rate) || 0
+          rate.textContent = (Math.round(hitRate * 1000) / 10) + '%'
+          if (detail) {
+            detail.textContent = (Number(cache.cache_read) || 0) + ' / ' + (Number(cache.prompt_tokens) || 0)
+          }
+          return
+        }
+        var embed = body && body.embed ? body.embed : null
+        var hit = embed ? (Number(embed.hit) || 0) : 0
+        var miss = embed ? (Number(embed.miss) || 0) : 0
+        if (hit + miss > 0) {
+          rate.textContent = (Math.round(hit / (hit + miss) * 1000) / 10) + '%'
+          if (detail) detail.textContent = 'hit ' + hit + ' / miss ' + miss
+          return
+        }
+        rate.textContent = '暂无数据'
+        if (detail) detail.textContent = '—'
+      })
+      .catch(function () {
+        rate.textContent = '暂无数据'
+        if (detail) detail.textContent = '—'
+      })
   }
 
-  function deskLabel(card) {
-    var named = card.getAttribute('data-card-label')
-    if (named) return named
-    var title = card.querySelector('h2')
-    return title ? title.textContent.trim() : card.id
-  }
+  var traceFormatter = function () { return window.BioTraceView || null }
 
-  function restoreDeskCard(id) {
-    writeDeskHidden(readDeskHidden().filter(function (item) { return item !== id }))
-    applyDeskHidden()
-    renderAddCards()
-    layoutToast('已恢复卡片')
-  }
-
-  function onDeskEditClick(event) {
-    var target = event.target
-    var add = target && target.closest ? target.closest('[data-desk-add]') : null
-    if (add) {
-      event.preventDefault()
-      restoreDeskCard(add.getAttribute('data-desk-add'))
+  function renderTrace(body) {
+    var list = $('traceList')
+    if (!list) return
+    list.textContent = ''
+    var view = traceFormatter()
+    var failed = !body || body.ok === false
+    var rows = !failed && Array.isArray(body.rows) ? body.rows.slice(0, TRACE_LIMIT) : []
+    var formatted = {
+      rows: view ? rows.map(function (row) { return view.formatRow(row) }) : rows,
+      empty: !rows.length,
+      error: failed,
+    }
+    setText('traceHint', rows.length ? '最近 ' + rows.length + ' 轮' : '还没有记录')
+    if (formatted.empty) {
+      var empty = document.createElement('p')
+      empty.className = 'state-note'
+      empty.textContent = failed ? '读取失败，稍后自动重试' : '还没有记录'
+      list.appendChild(empty)
       return
     }
-    var hide = target && target.closest ? target.closest('[data-desk-hide]') : null
-    if (!hide) return
-    event.preventDefault()
-    var card = hide.closest('.desk-card')
-    if (!card) return
-    var hidden = readDeskHidden()
-    var id = card.id
-    if (hidden.indexOf(id) < 0) hidden.push(id)
-    writeDeskHidden(hidden)
-    applyDeskHidden()
-    renderAddCards()
-    layoutToast('已隐藏「' + deskLabel(card) + '」')
+    for (var i = 0; i < formatted.rows.length; i += 1) {
+      var row = formatted.rows[i] || {}
+      var item = document.createElement('div')
+      item.className = 'trace-row'
+      var values = [row.time, row.changes, row.intent, row.length, row.gate, row.memory]
+      for (var c = 0; c < values.length; c += 1) {
+        var cell = document.createElement('span')
+        if (c === 0) cell.className = 'trace-time'
+        var cellText = String(values[c] || '—').split(' · ').join('，')
+        cell.textContent = cellText
+        cell.title = cellText
+        cell.setAttribute('data-label', ['时间', '状态变化', '意图', '长度来源', '闸命中', '记忆'][c])
+        item.appendChild(cell)
+      }
+      list.appendChild(item)
+    }
   }
 
-  function railApply(collapsed) {
-    document.body.classList.toggle('rail-collapsed', !!collapsed)
-    var button = $('railToggle')
-    if (!button) return
-    var label = collapsed ? '展开导航' : '收起导航'
-    button.setAttribute('aria-expanded', String(!collapsed))
-    button.setAttribute('aria-label', label)
-    button.setAttribute('title', label)
-  }
-
-  function railInit() {
-    var storage = layoutStorage()
-    var collapsed = false
-    try { collapsed = !!storage && storage.getItem(RAIL_KEY) === '1' } catch (e) { collapsed = false }
-    railApply(collapsed)
-    var button = $('railToggle')
-    if (!button) return
-    button.addEventListener('click', function () {
-      var next = !document.body.classList.contains('rail-collapsed')
-      railApply(next)
-      try { if (storage) storage.setItem(RAIL_KEY, next ? '1' : '0') } catch (e) { /* ignore */ }
+  function fetchTrace() {
+    if (!SESSION) {
+      renderTrace({ ok: true, rows: [] })
+      return Promise.resolve(null)
+    }
+    return fetch('/api/biocore/trace?session=' + encodeURIComponent(SESSION) + '&limit=' + TRACE_LIMIT, {
+      headers: { accept: 'application/json' },
     })
+      .then(function (response) { return response.json() })
+      .then(function (body) { renderTrace(body); return body })
+      .catch(function () { renderTrace(null); return null })
   }
 
-  function updateFooter(data) {
-    var memory = data && data.available !== false && typeof data.memory_count === 'number'
-      ? data.memory_count : '-'
-    setText('footerMeta', '会话 ' + shortSession() + ' · 记忆 ' + memory + ' · 每 2 秒刷新')
+  /* ------------------------------------------------------------ 状态轮询 --- */
+
+  function finishBoot() {
+    if (bootDone) return
+    bootDone = true
+    document.body.classList.remove('is-booting')
   }
 
   function render(data) {
     lastData = data
-    renderNumbers(data)
     renderMetrics(data)
+    renderNow(data)
+    renderToday(data)
     renderMemories(data)
     renderMemorySummary(data)
-    renderStats(data)
+    renderRelation(data)
+    renderNarrative(data)
     renderRuntime(data)
+    renderDiagnostics(data)
     renderChart(data)
-    updateFooter(data)
-    deskSync(data)
-    deskSync(data)
+    var memory = data && data.available !== false && typeof data.memory_count === 'number'
+      ? '记忆 ' + data.memory_count : '记忆 -'
+    setText('footerMeta', '会话 ' + (SESSION || '-') + '　' + memory + '　每 ' + (POLL_MS / 1000) + ' 秒刷新')
+    var live = !!(data && data.available !== false)
+    document.body.classList.toggle('is-empty', !live)
     if (!data) renderEmpty('request_failed')
     else if (data.available === false) renderEmpty(String(data.reason || 'request_failed'))
     else clearEmpty()
+    finishBoot()
   }
 
   function fetchState() {
     if (!SESSION) {
       setStatus(false, '未连接')
+      render(null)
       setText('motivation', '没有会话参数，先在聊天会话里打开')
       return Promise.resolve(null)
     }
@@ -749,7 +744,8 @@
       .then(function (response) { return response.json() })
       .then(function (data) {
         lastSuccess = Date.now()
-        setStatus(true, '已连接 · 0 秒前')
+        var live = data && data.available !== false
+        setStatus(live, live ? '已连接 0 秒前' : '还没有状态')
         render(data)
         return data
       })
@@ -767,12 +763,19 @@
     })
       .then(function (response) { return response.ok ? response.json() : null })
       .then(function (body) {
-        if (body && body.series && Array.isArray(body.series.v) && body.series.v.length) {
-          seriesPoints = body.series.v
+        if (body && Array.isArray(body.points) && body.points.length) {
+          seriesPoints = body.points
+        } else if (body && body.series && Array.isArray(body.series.v)
+          && Array.isArray(body.series.ts) && body.series.v.length === body.series.ts.length) {
+          seriesPoints = body.series.ts.map(function (ts, index) {
+            return { ts: ts, v: body.series.v[index] }
+          })
         }
       })
       .catch(function () { /* optional: state extras already cover the chart */ })
   }
+
+  /* -------------------------------------------------------------- 开关 --- */
 
   function switchPost(key, value) {
     return fetch('/api/biocore/switch', {
@@ -782,15 +785,9 @@
     }).then(function (response) { return response.json() })
   }
 
-  function paintSwitchState(key, checked) {
-    var states = document.querySelectorAll('[data-switch-state="' + key + '"]')
-    for (var i = 0; i < states.length; i += 1) states[i].textContent = '当前：' + (checked ? '开' : '关')
-  }
-
   function setSwitchInputs(key, checked) {
     var inputs = document.querySelectorAll('input[data-switch="' + key + '"]')
     for (var i = 0; i < inputs.length; i += 1) inputs[i].checked = !!checked
-    paintSwitchState(key, checked)
   }
 
   function applySwitchValues(values) {
@@ -805,8 +802,16 @@
     var box = $('switches')
     if (!box) return
     box.textContent = ''
+    var lastGroup = ''
     for (var i = 0; i < SWITCHES.length; i += 1) {
       var meta = SWITCHES[i]
+      if (meta.group && meta.group !== lastGroup) {
+        lastGroup = meta.group
+        var heading = document.createElement('p')
+        heading.className = 'switch-group'
+        heading.textContent = meta.group
+        box.appendChild(heading)
+      }
       var row = document.createElement('label')
       row.className = 'switch-row'
       var textWrap = document.createElement('span')
@@ -817,13 +822,8 @@
       var desc = document.createElement('span')
       desc.className = 'switch-desc'
       desc.textContent = meta.desc
-      var state = document.createElement('span')
-      state.className = 'switch-state'
-      state.setAttribute('data-switch-state', meta.key)
-      state.textContent = '当前：关'
       textWrap.appendChild(title)
       textWrap.appendChild(desc)
-      textWrap.appendChild(state)
       var input = document.createElement('input')
       input.type = 'checkbox'
       input.setAttribute('data-switch', meta.key)
@@ -842,20 +842,20 @@
     var next = !!input.checked
     switchBusy = true
     input.disabled = true
-    setText('switchHint', '写入中…')
+    setText('switchHint', '写入中')
     switchPost(key, next)
       .then(function (body) {
         if (body && body.ok === true && body.switches) {
           applySwitchValues(body.switches)
-          setText('switchHint', '已写入宿主设置')
+          setText('switchHint', '已写入 flags')
         } else {
           setSwitchInputs(key, !next)
-          setText('switchHint', '写入失败：' + ((body && body.reason) || 'unknown'))
+          setText('switchHint', '写入失败 ' + ((body && body.reason) || 'unknown'))
         }
       })
       .catch(function () {
         setSwitchInputs(key, !next)
-        setText('switchHint', '写入失败：未连接')
+        setText('switchHint', '写入失败 未连接')
       })
       .then(function () {
         switchBusy = false
@@ -863,8 +863,16 @@
       })
   }
 
-  var personaText = ''
-  var personaDirty = false
+  function loadSwitches() {
+    return fetch('/api/biocore/switch', { headers: { accept: 'application/json' } })
+      .then(function (response) { return response.json() })
+      .then(function (body) {
+        if (body && body.ok === true && body.switches) applySwitchValues(body.switches)
+      })
+      .catch(function () { /* keep defaults, POST still tries */ })
+  }
+
+  /* -------------------------------------------------------------- 人设 --- */
 
   function personaStatus(message, tone) {
     var el = $('personaStatus')
@@ -874,22 +882,13 @@
     el.classList.toggle('persona-status-ok', tone === 'ok')
   }
 
-  function renderPersonaPreview(rows) {
-    var box = $('personaPreview')
-    if (!box) return
-    box.textContent = ''
-    var list = Array.isArray(rows) ? rows : []
-    for (var i = 0; i < list.length; i += 1) {
-      var row = list[i] || {}
-      var item = document.createElement('div')
-      var label = document.createElement('span')
-      label.textContent = String(row.label || row.key || '')
-      var value = document.createElement('strong')
-      value.textContent = row.value === null || row.value === undefined ? '–' : String(row.value)
-      item.appendChild(label)
-      item.appendChild(value)
-      box.appendChild(item)
-    }
+  /** One status line for the persona card: file, compile and persist state. */
+  function personaPersistHint(message, tone) {
+    var el = $('personaHint')
+    if (!el) return
+    el.textContent = message
+    el.classList.toggle('persona-status-error', tone === 'error')
+    el.classList.toggle('persona-status-ok', tone === 'ok')
   }
 
   function loadPersona() {
@@ -897,19 +896,18 @@
       .then(function (response) { return response.json() })
       .then(function (body) {
         if (!body || body.ok !== true) {
-          personaStatus('人设文件坏了：' + ((body && body.reason) || 'bad_profile'), 'error')
+          personaStatus('人设文件坏了 ' + ((body && body.reason) || 'bad_profile'), 'error')
           return body
         }
         personaText = String(body.text || '')
         var area = $('personaText')
         if (area) area.value = personaText
         personaDirty = false
-        renderPersonaPreview(body.preview)
-        personaStatus(body.text ? '已载入' : '未设置人设', body.text ? 'ok' : '')
+        personaStatus(body.text ? '已载入' : '未设置', body.text ? 'ok' : '')
         return body
       })
       .catch(function () {
-        personaStatus('连不上宿主，读不到人设', 'error')
+        personaStatus('连不上宿主', 'error')
         return null
       })
   }
@@ -919,11 +917,11 @@
     var button = $('personaSave')
     var text = area ? area.value : ''
     if (!text.trim()) {
-      personaStatus('编译失败：人设不能为空', 'error')
+      personaStatus('人设不能为空', 'error')
       return
     }
     if (!window.confirm('确定保存并编译人设吗？这会覆盖当前数值画像。')) return
-    personaStatus('编译中…')
+    personaStatus('编译中')
     if (button) button.disabled = true
     fetch('/api/biocore/persona', {
       method: 'POST',
@@ -933,31 +931,20 @@
       .then(function (response) { return response.json() })
       .then(function (body) {
         if (!body || body.ok !== true) {
-          personaStatus('编译失败：' + ((body && body.reason) || 'unknown'), 'error')
+          personaStatus('编译失败 ' + ((body && body.reason) || 'unknown'), 'error')
           if (body && body.detail) setText('personaHint', String(body.detail).slice(0, 120))
           return body
         }
         personaDirty = false
         personaText = String(body.text || text)
-        renderPersonaPreview(body.preview)
-        personaStatus('已编译 · ' + new Date().toLocaleTimeString(), 'ok')
+        personaStatus('已编译 ' + new Date().toLocaleTimeString(), 'ok')
         return body
       })
       .catch(function () {
-        personaStatus('编译失败：连不上宿主', 'error')
+        personaStatus('编译失败 连不上宿主', 'error')
         return null
       })
-      .then(function () {
-        if (button) button.disabled = false
-      })
-  }
-
-  function personaPersistHint(message, tone) {
-    var el = $('personaPersistHint')
-    if (!el) return
-    el.textContent = message
-    el.classList.toggle('persona-status-error', tone === 'error')
-    el.classList.toggle('persona-status-ok', tone === 'ok')
+      .then(function () { if (button) button.disabled = false })
   }
 
   function loadPersonaPersist() {
@@ -967,31 +954,34 @@
         var applyButton = $('personaPersist')
         var rollbackButton = $('personaRollback')
         if (!body || body.ok !== true) {
-          personaPersistHint('常驻：宿主不可用（' + ((body && body.reason) || 'unknown') + '）', 'error')
+          personaPersistHint('常驻不可用 ' + ((body && body.reason) || 'unknown'), 'error')
           if (rollbackButton) rollbackButton.hidden = true
           return body
         }
         if (body.applied) {
-          personaPersistHint('常驻：已应用 · 预设 ' + String(body.preset_id || '') + ' · ' + Number(body.chars || 0) + ' 字' + (body.matches_preset ? '' : '（预设已变更）'), body.matches_preset ? 'ok' : 'error')
+          personaPersistHint('常驻已应用 预设 ' + String(body.preset_id || '') + ' '
+            + Number(body.chars || 0) + ' 字'
+            + (body.matches_preset ? '' : ' 预设已变更'), body.matches_preset ? 'ok' : 'error')
           if (rollbackButton) rollbackButton.hidden = false
           if (applyButton) applyButton.textContent = '重新应用常驻'
         } else {
-          personaPersistHint('常驻：未应用（' + String(body.reason || 'not_applied') + '）', '')
+          var reason = String(body.reason || 'not_applied')
+          personaPersistHint(reason === 'not_applied' ? '已保存人设，常驻未启用' : '常驻未应用 ' + reason, '')
           if (rollbackButton) rollbackButton.hidden = !body.has_backup
-          if (applyButton) applyButton.textContent = '设为常驻模式'
+          if (applyButton) applyButton.textContent = '设为常驻'
         }
         return body
       })
       .catch(function () {
-        personaPersistHint('常驻：连不上宿主', 'error')
+        personaPersistHint('常驻 连不上宿主', 'error')
         return null
       })
   }
 
   function applyPersonaPersist() {
     var button = $('personaPersist')
-    if (!window.confirm('把人设写入 DSH 默认预设并常驻？\n应用后由预设提供人设，插件不再每轮注入人设；可随时恢复原人设。')) return
-    personaPersistHint('常驻：写入预设中…')
+    if (!window.confirm('把人设写入 DSH 默认预设并常驻？应用后由预设提供人设，可随时恢复。')) return
+    personaPersistHint('正在写入预设')
     if (button) button.disabled = true
     fetch('/api/biocore/persona/apply', {
       method: 'POST',
@@ -1001,26 +991,23 @@
       .then(function (response) { return response.json() })
       .then(function (body) {
         if (!body || body.ok !== true) {
-          personaPersistHint('常驻：应用失败（' + ((body && body.reason) || 'unknown') + '）', 'error')
-          if (body && body.detail) personaStatus(String(body.detail).slice(0, 120), 'error')
+          personaPersistHint('常驻应用失败 ' + ((body && body.reason) || 'unknown'), 'error')
           return body
         }
         personaStatus('已写入常驻预设', 'ok')
         return loadPersonaPersist()
       })
       .catch(function () {
-        personaPersistHint('常驻：应用失败，连不上宿主', 'error')
+        personaPersistHint('常驻应用失败 连不上宿主', 'error')
         return null
       })
-      .then(function () {
-        if (button) button.disabled = false
-      })
+      .then(function () { if (button) button.disabled = false })
   }
 
   function rollbackPersonaPersist() {
     var button = $('personaRollback')
     if (!window.confirm('恢复应用常驻前的预设人设？')) return
-    personaPersistHint('常驻：恢复中…')
+    personaPersistHint('正在恢复')
     if (button) button.disabled = true
     fetch('/api/biocore/persona/apply', {
       method: 'POST',
@@ -1030,19 +1017,17 @@
       .then(function (response) { return response.json() })
       .then(function (body) {
         if (!body || body.ok !== true) {
-          personaPersistHint('常驻：恢复失败（' + ((body && body.reason) || 'unknown') + '）', 'error')
+          personaPersistHint('恢复失败 ' + ((body && body.reason) || 'unknown'), 'error')
           return body
         }
         personaStatus('已恢复原预设人设', 'ok')
         return loadPersonaPersist()
       })
       .catch(function () {
-        personaPersistHint('常驻：恢复失败，连不上宿主', 'error')
+        personaPersistHint('恢复失败 连不上宿主', 'error')
         return null
       })
-      .then(function () {
-        if (button) button.disabled = false
-      })
+      .then(function () { if (button) button.disabled = false })
   }
 
   function bindPersona() {
@@ -1062,7 +1047,7 @@
     loadPersonaPersist()
   }
 
-  var MODEL_DRAFT_KEY = 'biocore-panel-model-draft-v1'
+  /* -------------------------------------------------------- 模型与接口 --- */
 
   function modelInputs() {
     return {
@@ -1070,7 +1055,6 @@
       baseUrl: $('modelBaseUrl'),
       model: $('modelName'),
       apiKey: $('modelApiKey'),
-      localPath: $('modelLocalPath'),
     }
   }
 
@@ -1081,7 +1065,6 @@
       base_url: fields.baseUrl ? fields.baseUrl.value.trim() : '',
       model: fields.model ? fields.model.value.trim() : '',
       api_key: fields.apiKey ? fields.apiKey.value : '',
-      local_path: fields.localPath ? fields.localPath.value.trim() : '',
     }
   }
 
@@ -1107,6 +1090,15 @@
     }
   }
 
+  function fillModel(values) {
+    var fields = modelInputs()
+    var data = values || {}
+    if (fields.mode && data.mode) fields.mode.value = String(data.mode)
+    if (fields.baseUrl) fields.baseUrl.value = String(data.base_url || '')
+    if (fields.model) fields.model.value = String(data.model || '')
+    if (fields.apiKey && data.api_key) fields.apiKey.value = '••••••••'
+  }
+
   function fillRerank(value) {
     var fields = rerankInputs()
     var data = value && typeof value === 'object' ? value : {}
@@ -1117,19 +1109,7 @@
     if (fields.topN) fields.topN.value = String(data.top_n || 20)
   }
 
-  function fillModel(values) {
-    var fields = modelInputs()
-    var data = values || {}
-    if (fields.mode && data.mode) fields.mode.value = String(data.mode)
-    if (fields.baseUrl) fields.baseUrl.value = String(data.base_url || '')
-    if (fields.model) fields.model.value = String(data.model || '')
-    if (fields.apiKey && data.api_key) fields.apiKey.value = '••••••••'
-    if (fields.localPath) fields.localPath.value = String(data.local_path || '')
-  }
-
-  function setModelStatus(message) {
-    setText('modelStatus', message)
-  }
+  function setModelStatus(message) { setText('modelStatus', message) }
 
   function saveModelDraft(values) {
     try { window.localStorage.setItem(MODEL_DRAFT_KEY, JSON.stringify(values)) } catch { /* ignore */ }
@@ -1139,9 +1119,7 @@
     try {
       var raw = window.localStorage.getItem(MODEL_DRAFT_KEY)
       return raw ? JSON.parse(raw) : null
-    } catch {
-      return null
-    }
+    } catch { return null }
   }
 
   function expressionInputs() {
@@ -1151,7 +1129,6 @@
       target: $('lengthTarget'),
       max: $('lengthMax'),
       status: $('expressionStatus'),
-      hint: $('expressionHint'),
       save: $('expressionSave'),
     }
   }
@@ -1161,8 +1138,7 @@
     if (!inputs.toggle) return
     var on = inputs.toggle.checked === true
     if (inputs.fields) inputs.fields.hidden = !on
-    if (inputs.status) inputs.status.textContent = on ? '按目标/上限约束' : '长度由人设决定'
-    if (inputs.hint) inputs.hint.textContent = on ? '打开后按目标/上限字数约束表达' : '关闭时长度由人设决定'
+    if (inputs.status) inputs.status.textContent = on ? '按目标与上限约束' : '长度由人设决定'
   }
 
   function fillExpression(value) {
@@ -1193,7 +1169,7 @@
       var values = expressionValues()
       if (inputs.save.disabled) return
       inputs.save.disabled = true
-      if (inputs.status) inputs.status.textContent = '保存中…'
+      if (inputs.status) inputs.status.textContent = '保存中'
       fetch('/api/biocore/settings', {
         method: 'POST',
         headers: { 'content-type': 'application/json', accept: 'application/json' },
@@ -1206,10 +1182,10 @@
             if (inputs.status) inputs.status.textContent = '已保存，重启后生效'
             return
           }
-          if (inputs.status) inputs.status.textContent = '保存失败：' + ((body && body.reason) || 'unknown')
+          if (inputs.status) inputs.status.textContent = '保存失败 ' + ((body && body.reason) || 'unknown')
         })
         .catch(function () {
-          if (inputs.status) inputs.status.textContent = '保存失败：连不上宿主'
+          if (inputs.status) inputs.status.textContent = '保存失败 连不上宿主'
         })
         .then(function () { inputs.save.disabled = false })
     })
@@ -1239,40 +1215,31 @@
       })
   }
 
-  function bindAdvanced() {
-    var reset = $('resetLayout')
-    if (reset) reset.addEventListener('click', function () { resetLayout() })
-    var clear = $('clearDraft')
-    if (clear) clear.addEventListener('click', function () {
-      try { window.localStorage.removeItem(MODEL_DRAFT_KEY) } catch { /* ignore */ }
-      setText('advancedHint', '已清空本地草稿')
-      layoutToast('已清空本地草稿')
-    })
-  }
-
   function bindModelActions() {
     var button = $('modelSave')
     var test = $('modelTest')
     var rerankTest = $('rerankTest')
+
     function runConnectionTest(kind, buttonEl) {
-      setModelStatus((kind === 'rerank' ? 'Rerank ' : 'Embedding ') + '测试中…')
+      setModelStatus((kind === 'rerank' ? 'Rerank ' : 'Embedding ') + '测试中')
       if (buttonEl) buttonEl.disabled = true
       fetch('/api/biocore/settings/test', {
         method: 'POST',
         headers: { 'content-type': 'application/json', accept: 'application/json' },
-        body: JSON.stringify({ kind }),
+        body: JSON.stringify({ kind: kind }),
       })
         .then(function (response) { return response.ok ? response.json() : null })
         .then(function (body) {
           if (body && body.ok === true) {
-            setModelStatus(kind + ' 连接正常 · ' + (body.elapsed_ms || 0) + 'ms')
+            setModelStatus(kind + ' 正常 ' + (body.elapsed_ms || 0) + 'ms')
             return
           }
-          setModelStatus(kind + ' 连接失败：' + ((body && (body.detail || body.reason)) || 'no_response'))
+          setModelStatus(kind + ' 失败 ' + ((body && (body.detail || body.reason)) || 'no_response'))
         })
-        .catch(function () { setModelStatus(kind + ' 连接失败：连不上宿主') })
+        .catch(function () { setModelStatus(kind + ' 失败 连不上宿主') })
         .then(function () { if (buttonEl) buttonEl.disabled = false })
     }
+
     if (test) test.addEventListener('click', function () { runConnectionTest('embedding', test) })
     if (rerankTest) rerankTest.addEventListener('click', function () { runConnectionTest('rerank', rerankTest) })
     if (!button) return
@@ -1281,12 +1248,12 @@
       if (values.api_key.indexOf('•') === 0) delete values.api_key
       var rerank = rerankValues()
       if (String(rerank.api_key || '').indexOf('•') === 0) delete rerank.api_key
-      setModelStatus('保存中…')
+      setModelStatus('保存中')
       button.disabled = true
       fetch('/api/biocore/settings', {
         method: 'POST',
         headers: { 'content-type': 'application/json', accept: 'application/json' },
-        body: JSON.stringify({ confirm: true, embedding: values, rerank }),
+        body: JSON.stringify({ confirm: true, embedding: values, rerank: rerank }),
       })
         .then(function (response) { return response.ok ? response.json() : null })
         .then(function (body) {
@@ -1295,127 +1262,45 @@
             return
           }
           saveModelDraft(values)
-          setModelStatus('宿主接口未开启：已存本地草稿')
+          setModelStatus('接口未开启 已存本地草稿')
         })
         .catch(function () {
           saveModelDraft(values)
-          setModelStatus('宿主接口未开启：已存本地草稿')
+          setModelStatus('接口未开启 已存本地草稿')
         })
         .then(function () { button.disabled = false })
     })
   }
 
-  function loadSwitches() {
-    if (!SESSION) return
-    fetch('/api/biocore/switch', { headers: { accept: 'application/json' } })
-      .then(function (response) { return response.json() })
-      .then(function (body) {
-        if (body && body.ok === true && body.switches) applySwitchValues(body.switches)
-      })
-      .catch(function () { /* keep defaults, POST still tries */ })
-  }
-
-  var TRACE_LIMIT = 3
-
-  function traceFormatter() {
-    return window.BioTraceView || null
-  }
-
-  function renderTrace(body) {
-    var list = $('traceList')
-    var hint = $('traceHint')
-    if (!list) return
-    list.textContent = ''
-    var view = traceFormatter()
-    var formatted = view
-      ? view.formatPayload(body, TRACE_LIMIT)
-      : { rows: [], empty: true, error: false, hint: '还没有记录' }
-    setText('traceHint', formatted.hint)
-    if (formatted.empty) {
-      var empty = document.createElement('p')
-      empty.className = 'empty'
-      empty.textContent = formatted.error ? '读取失败' : '还没有记录'
-      list.appendChild(empty)
-      return
-    }
-    var labels = ['状态变化', '意图', '长度来源', '闸命中', '记忆']
-    for (var i = 0; i < formatted.rows.length; i += 1) {
-      var row = formatted.rows[i] || {}
-      var item = document.createElement('article')
-      item.className = 'trace-row'
-      var head = document.createElement('div')
-      head.className = 'trace-head'
-      var time = document.createElement('span')
-      time.textContent = row.time || '--:--'
-      var badge = document.createElement('span')
-      badge.className = 'trace-badge'
-      badge.textContent = '#' + (formatted.rows.length - i)
-      head.appendChild(time)
-      head.appendChild(badge)
-      var grid = document.createElement('dl')
-      grid.className = 'trace-grid'
-      var values = [row.changes, row.intent, row.length, row.gate, row.memory]
-      for (var index = 0; index < labels.length; index += 1) {
-        var dt = document.createElement('dt')
-        dt.textContent = labels[index]
-        var dd = document.createElement('dd')
-        dd.textContent = values[index] || '—'
-        grid.appendChild(dt)
-        grid.appendChild(dd)
-      }
-      item.appendChild(head)
-      item.appendChild(grid)
-      list.appendChild(item)
-    }
-  }
-
-  function fetchTrace() {
-    if (!SESSION) {
-      renderTrace({ ok: true, rows: [] })
-      return Promise.resolve(null)
-    }
-    return fetch('/api/biocore/trace?session=' + encodeURIComponent(SESSION) + '&limit=' + TRACE_LIMIT, {
-      headers: { accept: 'application/json' },
+  function bindAdvanced() {
+    var reset = $('resetLayout')
+    if (reset) reset.addEventListener('click', function () { resetLayout() })
+    var clear = $('clearDraft')
+    if (clear) clear.addEventListener('click', function () {
+      try { window.localStorage.removeItem(MODEL_DRAFT_KEY) } catch { /* ignore */ }
+      setText('advancedHint', '草稿已清空')
+      layoutToast('已清空本地草稿')
     })
-      .then(function (response) { return response.json() })
-      .then(function (body) {
-        renderTrace(body)
-        return body
-      })
-      .catch(function () {
-        renderTrace(null)
-        return null
-      })
   }
 
-  var PAGE_START = Date.now()
+  /* ------------------------------------------------------------ 布局/编辑 --- */
+
   var layoutApi = typeof window !== 'undefined' ? window.BioCorePanelLayout : null
   var layoutState = null
   var layoutEditing = false
-  var toastTimer = null
+  var activeTab = 'dashboard'
   var drag = null
   var pressTimer = null
   var pressStart = null
-  var LONG_PRESS_MS = 400
-  var ENTRY_LONG_PRESS_MS = 600
-  var MOVE_CANCEL_PX = 8
-  var entryTimer = null
-  var entryStart = null
 
   function layoutStorage() {
     try { return window.localStorage } catch { return null }
   }
 
   function layoutCards() {
-    var container = $('cards')
+    var container = $('grid')
     if (!container) return []
     return Array.prototype.slice.call(container.querySelectorAll('[data-card-id]'))
-  }
-
-  /** Movable DOM slot for a card: grouped cards share one slot (channel grid). */
-  function layoutSlotOf(card) {
-    var slot = card && card.closest ? card.closest('[data-layout-slot]') : null
-    return slot || card
   }
 
   function layoutToast(message) {
@@ -1424,7 +1309,7 @@
     el.textContent = String(message || '')
     el.hidden = false
     if (toastTimer) window.clearTimeout(toastTimer)
-    toastTimer = window.setTimeout(function () { el.hidden = true }, 2600)
+    toastTimer = window.setTimeout(function () { el.hidden = true }, 2400)
   }
 
   function ensureHideButton(card) {
@@ -1438,22 +1323,24 @@
     card.appendChild(hide)
   }
 
-  var activeTab = 'dashboard'
+  function cardLabel(card) {
+    var named = card.getAttribute('data-card-label')
+    if (named) return named
+    var title = card.querySelector('h2')
+    return title ? title.textContent.trim() : card.getAttribute('data-card-id')
+  }
 
   function applyTabGroup() {
     if (!layoutApi) return
+    var body = document.body
+    body.dataset.tab = activeTab
+    body.classList.toggle('layout-editing', layoutEditing)
+    setText('pageTitle', layoutApi.TAB_LABELS[activeTab] || 'BioCore')
     var group = layoutEditing ? null : (layoutApi.TAB_GROUPS[activeTab] || [])
-    var panel = $('panel')
-    if (panel) {
-      var tabsKnown = ['dashboard', 'memory', 'relation', 'settings', 'tools']
-      for (var t = 0; t < tabsKnown.length; t += 1) {
-        panel.classList.toggle('tab-' + tabsKnown[t], activeTab === tabsKnown[t])
-      }
-    }
     var cards = layoutCards()
     for (var i = 0; i < cards.length; i += 1) {
       var id = cards[i].getAttribute('data-card-id')
-      cards[i].classList.toggle('tab-hidden', !!group && group.indexOf(id) < 0)
+      cards[i].classList.toggle('tab-off', !!group && group.indexOf(id) < 0)
     }
     var items = document.querySelectorAll('[data-tab]')
     for (var j = 0; j < items.length; j += 1) {
@@ -1467,6 +1354,8 @@
     if (!layoutApi || !layoutApi.TAB_GROUPS[tab]) return
     activeTab = tab
     applyTabGroup()
+    if (tab === 'tools') loadStats()
+    if (layoutEditing) renderAddCards()
   }
 
   function bindTabBar() {
@@ -1484,7 +1373,7 @@
     if (!layoutApi) return
     layoutState = layoutApi.normalizeLayout(next)
     if (persist !== false) layoutApi.writeLayout(layoutStorage(), layoutState)
-    var container = $('cards')
+    var container = $('grid')
     if (!container) return
     var cards = layoutCards()
     var byId = {}
@@ -1494,14 +1383,11 @@
       byId[card.getAttribute('data-card-id')] = card
     }
     var ordered = layoutApi.sortCards(Object.keys(byId), layoutState.order)
-    var orderedSlots = []
     for (var j = 0; j < ordered.length; j += 1) {
-      var id = ordered[j]
-      var node = byId[id]
+      var node = byId[ordered[j]]
       if (!node) continue
-      node.classList.toggle('is-hidden', layoutState.hidden.indexOf(id) >= 0)
-      var slot = layoutSlotOf(node)
-      if (orderedSlots.indexOf(slot) < 0) { orderedSlots.push(slot); container.appendChild(slot) }
+      node.classList.toggle('is-hidden', layoutState.hidden.indexOf(ordered[j]) >= 0)
+      container.appendChild(node)
     }
     renderAddCards()
     applyTabGroup()
@@ -1517,41 +1403,6 @@
       hidden: layoutState ? layoutState.hidden : [],
     })
     layoutApi.writeLayout(layoutStorage(), layoutState)
-  }
-
-  function setLayoutEditing(on) {
-    layoutEditing = !!on
-    var panel = $('panel')
-    if (panel) panel.classList.toggle('layout-editing', layoutEditing)
-    var title = $('pageTitle')
-    if (title) title.textContent = layoutEditing ? '编辑仪表盘' : 'BioCore'
-    var fab = $('layoutFab')
-    if (fab) fab.hidden = layoutEditing
-    var done = $('layoutDone')
-    if (done) done.hidden = !layoutEditing
-    var reset = $('layoutReset')
-    if (reset) reset.hidden = !layoutEditing
-    var cards = layoutCards()
-    for (var i = 0; i < cards.length; i += 1) ensureHideButton(cards[i])
-    ensureDeskHides()
-    applyDeskHidden()
-    renderAddCards()
-    applyTabGroup()
-    if (!layoutEditing) persistDomOrder()
-  }
-
-  function resetLayout(message) {
-    if (layoutApi) layoutApi.clearLayout(layoutStorage())
-    layoutState = layoutApi ? layoutApi.defaultLayout() : null
-    applyLayout(layoutState, false)
-    layoutToast(message || '已恢复默认布局')
-  }
-
-  function cardLabel(card) {
-    var named = card.getAttribute('data-card-label')
-    if (named) return named
-    var title = card.querySelector('h1, h2')
-    return title ? title.textContent.trim() : card.getAttribute('data-card-id')
   }
 
   function hiddenCards() {
@@ -1571,17 +1422,8 @@
     var section = $('addCards')
     var list = $('addList')
     if (!section || !list) return
-    if (!layoutEditing) {
-      section.hidden = true
-      list.textContent = ''
-      return
-    }
-    var hidden = hiddenCards()
-    var deskHidden = readDeskHidden()
-    var deskHiddenCards = deskCards().filter(function (card, index) {
-      return deskHidden.indexOf(deskCardId(card, index)) >= 0
-    })
-    if (!hidden.length && !deskHiddenCards.length) {
+    var hidden = layoutEditing ? hiddenCards() : []
+    if (!hidden.length) {
       section.hidden = true
       list.textContent = ''
       return
@@ -1596,14 +1438,6 @@
       chip.textContent = '+ ' + hidden[i].label
       list.appendChild(chip)
     }
-    for (var d = 0; d < deskHiddenCards.length; d += 1) {
-      var deskChip = document.createElement('button')
-      deskChip.type = 'button'
-      deskChip.className = 'add-chip'
-      deskChip.setAttribute('data-desk-add', deskCardId(deskHiddenCards[d], 0))
-      deskChip.textContent = '+ ' + deskLabel(deskHiddenCards[d])
-      list.appendChild(deskChip)
-    }
   }
 
   function showHiddenCard(id) {
@@ -1615,59 +1449,64 @@
     for (var i = 0; i < cards.length; i += 1) {
       if (cards[i].getAttribute('data-card-id') === id) label = cardLabel(cards[i])
     }
-    layoutToast('已添加「' + (label || id) + '」')
+    layoutToast('已恢复「' + (label || id) + '」')
   }
 
-  function cancelEntryPress() {
-    if (entryTimer) {
-      window.clearTimeout(entryTimer)
-      entryTimer = null
-    }
-    entryStart = null
+  function setLayoutEditing(on) {
+    layoutEditing = !!on
+    var fab = $('layoutFab')
+    if (fab) fab.hidden = layoutEditing
+    var done = $('layoutDone')
+    if (done) done.hidden = !layoutEditing
+    var reset = $('layoutReset')
+    if (reset) reset.hidden = !layoutEditing
+    var cards = layoutCards()
+    for (var i = 0; i < cards.length; i += 1) ensureHideButton(cards[i])
+    renderAddCards()
+    applyTabGroup()
+    if (layoutEditing) layoutToast('编辑模式：拖动排序，红色 − 隐藏卡片')
+    else persistDomOrder()
   }
 
-  function onPagePointerDown(event) {
-    if (layoutEditing) return
-    if (event.button !== undefined && event.button !== 0) return
-    var target = event.target
-    if (target && target.closest
-      && target.closest('input, textarea, button, select, a, [contenteditable]')) return
-    entryStart = { x: event.clientX, y: event.clientY }
-    if (entryTimer) window.clearTimeout(entryTimer)
-    entryTimer = window.setTimeout(function () {
-      entryTimer = null
-      if (!entryStart) return
-      entryStart = null
-      setLayoutEditing(true)
-      layoutToast('已进入编辑模式，长按卡片可拖动')
-    }, ENTRY_LONG_PRESS_MS)
+  function resetLayout(message) {
+    if (layoutApi) layoutApi.clearLayout(layoutStorage())
+    layoutState = layoutApi ? layoutApi.defaultLayout() : null
+    applyLayout(layoutState, false)
+    layoutToast(message || '已恢复默认布局')
   }
 
-  function beginDrag(card, event) {
+  /* --- drag & drop ------------------------------------------------------- */
+
+  function beginDrag(card, pointerId) {
     if (!layoutEditing || !layoutApi || !card) return
-    drag = { card: card, pointerId: event.pointerId }
+    drag = { card: card, pointerId: pointerId }
     card.classList.add('dragging')
-    try { if (card.setPointerCapture) card.setPointerCapture(event.pointerId) } catch { /* ignore */ }
+    try { if (card.setPointerCapture) card.setPointerCapture(pointerId) } catch { /* ignore */ }
   }
 
   function updateDrag(event) {
     if (!drag || event.pointerId !== drag.pointerId) return
+    var container = $('grid')
+    if (!container) return
     var cards = layoutCards()
+    var x = event.clientX
     var y = event.clientY
+    var reference = null
+    var last = null
     for (var i = 0; i < cards.length; i += 1) {
       var candidate = cards[i]
-      if (candidate === drag.card || candidate.classList.contains('is-hidden')) continue
+      if (candidate === drag.card) continue
+      if (candidate.classList.contains('tab-off') || candidate.classList.contains('is-hidden')) continue
       var rect = candidate.getBoundingClientRect()
-      if (y >= rect.top && y <= rect.bottom) {
-        var after = y > rect.top + rect.height / 2
-        var reference = after ? candidate.nextSibling : candidate
-        if (reference === drag.card) return
-        if (!after && candidate.previousSibling === drag.card) return
-        var container = $('cards')
-        if (container) container.insertBefore(drag.card, reference)
-        return
-      }
+      last = rect
+      if (y < rect.top) { reference = candidate; break }
+      if (y <= rect.bottom && x < rect.left + rect.width / 2) { reference = candidate; break }
     }
+    if (reference) {
+      container.insertBefore(drag.card, reference)
+      return
+    }
+    if (last && y > last.bottom) container.appendChild(drag.card)
   }
 
   function endDrag() {
@@ -1679,41 +1518,50 @@
     persistDomOrder()
   }
 
-  function onCardsPointerDown(event) {
+  function onGridPointerDown(event) {
     if (!layoutEditing) return
     var target = event.target
-    var card = target && target.closest ? target.closest('[data-card-id]') : null
-    if (!card) return
+    if (!target || !target.closest) return
     if (target.closest('[data-layout-hide]')) return
+    var card = target.closest('[data-card-id]')
+    if (!card) return
     var intent = layoutApi && layoutApi.dragIntent
       ? layoutApi.dragIntent({ editing: layoutEditing, pointerType: event.pointerType })
       : { hold: true }
     if (!intent.hold) return
     if (event.cancelable) event.preventDefault()
-    pressStart = { x: event.clientX, y: event.clientY, card: card, pointerId: event.pointerId }
+    pressStart = {
+      x: event.clientX,
+      y: event.clientY,
+      card: card,
+      pointerId: event.pointerId,
+      touch: event.pointerType !== 'mouse',
+    }
     if (pressTimer) window.clearTimeout(pressTimer)
-    pressTimer = window.setTimeout(function () {
-      pressTimer = null
-      if (!pressStart) return
-      var pending = pressStart
-      pressStart = null
-      beginDrag(pending.card, { pointerId: pending.pointerId })
-    }, LONG_PRESS_MS)
+    if (pressStart.touch) {
+      pressTimer = window.setTimeout(function () {
+        pressTimer = null
+        if (!pressStart) return
+        var pending = pressStart
+        pressStart = null
+        beginDrag(pending.card, pending.pointerId)
+      }, LONG_PRESS_MS)
+    }
   }
 
-  function onCardsPointerMove(event) {
-    if (entryTimer && entryStart) {
-      var edx = event.clientX - entryStart.x
-      var edy = event.clientY - entryStart.y
-      if (edx * edx + edy * edy > MOVE_CANCEL_PX * MOVE_CANCEL_PX) cancelEntryPress()
-    }
-    if (pressTimer && pressStart) {
+  function onDocPointerMove(event) {
+    if (pressStart && !drag) {
       var dx = event.clientX - pressStart.x
       var dy = event.clientY - pressStart.y
       if (dx * dx + dy * dy > MOVE_CANCEL_PX * MOVE_CANCEL_PX) {
-        window.clearTimeout(pressTimer)
-        pressTimer = null
+        if (pressTimer) { window.clearTimeout(pressTimer); pressTimer = null }
+        if (pressStart.touch) {
+          pressStart = null
+          return
+        }
+        var pending = pressStart
         pressStart = null
+        beginDrag(pending.card, pending.pointerId)
       }
       return
     }
@@ -1723,25 +1571,22 @@
     }
   }
 
-  function onCardsPointerUp() {
-    cancelEntryPress()
-    if (pressTimer) {
-      window.clearTimeout(pressTimer)
-      pressTimer = null
-    }
+  function onDocPointerUp() {
+    if (pressTimer) { window.clearTimeout(pressTimer); pressTimer = null }
     pressStart = null
     endDrag()
   }
 
-  function onCardsClick(event) {
+  function onGridClick(event) {
     var target = event.target
-    var add = target && target.closest ? target.closest('[data-add-card]') : null
+    if (!target || !target.closest) return
+    var add = target.closest('[data-add-card]')
     if (add) {
       event.preventDefault()
       showHiddenCard(add.getAttribute('data-add-card'))
       return
     }
-    var hide = target && target.closest ? target.closest('[data-layout-hide]') : null
+    var hide = target.closest('[data-layout-hide]')
     if (!hide) return
     event.preventDefault()
     var card = hide.closest('[data-card-id]')
@@ -1753,7 +1598,7 @@
       return
     }
     applyLayout(next)
-    layoutToast('已隐藏「' + cardLabel(card) + '」，可在「添加卡片」恢复')
+    layoutToast('已隐藏「' + cardLabel(card) + '」')
   }
 
   function initLayout() {
@@ -1766,23 +1611,48 @@
     if (fab) fab.addEventListener('click', function () { setLayoutEditing(true) })
     if (done) done.addEventListener('click', function () { setLayoutEditing(false) })
     if (reset) reset.addEventListener('click', function () { resetLayout() })
-    var cards = $('cards')
-    if (cards) {
-      cards.addEventListener('pointerdown', onCardsPointerDown)
-      cards.addEventListener('click', onCardsClick)
-    }
+    var grid = $('grid')
+    if (grid) grid.addEventListener('pointerdown', onGridPointerDown)
+    document.addEventListener('click', onGridClick)
     bindTabBar()
-    document.addEventListener('pointerdown', onPagePointerDown)
-    document.addEventListener('pointermove', onCardsPointerMove, { passive: false })
-    document.addEventListener('pointerup', onCardsPointerUp)
-    document.addEventListener('pointercancel', onCardsPointerUp)
-    ensureDeskHides()
-    applyDeskHidden()
-    document.addEventListener('click', onDeskEditClick)
+    document.addEventListener('pointermove', onDocPointerMove, { passive: false })
+    document.addEventListener('pointerup', onDocPointerUp)
+    document.addEventListener('pointercancel', onDocPointerUp)
   }
 
+  /* ---------------------------------------------------------------- 侧栏 --- */
+
+  function railApply(collapsed) {
+    document.body.classList.toggle('rail-collapsed', !!collapsed)
+    var button = $('railToggle')
+    if (!button) return
+    var label = collapsed ? '展开导航' : '收起导航'
+    button.setAttribute('aria-expanded', String(!collapsed))
+    button.setAttribute('aria-label', label)
+    button.setAttribute('title', label)
+  }
+
+  function railInit() {
+    var storage = layoutStorage()
+    var key = layoutApi && layoutApi.RAIL_KEY ? layoutApi.RAIL_KEY : 'biocore-panel-rail-v1'
+    var collapsed = false
+    try { collapsed = !!storage && storage.getItem(key) === '1' } catch { collapsed = false }
+    railApply(collapsed)
+    var button = $('railToggle')
+    if (!button) return
+    button.addEventListener('click', function () {
+      var next = !document.body.classList.contains('rail-collapsed')
+      railApply(next)
+      try { if (storage) storage.setItem(key, next ? '1' : '0') } catch { /* ignore */ }
+    })
+  }
+
+  /* ---------------------------------------------------------------- boot --- */
+
   function boot() {
+    applyTheme()
     railInit()
+    if (layoutApi && layoutApi.TAB_GROUPS[INITIAL_TAB]) activeTab = INITIAL_TAB
     initLayout()
     bindAdvanced()
     bindPersona()
@@ -1791,17 +1661,21 @@
     bindExpression()
     loadModelSettings()
     buildSwitches()
+
     if (!SESSION) {
       setStatus(false, '未连接')
-      renderEmpty('request_failed')
-      setText('chartHint', '无数据')
+      render(null)
+      setText('motivation', '没有会话参数，先在聊天会话里打开')
       renderTrace({ ok: true, rows: [] })
+      window.setTimeout(finishBoot, 600)
       return
     }
     loadSwitches()
     loadSeries()
     fetchState()
     fetchTrace()
+    loadStats()
+
     function pollTick() {
       if (document.hidden) return
       fetchState()
@@ -1809,17 +1683,17 @@
     }
     window.setInterval(pollTick, POLL_MS)
     window.setInterval(updateStatusClock, 1000)
+    window.setInterval(loadStats, STATS_MS)
     document.addEventListener('visibilitychange', function () {
       if (document.hidden) return
       fetchState()
       fetchTrace()
+      loadStats()
     })
     window.addEventListener('resize', function () { renderChart(lastData) })
+    window.setTimeout(finishBoot, 3000)
   }
 
-  if (document.readyState === 'loading') {
-    document.addEventListener('DOMContentLoaded', boot)
-  } else {
-    boot()
-  }
+  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', boot)
+  else boot()
 })();

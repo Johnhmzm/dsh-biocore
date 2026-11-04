@@ -69,6 +69,8 @@ if _PLUGIN_ROOT not in sys.path:
 
 MAX_CHARS = 420
 TOP_K = 5
+INJECT_MAX_K = 10          # inject_block may ask for more when rerank prunes
+INJECT_MODES = ("query", "recent")
 HOURLY_CAP = 20
 MIN_CHARS = 8
 MAX_TEXT_CHARS = 2000
@@ -95,6 +97,43 @@ try:
     from biocore_runtime import rerank as _rerank_mod
 except Exception:  # pragma: no cover
     _rerank_mod = None
+
+try:  # task-221: one global core state shared by every session
+    from . import core_state as _core_state
+except Exception:  # pragma: no cover
+    try:
+        from biocore_runtime import core_state as _core_state
+    except Exception:
+        _core_state = None
+
+try:  # task-223: memory governance + relationship accumulation
+    from . import governance as _governance
+except Exception:  # pragma: no cover
+    try:
+        from biocore_runtime import governance as _governance
+    except Exception:
+        _governance = None
+try:
+    from . import relationship_state as _relationship_state
+except Exception:  # pragma: no cover
+    try:
+        from biocore_runtime import relationship_state as _relationship_state
+    except Exception:
+        _relationship_state = None
+try:  # task-222: self layer + autonomy
+    from . import self_layer as _self_layer
+except Exception:  # pragma: no cover
+    try:
+        from biocore_runtime import self_layer as _self_layer
+    except Exception:
+        _self_layer = None
+try:
+    from . import autonomy as _autonomy
+except Exception:  # pragma: no cover
+    try:
+        from biocore_runtime import autonomy as _autonomy
+    except Exception:
+        _autonomy = None
 
 try:
     from biocore_model import sanitize as _sanitize
@@ -378,16 +417,272 @@ def capture(session_id, role, text, store, config=None):
     return {"ok": True, "decision": decision, "entry": entry}
 
 
+# ---------------------------------------------------------------- governance
+def _concepts_of(text):
+    if _governance is None:
+        return []
+    try:
+        return _governance.extract_concepts(text)
+    except Exception:
+        return []
+
+
+def _concept_filter(entries, query):
+    """Keep entries whose concepts intersect the query (fallback: all)."""
+    rows = [entry for entry in (entries or []) if isinstance(entry, dict)]
+    wanted = set(_concepts_of(query))
+    if not wanted:
+        return rows
+    narrowed = [entry for entry in rows
+                if wanted & set(entry.get("concepts") or [])]
+    return narrowed or rows
+
+
+def _governance_tick(store, now=None):
+    """Decay/index/graph/aggregate sidecars; never deletes a memory."""
+    if _governance is None or not store:
+        return None
+    try:
+        return _governance.run(store, now=now)
+    except Exception:
+        return None
+
+
+def _relationship_tick(store, user_text, now=None):
+    """Bounded trust/closeness/conflict accumulation + attachment/repair."""
+    if _relationship_state is None or not store:
+        return None
+    try:
+        if not _relationship_state.enabled(store):
+            return {"enabled": False, "skipped": True}
+        before = relationship_read(store)["relationship"]
+        signal = _relationship_state.signals(user_text)
+        deltas = signal.get("deltas") or {}
+        if deltas:
+            relationship_update(store, deltas=deltas, now=now)
+        after = relationship_read(store)["relationship"]
+        summary = _relationship_state.summary(store, after)
+        style = summary.get("attachment_style")
+        if style and style != after.get("attachment_style"):
+            relationship_update(store, attachment_style=style, now=now)
+            after = relationship_read(store)["relationship"]
+        _relationship_state.record_event(store, signal.get("kind"),
+                                         user_text, deltas, now=now)
+        return {"kind": signal.get("kind"), "deltas": deltas,
+                "trust": round(_num(after.get("trust"), 0.5), 4),
+                "closeness": round(_num(after.get("closeness"), 0.5), 4),
+                "conflict": round(_num(after.get("conflict"), 0.0), 4),
+                "delta_trust": round(_num(after.get("trust"), 0.5)
+                                     - _num(before.get("trust"), 0.5), 4),
+                "delta_closeness": round(_num(after.get("closeness"), 0.5)
+                                         - _num(before.get("closeness"), 0.5), 4),
+                "attachment_style": str(after.get("attachment_style") or style),
+                "summary": summary}
+    except Exception:
+        return None
+
+
+def _identity_tick(store, narrative=None, now=None):
+    if _self_layer is None or not store:
+        return None
+    try:
+        cfg = _load_runtime_config(store)
+        persona_hash = _self_layer.hash_persona(cfg.get("persona_text"))
+        return _self_layer.update(store, persona_hash=persona_hash,
+                                  narrative=narrative, now=now)
+    except Exception:
+        return None
+
+
+def _autonomy_tick(store, data=None, now=None):
+    if _autonomy is None or not store:
+        return None
+    try:
+        payload = data if isinstance(data, dict) else {}
+        switches = _effective_switches(store, payload.get("switches"))
+        if not switches.get("core_enabled", True) or not switches.get(
+                "autonomy", True):
+            return {"ok": True, "action": None, "reason": "disabled",
+                    "metrics": _autonomy.metrics(store, now),
+                    "limits": _autonomy.limits(store)}
+        core_path = _core_state_path(payload)
+        state = {}
+        if _core_state is not None and _core_state.exists(core_path):
+            doc = _core_state.load(core_path)
+            state = {"core": _core_state.core_of(doc),
+                     "intero": doc.get("intero")}
+        elif isinstance(payload.get("state"), dict):
+            state = payload["state"]
+        return _autonomy.decide(
+            store, now=now,
+            session_id=str(payload.get("session_id") or "autonomy"),
+            state=state,
+            last_human_ts=_num(payload.get("last_human_ts"), 0.0),
+            silence_minutes=_num(payload.get("silence_minutes"), 0.0))
+    except Exception:
+        return None
+
+
 # ---------------------------------------------------------------- inject
-def inject_block(session_id, store, max_chars=MAX_CHARS, top_k=TOP_K):
-    """Top-k session memories as one bounded Chinese prompt block."""
+def _store_data_dir(store):
+    root = _store_root(store)
+    if root is None:
+        return None
+    return root.parent if root.name == "memory" else root
+
+
+def _data_flags(store):
+    """<dataDir>/flags.json booleans (learning switches live next to memory/).
+
+    task-221口径: DSH learning switches default ON; an explicit file value wins.
+    """
+    merged = {"mood_recall": True, "affect_encoding": True,
+              "memory_feedback": True, "preference_drift": True}
+    data_dir = _store_data_dir(store)
+    if data_dir is None:
+        return merged
+    raw = _load_json(data_dir / "flags.json", {})
+    for key, value in raw.items():
+        if isinstance(value, bool):
+            merged[str(key)] = value
+    cfg = _load_runtime_config(store)
+    switches = cfg.get("switches") if isinstance(cfg.get("switches"), dict) else {}
+    for key, value in switches.items():
+        if isinstance(value, bool):
+            merged[str(key)] = value
+    return merged
+
+
+def _inject_engine(store, entries):
+    """MemoryEngine over this session's entries, with the env embedder."""
+    try:
+        from biocore_memory.engine import MemoryEngine
+        from biocore_memory.recall.embedding import load_provider
+        from biocore_memory.store.json_store import MemoryStore
+    except Exception:
+        return None
+    embedder = None
+    try:
+        cfg = _load_runtime_config(store)
+        emb = cfg.get("embedding") if isinstance(cfg.get("embedding"), dict) else {}
+        provider_cfg = {}
+        if emb:
+            provider_cfg = {
+                "embedding_mode": emb.get("mode") or "auto",
+                "embedding_base_url": emb.get("base_url") or "",
+                "embedding_model": emb.get("model") or "",
+                "embedding_api_key": emb.get("api_key") or "",
+            }
+        embedder = load_provider(provider_cfg)
+    except Exception:
+        embedder = None
+    try:
+        memory = MemoryStore(doc={"entries": [dict(item) for item in entries
+                                              if isinstance(item, dict)]})
+        return MemoryEngine(store=memory, embedder=embedder,
+                            config={"flags": _data_flags(store)})
+    except Exception:
+        return None
+
+
+def _rerank_entries(query, entries, rerank_config):
+    """Reorder candidates by the optional rerank API; None keeps local order."""
+    if _rerank_mod is None or not isinstance(rerank_config, dict):
+        return None
+    if not rerank_config.get("rerank_enabled"):
+        return None
+    try:
+        texts = [str(entry.get("text") or "") for entry in entries]
+        ranked = _rerank_mod.rerank_documents(query, texts, rerank_config)
+    except Exception:
+        return None
+    if not ranked:
+        return None
+    ordered = []
+    for item in ranked:
+        try:
+            index = int(item.get("index", -1))
+        except Exception:
+            continue
+        if 0 <= index < len(entries) and entries[index] not in ordered:
+            ordered.append(entries[index])
+    for entry in entries:
+        if entry not in ordered:
+            ordered.append(entry)
+    return ordered or None
+
+
+def _query_entries(store, session_id, query, top_k, rerank_config):
+    """engine.recall(query) over the injected candidates; None means fallback."""
+    entries = _visible(load_memory(store, session_id).get("entries"))
+    if not entries:
+        return None
+    engine = _inject_engine(store, entries)
+    if engine is None:
+        return None
+    rows = engine.recall(str(query)[:MAX_TEXT_CHARS], budget=top_k)
+    if not isinstance(rows, list) or not rows:
+        return None
+    picked = [row.get("entry") for row in rows
+              if isinstance(row, dict) and isinstance(row.get("entry"), dict)]
+    if not picked:
+        return None
+    # task-223: concept filter (entries written with concepts only).
+    narrowed = _concept_filter(picked, query)
+    if 0 < len(narrowed) < len(picked):
+        picked = narrowed
+        if _governance is not None:
+            try:
+                _governance.note_concept_filter(store, len(picked))
+            except Exception:
+                pass
+    if len(picked) > 1:
+        reordered = _rerank_entries(query, picked, rerank_config)
+        if reordered:
+            picked = reordered
+    # task-223: index hit + decay weight (cold memories sink, never deleted).
+    if _governance is not None:
+        try:
+            hits = set(_governance.lookup(store, query))
+            if hits:
+                _governance.note_index_hit(store)
+            if hits:
+                picked.sort(key=lambda entry: (
+                    1 if str(entry.get("id") or "") in hits else 0,
+                    _governance.weight_of(store, str(entry.get("id") or "")),
+                    _num(entry.get("importance"), 0.5)), reverse=True)
+        except Exception:
+            pass
+    return picked[:top_k]
+
+
+def inject_block(session_id, store, max_chars=MAX_CHARS, top_k=TOP_K,
+                 query="", mode="query", rerank_config=None):
+    """Top-k session memories as one bounded Chinese prompt block.
+
+    mode="query"  recall this turn's words (engine.recall + env embedder,
+                  optional rerank); any failure falls back to recent.
+    mode="recent" keep the pin+ts ordering.
+    """
     session_id = sanitize_session_id(session_id)
     budget = _int_param(max_chars, MAX_CHARS, 0, MAX_CHARS)
-    limit = _int_param(top_k, TOP_K, 1, TOP_K)
-    entries = sorted(_visible(load_memory(store, session_id).get("entries")),
-                     key=lambda entry: (1 if entry.get("pin") else 0,
-                                        _num(entry.get("ts"), 0.0)),
-                     reverse=True)[:limit]
+    limit = _int_param(top_k, TOP_K, 1, INJECT_MAX_K)
+    text_query = clean_text(query, MAX_TEXT_CHARS)
+    chosen = str(mode or "query").strip().lower()
+    entries = []
+    if chosen == "query" and text_query:
+        try:
+            picked = _query_entries(store, session_id, text_query, limit,
+                                    rerank_config)
+        except Exception:
+            picked = None
+        if picked:
+            entries = list(picked)
+    if not entries:
+        entries = sorted(_visible(load_memory(store, session_id).get("entries")),
+                         key=lambda entry: (1 if entry.get("pin") else 0,
+                                            _num(entry.get("ts"), 0.0)),
+                         reverse=True)[:limit]
     header = "你记得这些事："
     ids = []
     if not entries or budget <= len(header) + 3:
@@ -591,6 +886,7 @@ def _new_entry(text, role, tags, now):
         "pin": False,
         "importance": 0.5,
         "hits": 1,
+        "concepts": _concepts_of(text),
     }
 
 
@@ -1558,6 +1854,365 @@ def apply_persona_to_session(session_id, payload):
     return state
 
 
+
+
+# ---------------------------------------------------------------- core state
+def _core_state_path(payload):
+    """<dataDir>/core_state.json for any payload (store = <dataDir>/memory)."""
+    if _core_state is None:
+        return None
+    data = payload if isinstance(payload, dict) else {}
+    try:
+        return _core_state.path_for(data.get("store"),
+                                    data.get("data_dir") or data.get("dataDir"))
+    except Exception:
+        return None
+
+
+def _intero_from_core(doc, prev, dt_hours, now):
+    """Recompute intero from the global body, using its own intero as prev."""
+    body = dict(doc) if isinstance(doc, dict) else {}
+    merged = {"core": body}
+    if isinstance(prev, dict) and prev:
+        merged["core"] = dict(body, intero=prev)
+        merged["intero"] = dict(prev)
+    return compute_intero(merged, dt_hours=dt_hours or 0.0, now=now)
+
+
+def _state_deltas(payload):
+    """This turn's numeric deltas: direct dict, or diagnostics before/after."""
+    data = payload if isinstance(payload, dict) else {}
+    out = {}
+
+    def add(key, value):
+        if key not in _CORE_FIELDS:
+            return
+        try:
+            out[key] = out.get(key, 0.0) + float(value)
+        except Exception:
+            pass
+
+    for source_key in ("delta", "deltas", "state_delta"):
+        raw = data.get(source_key)
+        if isinstance(raw, dict):
+            for key, value in raw.items():
+                add(str(key), value)
+        elif isinstance(raw, list):
+            for item in raw:
+                if not isinstance(item, dict):
+                    continue
+                add(str(item.get("field") or item.get("key") or ""),
+                    _num(item.get("after"), 0.0) - _num(item.get("before"), 0.0))
+    return {key: round(value, 4) for key, value in out.items()
+            if abs(value) > 1e-9}
+
+
+_CORE_FIELDS = ("v", "a", "stress", "energy", "social", "social_pain",
+                "trust", "closeness", "conflict")
+
+
+def _recall_count(store, session_id):
+    """Recalled memory hits for this session (0 when traces are empty)."""
+    try:
+        total = 0
+        for row in trace_read(store, session_id, TRACE_KEEP):
+            memory = row.get("memory") if isinstance(row.get("memory"), dict) else {}
+            ids = memory.get("recalled_ids")
+            if isinstance(ids, list):
+                total += len(ids)
+        return total
+    except Exception:
+        return 0
+
+
+def _proactive_sent_today(store):
+    """Messages delivered by the proactive path today (0 when none)."""
+    try:
+        root = _store_root(store)
+        if root is None:
+            return 0
+        data = _load_json(root / "proactive.json", {})
+        sent = data.get("sent") if isinstance(data.get("sent"), list) else []
+        now = time.time()
+        start = time.mktime(time.localtime(now)[:3] + (0, 0, 0, 0, 0, -1))
+        return sum(1 for item in sent if _num(item, 0.0) / 1000.0 >= start)
+    except Exception:
+        return 0
+
+
+def _series_payload(store, payload=None):
+    """Newest <=24 points from the global history + growth_history.jsonl."""
+    data = payload if isinstance(payload, dict) else {}
+    limit = _int_param(data.get("limit"), 24, 1, 288)
+    rows = []
+    try:
+        rows = _core_state.points(_core_state_path(data), limit) if _core_state else []
+    except Exception:
+        rows = []
+    growth = []
+    try:
+        root = _store_root(store)
+        path = (root / "growth_history.jsonl") if root is not None else None
+        if path is not None and path.exists():
+            for line in path.read_text(encoding="utf-8").splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    item = json.loads(line)
+                except Exception:
+                    continue
+                if isinstance(item, dict) and _num(item.get("ts"), 0.0) > 0:
+                    growth.append({"ts": round(_num(item.get("ts")), 3),
+                                   "trust": round(_num(item.get("trust"), 0.5), 4),
+                                   "closeness": round(_num(item.get("closeness"),
+                                                           0.5), 4)})
+    except Exception:
+        growth = []
+    if growth:
+        known = {round(_num(row.get("ts"), 0.0), 0) for row in rows}
+        for item in growth[-limit:]:
+            if round(_num(item.get("ts"), 0.0), 0) not in known:
+                rows.append(item)
+        rows.sort(key=lambda row: _num(row.get("ts"), 0.0))
+        rows = rows[-limit:]
+    series = {key: [row.get(key) for row in rows
+                    if isinstance(row, dict) and row.get(key) is not None]
+              for key in ("ts", "v", "tension", "warmth", "heaviness",
+                          "clarity", "trust", "closeness")}
+    return {"ok": True, "series": series, "points": rows,
+            "source": "core_state" if _core_state else "unavailable"}
+
+
+_RUNTIME_CONFIG = {}
+CORE_CONFIG_FILE = "core_config.json"
+CORE_DEFAULTS = {
+    # contract: everything core-side is on; only external/irreversible off.
+    "core_enabled": True,
+    "mood_recall": True, "affect_encoding": True,
+    "memory_feedback": True, "preference_drift": True,
+    "governance": True, "index": True, "consolidate": True,
+    "evict": True, "evict_delete": False,
+    "relationship_governance": True,
+    "self_layer": True, "motivation": True,
+    "autonomy": True, "standby": True,
+    "safety_enabled": False, "boundary_enabled": False,
+    "crisis_safety_enabled": False,
+    "proactive_send": True,
+    "recall_mode": "query",
+}
+
+
+def _load_runtime_config(store):
+    data_dir = _store_data_dir(store)
+    doc = {}
+    if data_dir is not None:
+        doc = _load_json(data_dir / CORE_CONFIG_FILE, {})
+    if not isinstance(doc, dict) or not doc:
+        doc = _RUNTIME_CONFIG
+    return doc if isinstance(doc, dict) else {}
+
+
+def configure(payload):
+    """task-223: whole config arrives once; the core owns every decision."""
+    data = payload if isinstance(payload, dict) else {}
+    store = data.get("store")
+    data_dir = data.get("data_dir")
+    if not data_dir:
+        data_dir = _store_data_dir(store) if store else None
+    doc = {key: value for key, value in data.items()
+           if key not in ("store", "data_dir")}
+    doc["updated_at"] = round(time.time(), 3)
+    if data_dir is not None:
+        try:
+            _atomic_write(Path(data_dir) / CORE_CONFIG_FILE, doc)
+        except Exception:
+            pass
+    _RUNTIME_CONFIG.clear()
+    _RUNTIME_CONFIG.update(doc)
+    return {"ok": True, "configured": True,
+            "switches": doc.get("switches") if isinstance(
+                doc.get("switches"), dict) else {}}
+
+
+def _effective_switches(store, overrides=None):
+    merged = dict(CORE_DEFAULTS)
+    data_dir = _store_data_dir(store)
+    if data_dir is not None:
+        flags = _load_json(data_dir / "flags.json", {})
+        for key, value in flags.items():
+            if isinstance(value, bool):
+                merged[str(key)] = value
+    cfg = _load_runtime_config(store)
+    switches = cfg.get("switches") if isinstance(cfg.get("switches"), dict) else {}
+    for key, value in switches.items():
+        if isinstance(value, bool):
+            merged[str(key)] = value
+    if isinstance(overrides, dict):
+        for key, value in overrides.items():
+            if isinstance(value, bool):
+                merged[str(key)] = value
+    return merged
+
+
+def _rerank_config_from(raw):
+    """Accept either the adapter's rerank payload or config.json's rerank block."""
+    if not isinstance(raw, dict):
+        return None
+    if "rerank_enabled" in raw:
+        return raw
+    return {"rerank_enabled": raw.get("enabled") is True,
+            "rerank_base_url": str(raw.get("base_url") or ""),
+            "rerank_model": str(raw.get("model") or ""),
+            "rerank_api_key": str(raw.get("api_key") or ""),
+            "rerank_top_n": int(raw.get("top_n") or 20),
+            "rerank_timeout": 8}
+
+
+def _recall_mode(store, requested=None):
+    mode = str(requested or "").strip().lower()
+    if mode in INJECT_MODES:
+        return mode
+    cfg = _load_runtime_config(store)
+    mode = str(cfg.get("recall_mode") or "").strip().lower()
+    return mode if mode in INJECT_MODES else "query"
+
+
+MOTIVATIONS = {
+    "hold": "想先听着，不急着推进",
+    "approach": "想靠近一点，再问一句",
+    "withdraw": "想退半步，留点空间",
+    "probe": "想探一探，但还不确定",
+    "repair": "想把话圆回来",
+    "rest": "有点累，想安静待着",
+    "share": "想说说自己这边的事",
+}
+
+
+def _ui_state_body(store, session_id, data):
+    """task-223: the /state payload is assembled by the core, JS forwards it."""
+    entries = _visible(load_memory(store, session_id).get("entries"))
+    stored_state = _load_session_state(store, session_id)
+    core_path = _core_state_path(data)
+    core_state_ts = 0.0
+    if _core_state is not None and _core_state.exists(core_path):
+        doc = _core_state.load(core_path)
+        core = _core_state.core_of(doc)
+        intero = doc.get("intero")
+        if not isinstance(intero, dict):
+            intero = compute_intero({"core": core})
+        core["intero"] = intero
+        core_state_ts = doc.get("ts", 0.0)
+        history = list(doc.get("history") or [])[-120:]
+    else:
+        merged_state = apply_intero_to_state(stored_state, data.get("state"))
+        intero = merged_state.get("intero") or {}
+        core = dict(merged_state.get("core") or {})
+        core["intero"] = intero
+        history = list(stored_state.get("history") or [])[-120:]
+    relationship = (relationship_read(store)["relationship"]
+                    if _store_root(store) is not None else {})
+    recent = []
+    for entry in sorted(entries, key=lambda item: _num(item.get("ts"), 0.0),
+                        reverse=True)[:10]:
+        text = clean_text(entry.get("text"), 500)
+        if not text:
+            continue
+        recent.append({"ts": round(_num(entry.get("ts"), 0.0) * 1000, 0),
+                       "text": text[:80],
+                       "source": str(entry.get("memory_source") or "direct"),
+                       "kind": str(entry.get("kind") or "")})
+    rel_metrics = {"closeness": round(_num(relationship.get("closeness"), 0.5), 2),
+                   "trust": round(_num(relationship.get("trust"), 0.5), 2),
+                   "conflict": round(_num(relationship.get("conflict"), 0.0), 2),
+                   "bids": round(_num(relationship.get("bids"), 0.0), 2)}
+    body = {"self_esteem": round(_num(core.get("self_esteem"), 0.0), 2),
+            "social_pain": round(_num(core.get("social_pain"), 0.0), 2),
+            "energy": round(_num(core.get("energy"), 0.5), 2),
+            "social": round(_num(core.get("social"), 0.5), 2)}
+    trace_rows = trace_read(store, session_id, 1)
+    last_trace = trace_rows[-1] if trace_rows else {}
+    last_turn = last_trace.get("intent") if isinstance(last_trace, dict) else {}
+    intent = str((last_turn or {}).get("kind") or "")[:24]
+    governance_summary = None
+    if _governance is not None:
+        try:
+            governance_summary = _governance.summary(store)
+        except Exception:
+            governance_summary = None
+    relationship_summary = None
+    if _relationship_state is not None:
+        try:
+            relationship_summary = _relationship_state.summary(store, relationship)
+        except Exception:
+            relationship_summary = None
+    identity_summary = None
+    if _self_layer is not None:
+        try:
+            identity_summary = _self_layer.summary(store)
+        except Exception:
+            identity_summary = None
+    autonomy_view = None
+    if _autonomy is not None:
+        try:
+            switches = _effective_switches(store)
+            metrics = _autonomy.metrics(store)
+            autonomy_view = {
+                "enabled": bool(switches.get("autonomy", True)),
+                "actions_today": metrics["actions_today"],
+                "sends_today": metrics["sends_today"],
+                "actions_hour": metrics["actions_hour"],
+                "sends_hour": metrics["sends_hour"],
+                "limits": _autonomy.limits(store)}
+        except Exception:
+            autonomy_view = None
+    identity = {"v": round(_num(core.get("v"), 0.0), 2),
+                "intero": intero,
+                "governance": governance_summary,
+                "relationship_summary": relationship_summary,
+                "identity": identity_summary,
+                "available": True,
+                "session_id": sanitize_session_id(session_id),
+                "memory_count": len(entries),
+                "memory": {"count": len(entries)},
+                "memory_recent": recent,
+                "relationship_metrics": rel_metrics,
+                "body_metrics": body,
+                "narrative": {"intent": intent, "length_factor": 1.0,
+                              "initiative": 0.5, "metacog_band": "",
+                              "allow_correction": False},
+                "motivation": MOTIVATIONS.get(intent, "安静待着，等你开口"),
+                "tone": {"label": ""},
+                "relation": {"stage": ""},
+                "autonomy": {"state": "静", **((autonomy_view or {}))},
+                "history": history,
+                "core_state_ts": core_state_ts,
+                "recall_count": _recall_count(store, session_id),
+                "governance_numbers": (governance_summary or {}),
+                "proactive_sent_today": _proactive_sent_today(store),
+                "core": core,
+                "source": "core"}
+    return identity
+
+
+def _embed_stats_snapshot():
+    """Embedding counters: persisted file (spawn-per-call) wins over process."""
+    data = {}
+    try:
+        from biocore_memory.recall.embedding import embed_stats as _embed_stats
+        data = dict(_embed_stats())
+    except Exception:
+        data = {}
+    path = str(os.environ.get("BIOCORE_EMBED_STATS_FILE") or "").strip()
+    if path and os.path.isfile(path):
+        persisted = _load_json(Path(path), {})
+        if isinstance(persisted, dict) and persisted:
+            data = {key: int(persisted.get(key, data.get(key, 0)) or 0)
+                    for key in ("hit", "disk_hit", "miss", "remote",
+                                "local", "fail")}
+    return data
+
+
 # ---------------------------------------------------------------- turn trace
 TRACE_DIR = "traces"
 TRACE_KEEP = 50
@@ -1773,11 +2428,52 @@ def dispatch(action, payload=None):
             if "user_text" not in data:
                 return bad("missing user_text")
             user_text = clean_text(data.get("user_text"))
+            switches = _effective_switches(store, data.get("switches"))
+            data["switches"] = switches
+            if not switches.get("core_enabled", True):
+                return {"ok": True, "prompt_block": "", "state": {},
+                        "disabled": True, "reason": "core_disabled"}
             merge_shared_relationship_into_state(session_id, data)
             session_state = apply_persona_to_session(session_id, data)
             session_state = session_state if isinstance(session_state, dict) else {}
-            session_state = apply_intero_to_state(session_state, data.get("state"))
             state_store = _relationship_store(data)
+            core_path = _core_state_path(data)
+            if _core_state is not None and core_path is not None:
+                payload_state = (data.get("state")
+                                 if isinstance(data.get("state"), dict) else {})
+                payload_core = (payload_state.get("core")
+                                if isinstance(payload_state.get("core"), dict)
+                                else {})
+                legacy_core = dict(payload_core)
+                session_core = session_state.get("core")
+                if isinstance(session_core, dict):
+                    legacy_core.update(session_core)
+                if _core_state.exists(core_path):
+                    _core_state.migrate_session(core_path, legacy_core,
+                                                session_id, now=time.time())
+                else:
+                    passed = {key: legacy_core[key] for key in _CORE_FIELDS
+                              if key in legacy_core}
+                    _core_state.apply(core_path, absolute=passed,
+                                      now=time.time(), session_id=session_id,
+                                      intero_fn=_intero_from_core)
+                doc = _core_state.load(core_path)
+                if doc.get("intero") is None:
+                    _core_state.apply(core_path, now=time.time(),
+                                      session_id=session_id,
+                                      intero_fn=_intero_from_core)
+                    doc = _core_state.load(core_path)
+                core = dict(legacy_core)
+                core.update(_core_state.core_of(doc))
+                if isinstance(doc.get("intero"), dict):
+                    core["intero"] = dict(doc["intero"])
+                    session_state["intero"] = dict(doc["intero"])
+                session_state["core"] = core
+                session_state["core_delta"] = {}
+                session_state["core_state_ts"] = doc.get("ts", 0.0)
+            else:
+                session_state = apply_intero_to_state(session_state,
+                                                      data.get("state"))
             if state_store is not None:
                 _save_session_state(state_store, session_id, session_state)
             capture_enabled = _as_bool(data.get("capture"), True)
@@ -1818,6 +2514,15 @@ def dispatch(action, payload=None):
                 return bad("missing session_id")
             if "assistant_text" not in data:
                 return bad("missing assistant_text")
+            switches = _effective_switches(store, data.get("switches"))
+            data["switches"] = switches
+            if not switches.get("core_enabled", True):
+                return {"ok": True, "gate": {"blocked": False, "action": "pass",
+                                             "text": str(data.get("assistant_text") or ""),
+                                             "rule": "", "label": ""},
+                        "captured": None, "clean_text": str(data.get("assistant_text") or ""),
+                        "trace": None, "trace_file": "", "disabled": True,
+                        "reason": "core_disabled"}
             raw_assistant = clean_text(data.get("assistant_text"))
             do_sanitize = _as_bool(data.get("sanitize_reply"), True)
             cleaned = raw_assistant
@@ -1864,6 +2569,50 @@ def dispatch(action, payload=None):
                     "reason": "disabled" if not capture_enabled else "no_store",
                 }, "entry": None}
             merge_state_relationship_into_shared(session_id, data)
+            core_snapshot = None
+            core_path = _core_state_path(data)
+            if _core_state is not None and core_path is not None:
+                deltas = _state_deltas(data)
+                session_doc = (_load_session_state(store, session_id)
+                               if store is not None else {})
+                legacy_core = session_doc.get("core")
+                legacy_core = legacy_core if isinstance(legacy_core, dict) else {}
+                if not _core_state.exists(core_path):
+                    passed = {key: legacy_core[key] for key in _CORE_FIELDS
+                              if key in legacy_core}
+                    _core_state.apply(core_path, absolute=passed,
+                                      now=time.time(), session_id=session_id,
+                                      intero_fn=_intero_from_core)
+                shared_rel = (relationship_read(store)["relationship"]
+                              if store is not None else {})
+                fixed = {key: shared_rel[key]
+                         for key in ("trust", "closeness", "conflict")
+                         if isinstance(shared_rel.get(key), (int, float))}
+                doc = _core_state.apply(core_path, deltas=deltas,
+                                        absolute=fixed, now=time.time(),
+                                        session_id=session_id,
+                                        intero_fn=_intero_from_core)
+                if doc:
+                    core = dict(legacy_core)
+                    core.update(_core_state.core_of(doc))
+                    if isinstance(doc.get("intero"), dict):
+                        core["intero"] = dict(doc["intero"])
+                        session_doc["intero"] = dict(doc["intero"])
+                    session_doc["core"] = core
+                    session_doc["core_delta"] = dict(deltas)
+                    session_doc["core_state_ts"] = doc.get("ts", 0.0)
+                    if store is not None:
+                        _save_session_state(store, session_id, session_doc)
+                    core_snapshot = _core_state.snapshot(core_path)
+            governance_info = _governance_tick(store, now=time.time())
+            relationship_info = _relationship_tick(
+                store, data.get("user_text"), now=time.time())
+            identity_info = None
+            if relationship_info:
+                identity_info = _identity_tick(
+                    store, narrative={"kind": relationship_info.get("kind"),
+                                      "text": str(data.get("user_text") or "")[:60]},
+                    now=time.time())
             decision = captured.get("decision") or {}
             entry = captured.get("entry") or {}
             trace = build_trace(session_id, data, gate, {"entry_id": entry.get("id")})
@@ -1881,27 +2630,93 @@ def dispatch(action, payload=None):
                 "removed_tags": int(removed_tags),
                 "trace": trace,
                 "trace_file": trace_file,
+                "core_state": core_snapshot,
+                "governance": governance_info,
+                "relationship": relationship_info,
+                "identity": identity_info,
             }
+        if action == "stats":
+            switches = _effective_switches(store, data.get("switches"))
+            if not switches.get("core_enabled", True):
+                return {"ok": True, "disabled": True, "reason": "core_disabled",
+                        "embed": {key: 0 for key in ("hit", "disk_hit", "miss",
+                                                     "remote", "local", "fail")},
+                        "switches": {}, "store": str(store)}
+            embed = _embed_stats_snapshot()
+            names = ("mood_recall", "affect_encoding", "memory_feedback",
+                     "preference_drift")
+            out = {name: {"enabled": bool(switches.get(name)), "source": "core"}
+                   for name in names}
+            out["core_enabled"] = {"enabled": True, "source": "core"}
+            governance_info = None
+            if _governance is not None:
+                try:
+                    governance_info = _governance.summary(store)
+                except Exception:
+                    governance_info = None
+            relationship_info = None
+            if _relationship_state is not None:
+                try:
+                    relationship_info = _relationship_state.summary(
+                        store, relationship_read(store)["relationship"])
+                except Exception:
+                    relationship_info = None
+            identity_info = None
+            if _self_layer is not None:
+                try:
+                    identity_info = _self_layer.summary(store)
+                except Exception:
+                    identity_info = None
+            autonomy_info = None
+            if _autonomy is not None:
+                try:
+                    metrics = _autonomy.metrics(store)
+                    autonomy_info = {"enabled": bool(switches.get("autonomy", True)),
+                                     "actions_today": metrics["actions_today"],
+                                     "sends_today": metrics["sends_today"],
+                                     "limits": _autonomy.limits(store)}
+                except Exception:
+                    autonomy_info = None
+            return {"ok": True, "embed": embed, "switches": out,
+                    "governance": governance_info,
+                    "relationship": relationship_info,
+                    "identity": identity_info,
+                    "autonomy": autonomy_info,
+                    "store": str(store)}
+        if action == "autonomy_tick":
+            return _autonomy_tick(store, data) or {
+                "ok": False, "reason": "autonomy_unavailable"}
         if action == "state":
             session_id = str(data.get("session_id") or "").strip()
             if not session_id:
                 return bad("missing session_id")
-            entries = _visible(load_memory(store, session_id).get("entries"))
-            state_payload = {"session_id": sanitize_session_id(session_id),
-                             "memory": {"count": len(entries)}}
+            switches = _effective_switches(store, data.get("switches"))
+            if not switches.get("core_enabled", True):
+                return {"ok": True, "state": {"available": False,
+                                              "reason": "core_disabled",
+                                              "session_id": sanitize_session_id(session_id)}}
+            body = _ui_state_body(store, session_id, data)
             stored_state = _load_session_state(store, session_id)
-            merged_state = apply_intero_to_state(stored_state, data.get("state"))
-            intero = merged_state["intero"]
-            state_payload["intero"] = intero
-            if isinstance(merged_state.get("core"), dict):
-                state_payload["core"] = merged_state["core"]
             if stored_state.get("persona_version"):
-                state_payload["persona_version"] = str(
+                body["persona_version"] = str(
                     stored_state.get("persona_version") or "")
             if _store_root(store) is not None:
-                state_payload["relationship"] = relationship_read(store)["relationship"]
-            return {"ok": True, "state": state_payload,
-                    "ui_payload": {"intero": intero}}
+                body["relationship"] = relationship_read(store)["relationship"]
+            body["switches"] = {key: bool(switches.get(key)) for key in
+                                ("core_enabled", "mood_recall",
+                                 "affect_encoding", "memory_feedback",
+                                 "preference_drift")}
+            return {"ok": True, "state": body,
+                    "ui_payload": {"intero": body.get("intero") or {}}}
+        if action == "series":
+            switches = _effective_switches(store, data.get("switches"))
+            if not switches.get("core_enabled", True):
+                return {"ok": True, "series": {key: [] for key in
+                                               ("ts", "v", "tension", "warmth",
+                                                "heaviness", "clarity", "trust",
+                                                "closeness")},
+                        "points": [], "source": "disabled", "disabled": True}
+            return _series_payload(store, data)
         if action == "switches_get":
             current = normalize_switches(data.get("switches"))
             key = str(data.get("key") or "").strip()
@@ -1980,10 +2795,22 @@ def dispatch(action, payload=None):
                 store, now=data.get("now"), state_file=data.get("state_file"))
         if action in ("memory_inject", "memory"):
             session_id = data.get("session_id") or data.get("session") or "default"
-            result = inject_block(session_id, store,
-                                  max_chars=data.get("max_chars", MAX_CHARS),
-                                  top_k=data.get("top_k", TOP_K))
+            switches = _effective_switches(store, data.get("switches"))
+            if not switches.get("core_enabled", True):
+                return {"ok": True, "text": "", "chars": 0, "ids": [],
+                        "disabled": True, "reason": "core_disabled"}
+            result = inject_block(
+                session_id, store,
+                max_chars=data.get("max_chars", MAX_CHARS),
+                top_k=data.get("top_k", TOP_K),
+                query=data.get("query") or data.get("user_text") or "",
+                mode=_recall_mode(store, data.get("mode")),
+                rerank_config=(data.get("rerank_config")
+                               or _rerank_config_from(
+                                   _load_runtime_config(store).get("rerank"))))
             return {"ok": True, **result}
+        if action == "configure":
+            return configure(data)
         return {"ok": False, "reason": "unknown_action", "action": action}
     except Exception as exc:  # CLI must always answer one JSON line
         return {"ok": False, "reason": "pipeline_error",

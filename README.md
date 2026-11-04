@@ -49,6 +49,17 @@ DSH `session/event` hook 每轮调用一次 `one_turn`，另有 `/bio sync <一�
 2) **兜底命令 `/bio sync <一句话>`**：给没有 hook 的宿主/手动调试用，
    调同一个 bridge 更新当前会话，返回一行状态变化摘要（不产生模型消息）。
 
+## 子智能体（delegationDepth >= 1）
+
+core-turn 在组装 -190 注入前读取 session.header.delegationDepth（缺失按 0）：
+- depth = 0 / 缺失：保持现行为，注入人设、状态块与思考规则。
+- depth >= 1：仍调用 turn_start 维持状态/记忆/trace，但把本会话的 prompt_block
+  置空，跳过人设/状态/思考规则注入；turn_end 的 gate/trace 照常。
+
+persona preset 的常驻注入是宿主级（agent preset），插件无法按会话单独关掉；
+本插件只保证 turn 注入对子智能体跳过。若 preset 仍向子智能体注入，需要在
+宿主侧为 subagent 使用不含 persona 的 preset。
+
 ## 接口
 
 `GET /api/biocore/state?session=<id>`
