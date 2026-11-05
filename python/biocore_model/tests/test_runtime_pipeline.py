@@ -1303,7 +1303,7 @@ class LengthHintTest(unittest.TestCase):
                                if "字以内" not in line and "一次只说一句" not in line]
         self.assertEqual(strip(default), strip(explicit))
         self.assertIn("语气自然平稳", "\n".join(default))
-        self.assertIn("可以主动一点", "\n".join(default))
+        self.assertIn("先不主动发新消息", "\n".join(default))
         self.assertIn("允许改口", "\n".join(default))
 
     def test_prompt_still_has_intero_and_persona(self):
