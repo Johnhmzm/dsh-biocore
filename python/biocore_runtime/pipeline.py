@@ -120,6 +120,27 @@ except Exception:  # pragma: no cover
         from biocore_runtime import relationship_state as _relationship_state
     except Exception:
         _relationship_state = None
+try:  # task-62: normalized channels / chunks / shards / prediction
+    from . import retrieval_plus as _retrieval_plus
+except Exception:  # pragma: no cover
+    try:
+        from biocore_runtime import retrieval_plus as _retrieval_plus
+    except Exception:
+        _retrieval_plus = None
+try:  # contract migration 1: cache stats in the core
+    from . import cache_stats as _cache_stats
+except Exception:  # pragma: no cover
+    try:
+        from biocore_runtime import cache_stats as _cache_stats
+    except Exception:
+        _cache_stats = None
+try:  # task-36 + task-78: tier hysteresis / reconsolidation / repair
+    from . import lifecycle as _lifecycle
+except Exception:  # pragma: no cover
+    try:
+        from biocore_runtime import lifecycle as _lifecycle
+    except Exception:
+        _lifecycle = None
 try:  # task-225: P0 memory + expression extensions
     from . import extensions as _extensions
 except Exception:  # pragma: no cover
@@ -682,6 +703,42 @@ def _query_entries(store, session_id, query, top_k, rerank_config):
                     _num(entry.get("importance"), 0.5)), reverse=True)
         except Exception:
             pass
+    if _retrieval_plus is not None and query:
+        try:
+            text_query = str(query)
+            switches = _effective_switches(store)
+            enabled = bool(switches.get("retrieval_plus", True))
+            _retrieval_plus.record_query(store, text_query, now=time.time())
+            rerank_on = isinstance(rerank_config, dict) and bool(
+                rerank_config.get("rerank_enabled")
+                or rerank_config.get("enabled"))
+            if enabled and not rerank_on and len(picked) > 1:
+                ranked = _retrieval_plus.rank(
+                    store, session_id, text_query, picked,
+                    now=time.time(), limit=len(picked))
+                if ranked:
+                    _retrieval_plus.record_debug(store, text_query, ranked)
+                    engine_scores = {str(row.get("entry", {}).get("id") or ""):
+                                     _num(row.get("score"), 0.0) for row in rows}
+                    top = max(engine_scores.values() or [1.0]) or 1.0
+                    combined = []
+                    for item in ranked:
+                        entry_id = str(item["entry"].get("id") or "")
+                        engine_norm = engine_scores.get(entry_id, 0.0) / top
+                        combined.append((0.7 * engine_norm + 0.3 * item["score"],
+                                         item))
+                    combined.sort(key=lambda pair: pair[0], reverse=True)
+                    picked = [item["entry"] for _score, item in combined]
+        except Exception:
+            pass
+    if _lifecycle is not None:
+        try:
+            _lifecycle.record_recall(store, session_id,
+                                     [str(entry.get("id") or "")
+                                      for entry in picked], now=time.time())
+            _lifecycle.tier_tick(store, picked, now=time.time())
+        except Exception:
+            pass
     return picked[:top_k]
 
 
@@ -867,6 +924,13 @@ def prompt_block(payload):
     state_text = _state_block(state, budget)
     constraints = _constraints_block(state, switches, data)
     text = (state_text + "\n" + constraints).strip()
+    if _lifecycle is not None:
+        try:
+            repair = _lifecycle.repair_lines(data.get("store"))
+            if repair:
+                text = text + "\n" + "\n".join("- " + line for line in repair)
+        except Exception:
+            pass
     expression = None
     if _extensions is not None:
         try:
@@ -879,8 +943,14 @@ def prompt_block(payload):
                                          expression.get("template"),
                                          expression.get("topic"),
                                          expression.get("voice")) if value]
-            if extra:
-                text = text + "\n" + "\n".join("- " + line for line in extra[:4])
+            lines = []
+            for value in extra:
+                for line in str(value).splitlines():
+                    line = line.strip()
+                    if line:
+                        lines.append(line if line.startswith("- ") else "- " + line)
+            if lines:
+                text = text + "\n" + "\n".join(lines[:6])
         except Exception:
             expression = None
     thinking_line = thinking_style_line(data)
@@ -2056,7 +2126,7 @@ CORE_DEFAULTS = {
     "evict": True, "evict_delete": False,
     "relationship_governance": True,
     "self_layer": True, "motivation": True,
-    "autonomy": True, "standby": True,
+    "autonomy": True, "standby": False, "retrieval_plus": True,
     "safety_enabled": False, "boundary_enabled": False,
     "crisis_safety_enabled": False,
     "proactive_send": True,
@@ -2227,6 +2297,17 @@ def _ui_state_body(store, session_id, data):
                 "limits": _autonomy.limits(store)}
         except Exception:
             autonomy_view = None
+    standby_view = None
+    try:
+        from . import standby as _standby_view
+    except Exception:
+        _standby_view = None
+    if _standby_view is not None:
+        try:
+            standby_view = _standby_view.summary(
+                store, enabled=bool(_effective_switches(store).get("standby")))
+        except Exception:
+            standby_view = None
     signals_summary = None
     if _signals is not None:
         try:
@@ -2246,6 +2327,15 @@ def _ui_state_body(store, session_id, data):
                 "identity": identity_summary,
                 "signals": signals_summary,
                 "extensions": extensions_summary,
+                "standby": standby_view,
+                "recall_debug": (_retrieval_plus.summary(store)
+                                 if _retrieval_plus is not None else None),
+                "tiers": (_lifecycle.tier_summary(store)
+                          if _lifecycle is not None else None),
+                "reconsolidation": (_lifecycle.reconsolidation_summary(store)
+                                    if _lifecycle is not None else None),
+                "repair": (_lifecycle.repair_state(store)
+                           if _lifecycle is not None else None),
                 "available": True,
                 "session_id": sanitize_session_id(session_id),
                 "memory_count": len(entries),
@@ -2549,6 +2639,7 @@ def dispatch(action, payload=None):
             else:
                 session_state = apply_intero_to_state(session_state,
                                                       data.get("state"))
+            session_state["last_human_ts"] = time.time()
             if state_store is not None:
                 _save_session_state(state_store, session_id, session_state)
             _signals_eval(store, session_id, user_text=user_text,
@@ -2729,6 +2820,14 @@ def dispatch(action, payload=None):
                     _extensions.record_extension_snapshot(store, snapshot)
                 except Exception:
                     pass
+            if _lifecycle is not None:
+                try:
+                    _lifecycle.reconsolidate(store, now=time.time())
+                    if gate.get("blocked"):
+                        _lifecycle.arm_repair(store, gate.get("rule") or "",
+                                              now=time.time())
+                except Exception:
+                    pass
             identity_info = None
             if relationship_info:
                 identity_info = _identity_tick(
@@ -2757,6 +2856,14 @@ def dispatch(action, payload=None):
                 "relationship": relationship_info,
                 "identity": identity_info,
             }
+        if action == "usage_event":
+            if _cache_stats is None:
+                return {"ok": False, "reason": "cache_stats_unavailable"}
+            payload = data.get("event") if isinstance(data.get("event"), dict) else data
+            row = _cache_stats.record_event(store, payload,
+                                            now=data.get("now"))
+            return {"ok": row is not None, "event": row,
+                    "cache": _cache_stats.summary(store, now=data.get("now"))}
         if action == "stats":
             switches = _effective_switches(store, data.get("switches"))
             if not switches.get("core_enabled", True):
@@ -2765,6 +2872,12 @@ def dispatch(action, payload=None):
                                                      "remote", "local", "fail")},
                         "switches": {}, "store": str(store)}
             embed = _embed_stats_snapshot()
+            cache_info = None
+            if _cache_stats is not None:
+                try:
+                    cache_info = _cache_stats.summary(store)
+                except Exception:
+                    cache_info = None
             names = ("mood_recall", "affect_encoding", "memory_feedback",
                      "preference_drift")
             out = {name: {"enabled": bool(switches.get(name)), "source": "core"}
@@ -2811,7 +2924,25 @@ def dispatch(action, payload=None):
                     "identity": identity_info,
                     "autonomy": autonomy_info,
                     "signals": signals_info,
+                    "cache": cache_info,
                     "store": str(store)}
+        if action == "standby_tick":
+            try:
+                from . import standby as _standby
+            except Exception:
+                from biocore_runtime import standby as _standby
+            payload = data if isinstance(data, dict) else {}
+            cfg = payload.get("standby")
+            if not isinstance(cfg, dict):
+                cfg = {}
+            runtime = _load_runtime_config(store) if store is not None else {}
+            section = runtime.get("standby")
+            merged = dict(section) if isinstance(section, dict) else {}
+            merged.update(cfg)
+            merged["standby_store"] = str(store or "")
+            merged["standby_session_id"] = str(
+                payload.get("session_id") or "standby")
+            return _standby.tick(now=payload.get("now"), config=merged)
         if action == "autonomy_tick":
             return _autonomy_tick(store, data) or {
                 "ok": False, "reason": "autonomy_unavailable"}
