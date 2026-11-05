@@ -120,6 +120,20 @@ except Exception:  # pragma: no cover
         from biocore_runtime import relationship_state as _relationship_state
     except Exception:
         _relationship_state = None
+try:  # task-225: P0 memory + expression extensions
+    from . import extensions as _extensions
+except Exception:  # pragma: no cover
+    try:
+        from biocore_runtime import extensions as _extensions
+    except Exception:
+        _extensions = None
+try:  # task-224: P0 perception/relationship/self signals
+    from . import signals as _signals
+except Exception:  # pragma: no cover
+    try:
+        from biocore_runtime import signals as _signals
+    except Exception:
+        _signals = None
 try:  # task-222: self layer + autonomy
     from . import self_layer as _self_layer
 except Exception:  # pragma: no cover
@@ -438,6 +452,21 @@ def _concept_filter(entries, query):
     return narrowed or rows
 
 
+def _signals_eval(store, session_id, user_text="", assistant_text="",
+                  state=None, now=None):
+    if _signals is None or not store:
+        return None
+    try:
+        rel = (relationship_read(store)["relationship"]
+               if _store_root(store) is not None else {})
+        return _signals.evaluate(store, session_id=session_id,
+                                 user_text=user_text,
+                                 assistant_text=assistant_text,
+                                 state=state or {}, relationship=rel, now=now)
+    except Exception:
+        return None
+
+
 def _governance_tick(store, now=None):
     """Decay/index/graph/aggregate sidecars; never deletes a memory."""
     if _governance is None or not store:
@@ -670,6 +699,7 @@ def inject_block(session_id, store, max_chars=MAX_CHARS, top_k=TOP_K,
     text_query = clean_text(query, MAX_TEXT_CHARS)
     chosen = str(mode or "query").strip().lower()
     entries = []
+    query_used = False
     if chosen == "query" and text_query:
         try:
             picked = _query_entries(store, session_id, text_query, limit,
@@ -678,11 +708,24 @@ def inject_block(session_id, store, max_chars=MAX_CHARS, top_k=TOP_K,
             picked = None
         if picked:
             entries = list(picked)
+            query_used = True
     if not entries:
         entries = sorted(_visible(load_memory(store, session_id).get("entries")),
                          key=lambda entry: (1 if entry.get("pin") else 0,
                                             _num(entry.get("ts"), 0.0)),
                          reverse=True)[:limit]
+    if (query_used and text_query and entries and _extensions is not None):
+        try:
+            all_entries = _visible(load_memory(store, session_id).get("entries"))
+            ext = _extensions.expand_recall(
+                store, all_entries, text_query,
+                [str(entry.get("id") or "") for entry in entries])
+            for row in ext.get("extra") or []:
+                if row not in entries:
+                    entries.append(row)
+            entries = entries[:max(limit, min(limit + 2, INJECT_MAX_K))]
+        except Exception:
+            pass
     header = "你记得这些事："
     ids = []
     if not entries or budget <= len(header) + 3:
@@ -824,6 +867,22 @@ def prompt_block(payload):
     state_text = _state_block(state, budget)
     constraints = _constraints_block(state, switches, data)
     text = (state_text + "\n" + constraints).strip()
+    expression = None
+    if _extensions is not None:
+        try:
+            target = _int_param(data.get("length_target"), 0, 0, 400)
+            hard = _int_param(data.get("length_max"), 0, 0, 400)
+            expression = _extensions.expression_block(
+                data.get("store"), state, data.get("relationship"),
+                soft_target=target, soft_max=hard)
+            extra = [value for value in (expression.get("rules"),
+                                         expression.get("template"),
+                                         expression.get("topic"),
+                                         expression.get("voice")) if value]
+            if extra:
+                text = text + "\n" + "\n".join("- " + line for line in extra[:4])
+        except Exception:
+            expression = None
     thinking_line = thinking_style_line(data)
     persona_line = persona_prompt_line(data)
     if thinking_line:
@@ -833,6 +892,8 @@ def prompt_block(payload):
     sections = {"state": state_text, "constraints": constraints}
     if thinking_line:
         sections["thinking_style"] = thinking_line
+    if expression:
+        sections["expression"] = expression
     if persona_line:
         sections["persona"] = persona_line
     return {"ok": True, "phase": phase, "text": text, "chars": len(text),
@@ -2166,11 +2227,25 @@ def _ui_state_body(store, session_id, data):
                 "limits": _autonomy.limits(store)}
         except Exception:
             autonomy_view = None
+    signals_summary = None
+    if _signals is not None:
+        try:
+            signals_summary = _signals.summary(store)
+        except Exception:
+            signals_summary = None
+    extensions_summary = None
+    if _extensions is not None:
+        try:
+            extensions_summary = _extensions.extension_summary(store)
+        except Exception:
+            extensions_summary = None
     identity = {"v": round(_num(core.get("v"), 0.0), 2),
                 "intero": intero,
                 "governance": governance_summary,
                 "relationship_summary": relationship_summary,
                 "identity": identity_summary,
+                "signals": signals_summary,
+                "extensions": extensions_summary,
                 "available": True,
                 "session_id": sanitize_session_id(session_id),
                 "memory_count": len(entries),
@@ -2476,6 +2551,8 @@ def dispatch(action, payload=None):
                                                       data.get("state"))
             if state_store is not None:
                 _save_session_state(state_store, session_id, session_state)
+            _signals_eval(store, session_id, user_text=user_text,
+                          state=session_state, now=time.time())
             capture_enabled = _as_bool(data.get("capture"), True)
             captured_user = {"captured": False, "entry_id": "", "reason": "disabled"}
             capture_store = data.get("store")
@@ -2607,6 +2684,51 @@ def dispatch(action, payload=None):
             governance_info = _governance_tick(store, now=time.time())
             relationship_info = _relationship_tick(
                 store, data.get("user_text"), now=time.time())
+            signals_end = _signals_eval(
+                store, session_id,
+                user_text=str(data.get("user_text") or ""),
+                assistant_text=assistant_text,
+                state=(_load_session_state(store, session_id)
+                       if store is not None else {}),
+                now=time.time())
+            if _extensions is not None:
+                try:
+                    all_entries = _visible(
+                        load_memory(store, session_id).get("entries"))
+                    picked_ids = [str(row.get("id") or "")
+                                  for row in all_entries[:5]]
+                    commitment = ((signals_end or {}).get("relationship", {})
+                                  .get("commitment_extractor") or {})
+                    if commitment.get("has_commitment"):
+                        _extensions.add_commitment(
+                            store, str(commitment.get("what") or ""),
+                            float(commitment.get("due_ts") or 0.0),
+                            now=time.time())
+                    expression = _extensions.expression_block(
+                        store, _load_session_state(store, session_id),
+                        (relationship_read(store)["relationship"]
+                         if store is not None else {}))
+                    snapshot = {
+                        "graph": {"entities": 0, "edges": 0},
+                        "layered": _extensions.layered_view(all_entries,
+                                                            picked_ids),
+                        "prospective": _extensions.prospective_view(
+                            store, time.time()),
+                        "reconstruction": _extensions.reconstruction_view(
+                            all_entries),
+                        "turn_memory": _extensions.turn_memory_view(
+                            [{"entry_id": row.get("id"),
+                              "text": row.get("text"), "source": "recall"}
+                             for row in all_entries[:5]],
+                            reply=assistant_text, now=time.time()),
+                        "expression": expression,
+                    }
+                    hits, graph_stats = _extensions.graph_hits(
+                        all_entries, str(data.get("user_text") or ""))
+                    snapshot["graph"] = graph_stats
+                    _extensions.record_extension_snapshot(store, snapshot)
+                except Exception:
+                    pass
             identity_info = None
             if relationship_info:
                 identity_info = _identity_tick(
@@ -2677,11 +2799,18 @@ def dispatch(action, payload=None):
                                      "limits": _autonomy.limits(store)}
                 except Exception:
                     autonomy_info = None
+            signals_info = None
+            if _signals is not None:
+                try:
+                    signals_info = _signals.summary(store)
+                except Exception:
+                    signals_info = None
             return {"ok": True, "embed": embed, "switches": out,
                     "governance": governance_info,
                     "relationship": relationship_info,
                     "identity": identity_info,
                     "autonomy": autonomy_info,
+                    "signals": signals_info,
                     "store": str(store)}
         if action == "autonomy_tick":
             return _autonomy_tick(store, data) or {

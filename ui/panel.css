@@ -973,3 +973,125 @@ body.layout-editing .card.is-hidden { display: none; }
     transition-duration: .001ms !important;
   }
 }
+/* =========================================================== phone ≤640 ===
+ * Density pass for phones only. Desktop (≥1024) and the 641–1023 tablet
+ * layout keep their previous metrics byte for byte.
+ *   card 24/16 → 14/10 padding, radius 18, 2-column grid for the channels
+ */
+@media (max-width: 640px) {
+  .panel {
+    padding: var(--sp-2) var(--sp-2) calc(84px + env(safe-area-inset-bottom, 0px));
+    gap: 10px;
+  }
+  .topbar {
+    min-height: 46px;
+    margin: calc(-1 * var(--sp-2)) calc(-1 * var(--sp-2)) 0;
+    padding: var(--sp-1) var(--sp-2);
+  }
+  .topbar h1 { font-size: 22px; line-height: 28px; }
+
+  .grid { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+  .grid > .card { grid-column: span 2; }
+
+  .card {
+    padding: 14px;
+    border-radius: 18px;
+    gap: 8px;
+  }
+  .card-head { min-height: 28px; gap: 8px; }
+  .card-ico { width: 28px; height: 28px; border-radius: 12px; }
+  .card-ico svg { width: 16px; height: 16px; }
+  .card-head h2 { font-size: 14px; line-height: 20px; }
+  .card-trail { font-size: var(--fs-xs); line-height: 20px; max-width: 52%; }
+  .card-actions { gap: var(--sp-2); }
+  .ghost-button, .primary-button { height: 34px; padding: 0 var(--sp-3); }
+
+  /* status: one row, small orb, three facts on a single line */
+  .status-card {
+    flex-direction: row;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--sp-2) var(--sp-3);
+    padding: 14px;
+  }
+  .status-body { flex: 1 1 120px; min-width: 0; }
+  .status-body .motivation { -webkit-line-clamp: 2; }
+  .orb-wrap { width: 56px; height: 56px; border-radius: 14px; }
+  .orb { width: 40px; height: 40px; border-radius: 10px; }
+  .status-body { gap: 2px; }
+  .status-body h2 { font-size: 16px; line-height: 22px; }
+  .status-body .motivation { font-size: var(--fs-xs); line-height: 16px; -webkit-line-clamp: 1; }
+  .fact-list {
+    flex: 1 0 100%;
+    flex-direction: row;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--sp-3);
+    min-width: 0;
+    margin-left: 0;
+    padding: 6px 8px;
+  }
+  .fact-list div { flex: 0 0 auto; gap: 4px; }
+  .fact-list dt, .fact-list dd { font-size: var(--fs-xs); }
+
+  /* metrics: number + status word + delta on one line */
+  .metric-card,
+  .channel-card {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    grid-template-areas:
+      "head head"
+      "metric delta"
+      "bar bar";
+    gap: 6px 8px;
+    align-content: start;
+  }
+  .metric-card .card-head,
+  .channel-card .card-head { grid-area: head; }
+  .metric-card .metric,
+  .channel-card .metric { grid-area: metric; gap: 4px; }
+  .metric-card .hint,
+  .channel-card .hint { display: none; }
+  .metric-card .subblock,
+  .channel-card .subblock { display: contents; }
+  .metric-card .data-row,
+  .channel-card .data-row { grid-area: delta; align-self: center; }
+  .metric-card .data-row > span,
+  .channel-card .data-row > span { display: none; }
+  .metric-card .bar,
+  .channel-card .bar { grid-area: bar; height: 4px; margin-top: 2px; }
+  .metric strong { font-size: 24px; line-height: 28px; }
+  .metric-sm strong { font-size: 20px; line-height: 24px; }
+  .metric-word { font-size: var(--fs-xs); }
+
+  /* four channels side by side, 2 x 2, about 200px tall in total */
+  .grid > .card.channel-card { grid-column: span 1; }
+  .grid > .card[data-card-id="tension"] { grid-column: span 1; }
+  .channel-card .card-trail,
+  .metric-card .card-trail { display: none; }
+
+  .triple { gap: var(--sp-2); }
+  .triple-col { padding: 6px 8px; gap: 0; }
+  .triple-col span { font-size: var(--fs-xs); line-height: 16px; }
+  .triple-col strong { font-size: 20px; line-height: 24px; }
+
+  .data-list div { padding: 4px 6px; }
+  .data-list dt, .data-list dd { font-size: var(--fs-xs); }
+  .avg-card .data-list div { padding: 2px 6px; }
+  .relation-foot { gap: var(--sp-3); padding: 6px 8px; }
+  .chart-well canvas { height: 120px; }
+  .memory-list li { padding: 6px; }
+  .table-head, .memory-list li { grid-template-columns: 76px 48px minmax(0, 1fr); gap: var(--sp-2); }
+
+  /* reading order on a phone: 此刻 → 心情 → 四通道 → 今日 → 其余 */
+  body:not(.layout-editing) .grid > .card[data-card-id="status"] { order: 1; }
+  body:not(.layout-editing) .grid > .card[data-card-id="mood"] { order: 2; }
+  body:not(.layout-editing) .grid > .card[data-card-id="tension"],
+  body:not(.layout-editing) .grid > .card[data-card-id="warmth"],
+  body:not(.layout-editing) .grid > .card[data-card-id="heaviness"],
+  body:not(.layout-editing) .grid > .card[data-card-id="clarity"] { order: 3; }
+  body:not(.layout-editing) .grid > .card[data-card-id="today"] { order: 4; }
+  body:not(.layout-editing) .grid > .card { order: 5; }
+
+  .add-cards { padding: 14px; border-radius: 18px; }
+}
