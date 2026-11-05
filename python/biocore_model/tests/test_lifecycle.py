@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 """task-36 + task-78: tier hysteresis, reconsolidation, minimal repair loop."""
 import json
 import tempfile

@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 """task-215: standby initiative -- outbox only, default off."""
 import json
 import tempfile

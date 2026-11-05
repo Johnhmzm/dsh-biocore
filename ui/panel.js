@@ -4,9 +4,14 @@
  * polling source; /series /stats /trace /persona /settings /switch are additive
  * reads plus the two write paths the panel is allowed to touch.
  *
- * Pages are classified once, hard:
- *   dashboard data only  memory data only  relation data only
- *   settings controls only  tools diagnostics only
+ * Render layers, hard split:
+ *   dashboard  — intero dial, episodic log, state, today, loops, dims, cache,
+ *                system, 24h strip (all data only)
+ *   memory / relation — data only
+ *   settings — controls only
+ *   tools — diagnostics only
+ *
+ * A missing field never throws: it renders the em dash and stays empty.
  */
 (function () {
   'use strict'
@@ -16,9 +21,18 @@
   var INITIAL_TAB = (QUERY.get('tab') || 'dashboard').trim()
   var THEME = (QUERY.get('theme') || '').trim()
 
+  var PANEL_VERSION = '0.5.0'
   var POLL_MS = 5000
   var STATS_MS = 30000
   var PAGE_START = Date.now()
+  var DASH = '—'
+  var THRESHOLD = 0.65
+  var DIAL_C = 2 * Math.PI * 72
+  var LOG_ROWS = 6
+  var TRACE_LIMIT = 5
+  var LONG_PRESS_MS = 400
+  var MOVE_CANCEL_PX = 8
+  var CAPACITY = 200
 
   var SWITCHES = [
     { key: 'core_enabled', label: '核心', desc: '关掉后整条核心链不运行', group: '总开关' },
@@ -37,23 +51,9 @@
     request_failed: ['连不上宿主', '确认 DSH 与插件已加载，面板每 5 秒自动重试'],
     bad_state: ['状态文件坏了', '删掉该会话的状态文件后重试'],
   }
-  var STAT_WORDS = {
-    tension: ['松弛', '适中', '略紧'],
-    warmth: ['偏冷', '适中', '偏暖'],
-    heaviness: ['轻', '适中', '偏沉'],
-    clarity: ['模糊', '适中', '清醒'],
-  }
-  var STAT_NOTES = {
-    tension: ['松下来了', '还压得住', '明显绷着'],
-    warmth: ['有点冷，想靠近', '温度刚好', '心里暖，愿意靠近'],
-    heaviness: ['轻一些，能提劲', '有点分量，还扛得住', '沉下去了，先放一放'],
-    clarity: ['有点糊，慢一点', '还算清楚，能接话', '想得清楚，状态在线'],
-  }
+
   var KNOWN_SINCE_KEY = 'biocore-known-since-v1'
   var MODEL_DRAFT_KEY = 'biocore-panel-model-draft-v1'
-  var TRACE_LIMIT = 5
-  var LONG_PRESS_MS = 400
-  var MOVE_CANCEL_PX = 8
 
   var lastSuccess = 0
   var lastData = null
@@ -66,42 +66,55 @@
 
   function $(id) { return document.getElementById(id) }
 
-  /** Theme: the host may pin <html data-theme>; ?theme= wins for previews,
-   *  otherwise prefers-color-scheme decides inside CSS. */
-  function applyTheme() {
-    if (THEME === 'light' || THEME === 'dark') {
-      document.documentElement.setAttribute('data-theme', THEME)
-    }
-    var scheme = window.matchMedia ? window.matchMedia('(prefers-color-scheme: dark)') : null
-    if (!scheme || !scheme.addEventListener) return
-    scheme.addEventListener('change', function () {
-      if (THEME === 'light' || THEME === 'dark') return
-      renderChart(lastData)
-    })
+  /* ------------------------------------------------------------- theme --- */
+
+  /** Host pins <html data-theme> in the parent window; ?theme= wins for previews;
+   *  otherwise the CSS prefers-color-scheme rule decides. */
+  function hostTheme() {
+    try {
+      var doc = window.parent && window.parent !== window ? window.parent.document : null
+      var value = doc && doc.documentElement ? doc.documentElement.getAttribute('data-theme') : ''
+      return value === 'light' || value === 'dark' ? value : ''
+    } catch (error) { return '' }
   }
 
-  function chartPalette() {
-    var styles = window.getComputedStyle(document.documentElement)
-    var read = function (name, fallback) {
-      var value = styles.getPropertyValue(name)
-      return value && value.trim() ? value.trim() : fallback
+  function applyTheme() {
+    var root = document.documentElement
+    if (THEME === 'light' || THEME === 'dark') {
+      root.setAttribute('data-theme', THEME)
+      return
     }
-    return {
-      accent: read('--accent', '#6d5dfc'),
-      ink: read('--ink', '#333333'),
-      grid: read('--shadow-dark', '#b8bcc2'),
-    }
+    var theme = hostTheme()
+    if (theme) root.setAttribute('data-theme', theme)
+    else root.removeAttribute('data-theme')
   }
+
+  function watchTheme() {
+    applyTheme()
+    try {
+      var doc = window.parent && window.parent !== window ? window.parent.document : null
+      if (!doc || !window.MutationObserver) return
+      var observer = new MutationObserver(function () { applyTheme() })
+      observer.observe(doc.documentElement, { attributes: true, attributeFilter: ['data-theme', 'class'] })
+    } catch (error) { /* cross-origin parent: the media query still applies */ }
+  }
+
+  /* ----------------------------------------------------------- helpers --- */
 
   function fmt(value, digits) {
     var number = Number(value)
-    if (!Number.isFinite(number)) return '–'
+    if (!Number.isFinite(number)) return DASH
     return number.toFixed(digits === undefined ? 2 : digits)
   }
 
   function setText(id, value) {
     var el = $(id)
     if (el) el.textContent = value
+  }
+
+  function setTitle(id, value) {
+    var el = $(id)
+    if (el) el.setAttribute('title', value)
   }
 
   function clamp01(value) {
@@ -112,6 +125,16 @@
 
   function pct(value) {
     return Math.round(clamp01(value) * 100) + '%'
+  }
+
+  function live(data) {
+    return !!data && data.available !== false
+  }
+
+  function textOr(value) {
+    if (typeof value === 'string') return value.trim() || DASH
+    if (typeof value === 'number' && Number.isFinite(value)) return String(value)
+    return DASH
   }
 
   /** Presentation helper: pick a one-line label out of string/object payloads. */
@@ -131,94 +154,43 @@
     return fallback
   }
 
-  function setStatus(ok, text) {
-    var wrap = $('status')
-    var label = $('statusText')
-    if (wrap) {
-      wrap.classList.toggle('on', !!ok)
-      wrap.classList.toggle('off', !ok)
-    }
-    if (label) label.textContent = text
-  }
-
-  function updateStatusClock() {
-    if (!lastSuccess) return
-    if (lastData && lastData.available === false) return
-    var seconds = Math.max(0, Math.round((Date.now() - lastSuccess) / 1000))
-    setStatus(true, '已连接 ' + seconds + ' 秒前')
-  }
-
   function setBar(id, ratio) {
     var el = $(id)
     if (!el) return
     el.style.width = pct(ratio)
   }
 
+  function setDot(value) {
+    var el = $('dialArc')
+    if (!el) return
+    var number = Number(value)
+    var ratio = Number.isFinite(number) ? clamp01((number + 1) / 2) : 0
+    el.style.strokeDashoffset = String(DIAL_C * (1 - ratio))
+  }
+
   function formatDelta(previous, current) {
     var before = Number(previous)
     var after = Number(current)
-    if (!Number.isFinite(before) || !Number.isFinite(after)) return '—'
+    if (!Number.isFinite(before) || !Number.isFinite(after)) return DASH
     var delta = after - before
     if (Math.abs(delta) < 0.005) return '±0.00'
     return (delta > 0 ? '+' : '') + delta.toFixed(2)
   }
 
-  function arrowFor(delta) {
-    if (delta === '—' || delta === '±0.00') return '→'
-    return delta.charAt(0) === '+' ? '↑' : '↓'
-  }
-
   function historyDelta(data, field) {
-    var history = data && data.available !== false && Array.isArray(data.history) ? data.history : []
-    if (history.length < 2) return '—'
+    var history = live(data) && Array.isArray(data.history) ? data.history : []
+    if (history.length < 2) return DASH
     return formatDelta(history[history.length - 2][field], history[history.length - 1][field])
   }
 
-  function paintDelta(id, delta) {
-    var el = $(id)
-    if (!el) return
-    el.textContent = delta
-    el.classList.toggle('up', delta.charAt(0) === '+')
-    el.classList.toggle('down', delta.charAt(0) === '-')
-  }
-
-  function paintArrow(id, delta) {
-    var el = $(id)
-    if (!el) return
-    var direction = arrowFor(delta)
-    el.textContent = direction
-    el.classList.toggle('up', direction === '↑')
-    el.classList.toggle('down', direction === '↓')
-  }
-
-  function renderEmpty(kind) {
-    var entry = EMPTY_COPY[kind] || EMPTY_COPY.request_failed
-    setText('motivation', entry[0])
-    var hint = $('emptyHint')
-    if (hint) { hint.textContent = entry[1]; hint.hidden = false }
-  }
-
-  function clearEmpty() {
-    var hint = $('emptyHint')
-    if (hint) { hint.textContent = ''; hint.hidden = true }
-  }
-
   function shortSession() {
-    if (!SESSION) return '-'
+    if (!SESSION) return DASH
     return SESSION.length > 12 ? SESSION.slice(0, 10) + '…' : SESSION
-  }
-
-  function statLevel(value) {
-    var number = Number(value)
-    if (!Number.isFinite(number)) return 1
-    if (number < 0.35) return 0
-    if (number < 0.65) return 1
-    return 2
   }
 
   function moodWord(value) {
     var number = Number(value)
-    if (!Number.isFinite(number)) return '—'
+    if (!Number.isFinite(number)) return ''
     if (number > 0.25) return '偏高'
     if (number < -0.25) return '偏低'
     return '平稳'
@@ -251,14 +223,20 @@
     return '事实'
   }
 
-  function relativeTime(ts) {
-    var value = Number(ts)
-    if (!Number.isFinite(value) || value <= 1000000000000) return '刚刚'
-    var seconds = Math.max(0, Math.round((Date.now() - value) / 1000))
-    if (seconds < 60) return '刚刚'
-    if (seconds < 3600) return Math.round(seconds / 60) + ' 分钟前'
-    if (seconds < 86400) return Math.round(seconds / 3600) + ' 小时前'
-    return Math.round(seconds / 86400) + ' 天前'
+  function clockOf(ts) {
+    var number = Number(ts)
+    if (!Number.isFinite(number) || number <= 0) return DASH
+    var date = new Date(number)
+    var hh = String(date.getHours()).padStart(2, '0')
+    var mm = String(date.getMinutes()).padStart(2, '0')
+    return hh + ':' + mm
+  }
+
+  function weightOf(value) {
+    var number = Number(value)
+    if (!Number.isFinite(number)) return DASH
+    var fixed = number.toFixed(2)
+    return fixed.indexOf('0.') === 0 ? fixed.slice(1) : fixed
   }
 
   function startOfToday() {
@@ -267,251 +245,407 @@
     return dayStart.getTime()
   }
 
-  /* ------------------------------------------------------------ 仪表盘 --- */
+  /* ---------------------------------------------------- status / topbar --- */
 
-  function renderMetrics(data) {
-    var available = data && data.available !== false
-    var intero = (available && data.intero) || {}
-
-    setText('moodValue', available ? fmt(data.v) : '—')
-    setText('moodWord', available ? moodWord(data.v) : '')
-    setBar('moodBar', available ? (Number(data.v) + 1) / 2 : 0)
-    var moodDelta = available ? historyDelta(data, 'v') : '—'
-    paintDelta('moodDelta', moodDelta)
-    paintArrow('moodArrow', moodDelta)
-
-    setText('tensionValue', available ? fmt(intero.tension) : '—')
-    setText('tensionWord', available ? STAT_WORDS.tension[statLevel(intero.tension)] : '')
-    setBar('tensionBar', intero.tension)
-    var tensionDelta = available ? historyDelta(data, 'tension') : '—'
-    paintDelta('tensionDelta', tensionDelta)
-    paintArrow('tensionArrow', tensionDelta)
-    var over = $('tensionOver')
-    if (over) {
-      var ratio = clamp01(intero.tension)
-      over.style.width = ratio > 0.65 ? Math.round((ratio - 0.65) * 100) + '%' : '0%'
+  function setStatus(ok, text) {
+    var orb = $('orbState')
+    if (orb) orb.classList.toggle('off', !ok)
+    var chip = $('topChip')
+    if (chip) {
+      chip.textContent = ok ? 'ONLINE' : 'NO DATA'
+      chip.setAttribute('title', text || (ok ? '已连接' : '未连接'))
     }
+  }
 
-    var channels = ['warmth', 'heaviness', 'clarity']
-    for (var i = 0; i < channels.length; i += 1) {
-      var channel = channels[i]
-      var raw = available ? intero[channel] : null
-      setText(channel + 'Value', available ? fmt(raw) : '—')
-      setText(channel + 'Status', available ? STAT_WORDS[channel][statLevel(raw)] : '')
-      setText(channel + 'Note', available ? STAT_NOTES[channel][statLevel(raw)] : '')
-      setBar(channel + 'Bar', raw)
-      var channelDelta = available ? historyDelta(data, channel) : '—'
-      paintArrow(channel + 'Arrow', channelDelta)
-      paintDelta(channel + 'Delta', channelDelta)
-    }
+  function updateStatusClock() {
+    if (!lastSuccess) return
+    if (lastData && lastData.available === false) return
+    var seconds = Math.max(0, Math.round((Date.now() - lastSuccess) / 1000))
+    setStatus(true, '已连接 ' + seconds + ' 秒前')
+  }
 
-    var averages = [
-      ['avgTension', 'tension'], ['avgWarmth', 'warmth'],
-      ['avgHeaviness', 'heaviness'], ['avgClarity', 'clarity'],
+  function tickClock() {
+    var el = $('topClock')
+    if (!el) return
+    var date = new Date()
+    el.textContent = [date.getHours(), date.getMinutes(), date.getSeconds()]
+      .map(function (part) { return String(part).padStart(2, '0') }).join(':')
+  }
+
+  function renderEmpty(kind) {
+    var entry = EMPTY_COPY[kind] || EMPTY_COPY.request_failed
+    setText('motivation', entry[0])
+    var hint = $('emptyHint')
+    if (hint) { hint.textContent = entry[1]; hint.hidden = false }
+  }
+
+  function clearEmpty() {
+    var hint = $('emptyHint')
+    if (hint) { hint.textContent = ''; hint.hidden = true }
+  }
+
+  /* ---------------------------------------------------------- dashboard --- */
+
+  function renderDial(data) {
+    var on = live(data)
+    var value = on ? Number(data.v) : NaN
+    setDot(Number.isFinite(value) ? value : NaN)
+    setText('dialValue', Number.isFinite(value) ? fmt(value) : DASH)
+    if (!on) { setText('dialLabel', DASH); return }
+    var tone = scalarLabel(data.tone, '')
+    var word = moodWord(data.v)
+    var parts = []
+    if (tone) parts.push(tone)
+    if (word) parts.push(word)
+    setText('dialLabel', parts.length ? parts.join(' · ') : DASH)
+  }
+
+  function renderChannels(data) {
+    var on = live(data)
+    var intero = (on && data.intero) || {}
+    var rows = [
+      ['tension', 'tensionValue'],
+      ['warmth', 'warmthValue'],
+      ['heaviness', 'heavinessValue'],
+      ['clarity', 'clarityValue'],
     ]
-    for (var a = 0; a < averages.length; a += 1) {
-      var value = Number(intero[averages[a][1]])
-      setText(averages[a][0], available && Number.isFinite(value) ? fmt(value) : '—')
+    for (var i = 0; i < rows.length; i += 1) {
+      var raw = on ? Number(intero[rows[i][0]]) : NaN
+      setBar(rows[i][0] + 'Bar', Number.isFinite(raw) ? raw : 0)
+      setText(rows[i][1], Number.isFinite(raw) ? fmt(raw) : DASH)
     }
-    setText('avgHint', available && Array.isArray(data.history) && data.history.length
-      ? data.history.length + ' 个采样' : '—')
-
-    setText('toneWord', available ? (scalarLabel(data.tone, '') || '正常') : '–')
-    setText('relationWord', available ? (scalarLabel(data.relation, '') || '–') : '–')
-    setText('autonomyWord', available ? (scalarLabel(data.autonomy, '') || '–') : '–')
-    if (available) setText('motivation', data.motivation || '安静待着，等你开口')
+    var samples = on && Array.isArray(data.history) ? data.history.length : 0
+    setText('interoMeta', on ? 'SAMPLE ' + samples + ' · 5S' : DASH)
+    if (!on) { setText('interoNote', DASH); return }
+    var delta = historyDelta(data, 'v')
+    var tension = Number(intero.tension)
+    var over = Number.isFinite(tension) && tension >= THRESHOLD
+    setText('interoNote', 'Δ ' + delta + ' · ' + (over ? '张力已进阈值区' : '未触发干预阈值'))
   }
 
-  function renderNow(data) {
-    var available = data && data.available !== false
-    var narrative = (available && data.narrative) || {}
-    setText('nowIntent', available ? (String(narrative.intent || '').trim() || '—') : '—')
-    setText('nowLength', available && narrative.length_factor !== undefined
-      ? fmt(narrative.length_factor) : '—')
-    setText('nowInitiative', available && narrative.initiative !== undefined
-      ? fmt(narrative.initiative) : '—')
-    setText('nowBand', available ? (String(narrative.metacog_band || '').trim() || '—') : '—')
-    setText('nowHint', available ? '只读' : '无数据')
+  function memoryRow(item) {
+    var tr = document.createElement('tr')
+    var time = document.createElement('td')
+    time.className = 't num'
+    time.textContent = clockOf(item.ts)
+    var kind = document.createElement('td')
+    kind.className = 'tag'
+    kind.textContent = memoryKind(item.text)
+    var body = document.createElement('td')
+    body.className = 'c'
+    body.textContent = String(item.text || DASH)
+    body.title = String(item.text || '')
+    var weight = document.createElement('td')
+    weight.className = 'n num'
+    weight.textContent = weightOf(item.score)
+    tr.appendChild(time)
+    tr.appendChild(kind)
+    tr.appendChild(body)
+    tr.appendChild(weight)
+    return tr
   }
 
-  function renderToday(data) {
-    var available = data && data.available !== false
-    var rows = available && Array.isArray(data.memory_recent) ? data.memory_recent : []
+  function fillMemoryBody(tbody, rows) {
+    if (!tbody) return
+    tbody.textContent = ''
+    if (!rows.length) {
+      var empty = document.createElement('tr')
+      empty.className = 'is-empty'
+      var cell = document.createElement('td')
+      cell.colSpan = 4
+      cell.textContent = DASH
+      empty.appendChild(cell)
+      tbody.appendChild(empty)
+      return
+    }
+    for (var i = 0; i < rows.length; i += 1) tbody.appendChild(memoryRow(rows[i] || {}))
+  }
+
+  function renderMemories(data) {
+    var on = live(data)
+    var rows = on && Array.isArray(data.memory_recent) ? data.memory_recent : []
+    var total = on && typeof data.memory_count === 'number' ? data.memory_count : rows.length
     var dayStart = startOfToday()
     var fresh = 0
     for (var i = 0; i < rows.length; i += 1) {
       var ts = Number(rows[i] && rows[i].ts)
       if (Number.isFinite(ts) && ts >= dayStart) fresh += 1
     }
-    setText('todayMem', available ? String(fresh) : '—')
-    setText('todayTurns', available && Array.isArray(data.history) ? String(data.history.length) : '—')
-    var proactive = available ? Number(data.proactive_sent_today) : NaN
-    setText('todayProactive', Number.isFinite(proactive) ? String(Math.round(proactive)) : '—')
+    setText('logMeta', on ? total + ' ENTRIES · +' + fresh + ' TODAY' : DASH)
+    setText('memoryHint', on ? '共 ' + total + ' 条' : DASH)
+    fillMemoryBody($('memoryList'), rows.slice(0, LOG_ROWS))
+    fillMemoryBody($('memoryListFull'), rows)
+  }
+
+  function joinRelation(data) {
+    var stage = scalarLabel(data.relation, '')
+    var trust = Number(data.relationship_metrics && data.relationship_metrics.trust)
+    var parts = []
+    if (stage) parts.push(stage)
+    if (Number.isFinite(trust)) parts.push('信任 ' + fmt(trust))
+    return parts.length ? parts.join(' · ') : DASH
+  }
+
+  function renderState(data) {
+    var on = live(data)
+    setText('stateRelation', on ? joinRelation(data) : DASH)
+    setText('stateTone', on ? (scalarLabel(data.tone, '') || DASH) : DASH)
+    setText('stateAutonomy', on ? (scalarLabel(data.autonomy, '') || DASH) : DASH)
+    var narrative = (on && data.narrative) || {}
+    var intent = String(narrative.intent || '').trim().toUpperCase()
+    var length = Number(narrative.length_factor)
+    var intentText = DASH
+    if (on && intent) intentText = intent + (Number.isFinite(length) ? ' · LEN ' + weightOf(length) : '')
+    setText('stateIntent', intentText)
+    var pain = Number((on && data.body_metrics) ? data.body_metrics.social_pain : NaN)
+    var painEl = $('statePain')
+    if (painEl) {
+      painEl.textContent = Number.isFinite(pain) ? fmt(pain) : DASH
+      painEl.classList.toggle('warn', Number.isFinite(pain) && pain >= 0.35)
+    }
+    setText('motivation', on ? textOr(data.motivation) : (EMPTY_COPY[String(data && data.reason)] || EMPTY_COPY.request_failed)[0])
+  }
+
+  function renderToday(data) {
+    var on = live(data)
+    var rows = on && Array.isArray(data.memory_recent) ? data.memory_recent : []
+    var dayStart = startOfToday()
+    var fresh = 0
+    for (var i = 0; i < rows.length; i += 1) {
+      var ts = Number(rows[i] && rows[i].ts)
+      if (Number.isFinite(ts) && ts >= dayStart) fresh += 1
+    }
+    setText('todayMem', on ? String(fresh) : DASH)
+    setText('todayTurns', on && Array.isArray(data.history) ? String(data.history.length) : DASH)
+    var proactive = on ? Number(data.proactive_sent_today) : NaN
+    setText('todayProactive', Number.isFinite(proactive) ? String(Math.round(proactive)) : DASH)
+  }
+
+  function renderLoops(data) {
+    var loops = (live(data) && data.open_loops && typeof data.open_loops === 'object') ? data.open_loops : {}
+    setText('loopPromise', textOr(loops.promise))
+    setText('loopUnanswered', textOr(loops.unanswered))
+    setText('loopRepair', textOr(loops.repair))
+    var count = Number(live(data) ? data.open_loop_count : NaN)
+    setText('loopsMeta', Number.isFinite(count) ? String(count) : DASH)
+  }
+
+  /** 12-axis schema, label order fixed; extra axes from the core are appended. */
+  var DIM_AXES = [
+    ['v', 'VALENCE'],
+    ['a', 'AROUSAL'],
+    ['dominance', 'DOMINANCE'],
+    ['stress', 'STRESS'],
+    ['social', 'SOCIAL'],
+    ['trust', 'TRUST'],
+    ['closeness', 'CLOSENESS'],
+    ['conflict', 'CONFLICT'],
+    ['needs.belonging', 'NEED BELONGING'],
+    ['needs.self_esteem', 'NEED ESTEEM'],
+    ['needs.control', 'NEED CONTROL'],
+    ['needs.meaningful_existence', 'NEED MEANING'],
+  ]
+
+  function dimLabel(key) {
+    for (var i = 0; i < DIM_AXES.length; i += 1) {
+      if (DIM_AXES[i][0] === key) return DIM_AXES[i][1]
+    }
+    return String(key || '').replace(/[._]+/g, ' ').toUpperCase()
+  }
+
+  function dimRow(key, label) {
+    var row = document.createElement('div')
+    row.className = 'kv'
+    row.setAttribute('data-dim', key)
+    var name = document.createElement('span')
+    name.className = 'k'
+    name.textContent = label
+    var value = document.createElement('span')
+    value.className = 'num'
+    value.textContent = DASH
+    row.appendChild(name)
+    row.appendChild(value)
+    return row
+  }
+
+  function renderDims(data) {
+    var box = $('dimsRows')
+    if (!box) return
+    var on = live(data)
+    var dims = (on && data.dimensions) || {}
+    var axes = dims.axes && typeof dims.axes === 'object' ? dims.axes : null
+    var rows = []
+    var seen = {}
+    if (axes) {
+      for (var i = 0; i < DIM_AXES.length; i += 1) {
+        var key = DIM_AXES[i][0]
+        rows.push([key, DIM_AXES[i][1], axes[key]])
+        seen[key] = true
+      }
+      var extra = Object.keys(axes)
+      for (var j = 0; j < extra.length; j += 1) {
+        if (seen[extra[j]]) continue
+        rows.push([extra[j], dimLabel(extra[j]), axes[extra[j]]])
+      }
+    } else {
+      for (var k = 0; k < DIM_AXES.length; k += 1) rows.push([DIM_AXES[k][0], DIM_AXES[k][1], null])
+    }
+    box.textContent = ''
+    for (var r = 0; r < rows.length; r += 1) {
+      var axis = rows[r][2]
+      var explicit = axis && typeof axis === 'object' ? Number(axis.explicit) : NaN
+      var implicit = axis && typeof axis === 'object' ? Number(axis.implicit) : NaN
+      var row = dimRow(rows[r][0], rows[r][1])
+      var valueEl = row.lastChild
+      if (Number.isFinite(explicit)) {
+        valueEl.textContent = fmt(explicit)
+        if (Number.isFinite(implicit)) {
+          row.title = '显式 ' + fmt(explicit) + ' · 隐式 ' + fmt(implicit)
+            + (axis.ambivalence !== undefined ? ' · 矛盾 ' + fmt(axis.ambivalence) : '')
+        }
+      }
+      box.appendChild(row)
+    }
+    setText('dimsMeta', on && axes ? rows.length + ' AXES' : DASH)
+  }
+
+  function renderCache() {
+    var rate = $('cacheStatText')
+    var detail = $('cacheDetail')
+    if (!rate) return
+    fetch('/api/biocore/stats', { headers: { accept: 'application/json' } })
+      .then(function (response) { return response.ok ? response.json() : null })
+      .then(function (body) {
+        var cache = body && body.cache ? body.cache : null
+        var rateValue = NaN
+        var detailText = DASH
+        if (cache && Number(cache.turns) > 0) {
+          rateValue = Number(cache.hit_rate)
+          detailText = (Number(cache.cache_read) || 0) + ' / ' + (Number(cache.prompt_tokens) || 0)
+        } else {
+          var embed = body && body.embed ? body.embed : null
+          var hit = embed ? (Number(embed.hit) || 0) : 0
+          var miss = embed ? (Number(embed.miss) || 0) : 0
+          if (hit + miss > 0) {
+            rateValue = hit / (hit + miss)
+            detailText = 'hit ' + hit + ' / miss ' + miss
+          }
+        }
+        var rateText = DASH
+        if (Number.isFinite(rateValue)) {
+          rateText = (Math.round(rateValue * 1000) / 10) + '%'
+          setBar('cacheBar', rateValue)
+          setText('todayCache', Math.round(rateValue * 100) + '%')
+        } else {
+          setBar('cacheBar', 0)
+          setText('todayCache', DASH)
+        }
+        rate.textContent = rateText
+        if (detail) detail.textContent = detailText
+      })
+      .catch(function () {
+        rate.textContent = DASH
+        if (detail) detail.textContent = DASH
+        setBar('cacheBar', 0)
+        setText('todayCache', DASH)
+      })
+  }
+
+  function renderSystem(data) {
+    var on = live(data)
+    var adapter = (on && data.adapter) || {}
+    var recall = Number(on ? data.recall_count : NaN)
+    var generated = Number(on ? data.generated_at : NaN)
+    var degraded = on && Array.isArray(data.degraded) ? data.degraded : []
+    setText('sysAdapter', on ? textOr(adapter.version) : DASH)
+    setText('sysRecall', Number.isFinite(recall) && recall >= 0 ? String(Math.round(recall)) : DASH)
+    setText('sysUpdated', Number.isFinite(generated) && generated > 0
+      ? new Date(generated).toLocaleTimeString() : DASH)
+    setText('sysDegraded', on ? (degraded.length ? String(degraded.length) : '0') : DASH)
+    setText('systemMeta', on ? (degraded.length ? 'DEGRADED' : 'OK') : DASH)
   }
 
   function mergePoints(data) {
-    var extras = data && data.available !== false ? data : {}
-    var history = Array.isArray(extras.history) ? extras.history : []
-    if (history.length) {
-      return history.map(function (item) {
-        var ts = Number(item.ts) || 0
-        return { ts: ts < 1e12 ? ts * 1000 : ts, v: Number(item.v) || 0 }
-      })
+    var source = live(data) && Array.isArray(data.history) && data.history.length
+      ? data.history
+      : (seriesPoints || [])
+    var out = []
+    for (var i = 0; i < source.length; i += 1) {
+      var item = source[i] || {}
+      var ts = Number(item.ts) || 0
+      var v = Number(item.v)
+      if (!Number.isFinite(v) || ts <= 0) continue
+      out.push({ ts: ts < 1e12 ? ts * 1000 : ts, v: v })
     }
-    if (seriesPoints && seriesPoints.length) {
-      return seriesPoints.map(function (item) {
-        var ts = Number(item.ts) || 0
-        return { ts: ts < 1e12 ? ts * 1000 : ts, v: Number(item.v) || 0 }
-      })
-    }
-    return []
+    return out
   }
 
-  function drawChartThrough(canvas, points) {
-    if (!canvas) return
-    var width = Math.max(120, Math.round(canvas.clientWidth || 320))
-    var height = Math.max(90, Math.round(canvas.clientHeight || 150))
-    var dpr = window.devicePixelRatio || 1
-    canvas.width = Math.round(width * dpr)
-    canvas.height = Math.round(height * dpr)
-    var ctx = canvas.getContext('2d')
-    if (!ctx) return
-    var palette = chartPalette()
-    ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
-    ctx.clearRect(0, 0, width, height)
-
-    ctx.strokeStyle = palette.grid
-    ctx.globalAlpha = 0.45
-    ctx.lineWidth = 1
-    for (var g = 1; g <= 3; g += 1) {
-      var y = Math.round((height / 4) * g) + 0.5
-      ctx.beginPath()
-      ctx.moveTo(0, y)
-      ctx.lineTo(width, y)
-      ctx.stroke()
-    }
-
-    if (!points.length) return
-
-    var minTs = points[0].ts
-    var maxTs = points[points.length - 1].ts
-    var span = Math.max(1, maxTs - minTs)
-    var pad = 6
-    var usable = height - pad * 2
-
-    function xOf(ts) { return ((ts - minTs) / span) * (width - 2) + 1 }
-    function yOf(v) { return pad + (1 - (Math.max(-1, Math.min(1, v)) + 1) / 2) * usable }
-
-    ctx.globalAlpha = 1
-
-    ctx.beginPath()
-    ctx.moveTo(xOf(points[0].ts), yOf(points[0].v))
-    for (var i = 1; i < points.length; i += 1) ctx.lineTo(xOf(points[i].ts), yOf(points[i].v))
-    ctx.lineTo(xOf(points[points.length - 1].ts), height)
-    ctx.lineTo(xOf(points[0].ts), height)
-    ctx.closePath()
-    ctx.globalAlpha = 0.14
-    ctx.fillStyle = palette.accent
-    ctx.fill()
-    ctx.globalAlpha = 1
-
-    ctx.beginPath()
-    ctx.moveTo(xOf(points[0].ts), yOf(points[0].v))
-    for (var j = 1; j < points.length; j += 1) ctx.lineTo(xOf(points[j].ts), yOf(points[j].v))
-    ctx.strokeStyle = palette.accent
-    ctx.lineWidth = 2
-    ctx.lineJoin = 'round'
-    ctx.lineCap = 'round'
-    ctx.stroke()
-
-    var last = points[points.length - 1]
-    ctx.beginPath()
-    ctx.arc(xOf(last.ts), yOf(last.v), 3.4, 0, Math.PI * 2)
-    ctx.fillStyle = palette.ink
-    ctx.fill()
-  }
-
-  function renderChart(data) {
-    var canvas = $('moodChart')
-    if (!canvas) return
+  function renderStrip(data) {
+    var box = $('moodChart')
+    if (!box) return
     var points = mergePoints(data)
+    var slots = 72
+    var bucketMs = (24 * 3600 * 1000) / slots
+    var end = Date.now()
+    var start = end - 24 * 3600 * 1000
+    var buckets = []
+    for (var i = 0; i < slots; i += 1) buckets.push(null)
+    var peak = null
+    for (var p = 0; p < points.length; p += 1) {
+      var point = points[p]
+      if (point.ts < start || point.ts > end) continue
+      var index = Math.min(slots - 1, Math.max(0, Math.floor((point.ts - start) / bucketMs)))
+      if (buckets[index] === null || point.v > buckets[index]) buckets[index] = point.v
+      if (!peak || point.v > peak.v) peak = point
+    }
+    box.textContent = ''
+    for (var b = 0; b < slots; b += 1) {
+      var bar = document.createElement('i')
+      var value = buckets[b]
+      if (value !== null) {
+        var ratio = clamp01((value + 1) / 2)
+        bar.style.height = (8 + ratio * 92).toFixed(1) + '%'
+        if (ratio >= 0.75) bar.className = 'h'
+        else if (ratio >= 0.62) bar.className = 'warm'
+        else if (ratio >= 0.5) bar.className = 'm'
+      }
+      box.appendChild(bar)
+    }
     var empty = $('chartEmpty')
-    setText('chartHint', points.length ? points.length + ' 个采样点' : '—')
     if (empty) empty.hidden = points.length > 0
-    canvas.hidden = !points.length
-    if (!points.length) return
-    drawChartThrough(canvas, points)
+    setText('chartHint', peak ? 'PEAK ' + fmt(peak.v) + ' @ ' + clockOf(peak.ts) : DASH)
+    setText('peakValue', peak ? fmt(peak.v) : DASH)
   }
 
-  /* -------------------------------------------------------------- 记忆 --- */
-
-  function renderMemories(data) {
-    var list = $('memoryList')
-    if (!list) return
-    list.textContent = ''
-    var rows = data && data.available !== false && Array.isArray(data.memory_recent)
-      ? data.memory_recent : []
-    var total = data && data.available !== false && typeof data.memory_count === 'number'
-      ? data.memory_count : rows.length
-    setText('memoryHint', '共 ' + total + ' 条')
-    if (!rows.length) {
-      var empty = document.createElement('li')
-      empty.className = 'empty'
-      empty.textContent = '还没有记忆，聊几句就会记住'
-      list.appendChild(empty)
-      return
-    }
-    for (var i = 0; i < rows.length; i += 1) {
-      var item = rows[i] || {}
-      var li = document.createElement('li')
-      var time = document.createElement('time')
-      time.textContent = relativeTime(Number(item.ts))
-      var kind = document.createElement('span')
-      kind.className = 'memory-kind'
-      kind.textContent = memoryKind(item.text)
-      var body = document.createElement('span')
-      body.className = 'memory-text'
-      body.textContent = String(item.text || '').slice(0, 80)
-      li.appendChild(time)
-      li.appendChild(kind)
-      li.appendChild(body)
-      list.appendChild(li)
-    }
-  }
+  /* ------------------------------------------------- memory / relation --- */
 
   function renderMemorySummary(data) {
-    var available = data && data.available !== false
-    var rows = available && Array.isArray(data.memory_recent) ? data.memory_recent : []
-    var total = available && typeof data.memory_count === 'number' ? data.memory_count : rows.length
+    var on = live(data)
+    var rows = on && Array.isArray(data.memory_recent) ? data.memory_recent : []
+    var total = on && typeof data.memory_count === 'number' ? data.memory_count : rows.length
     var dayStart = startOfToday()
     var today = 0
     for (var i = 0; i < rows.length; i += 1) {
       var ts = Number(rows[i] && rows[i].ts)
       if (Number.isFinite(ts) && ts >= dayStart) today += 1
     }
-    setText('memTotal', String(total))
-    setText('memToday', String(available ? today : '—'))
-    var recall = available ? Number(data.recall_count) : NaN
-    setText('memRecall', Number.isFinite(recall) && recall > 0 ? String(Math.round(recall)) : '—')
-    var ratio = clamp01(total / 200)
+    var recall = Number(on ? data.recall_count : NaN)
+    setText('memTotal', on ? String(total) : DASH)
+    setText('memToday', on ? String(today) : DASH)
+    setText('memRecall', Number.isFinite(recall) && recall > 0 ? String(Math.round(recall)) : DASH)
+    var ratio = clamp01(total / CAPACITY)
     setBar('capFill', ratio)
-    setText('capFillText', pct(ratio))
-    setText('capText', total + ' / 200')
+    setText('capFillText', on ? pct(ratio) : DASH)
+    setText('capText', on ? total + ' / ' + CAPACITY : DASH)
   }
 
-  /* -------------------------------------------------------------- 关系 --- */
-
-  function relationRow(label, value, note, available) {
+  function relationRow(label, value, available) {
     var row = document.createElement('div')
     var dt = document.createElement('dt')
     dt.textContent = label
     var dd = document.createElement('dd')
-    dd.textContent = available ? fmt(value) : '—'
-    if (note && available) {
-      var small = document.createElement('small')
-      small.textContent = note
-      dd.appendChild(small)
-    }
+    dd.className = 'num'
+    dd.textContent = available ? fmt(value) : DASH
     row.appendChild(dt)
     row.appendChild(dd)
     return row
@@ -521,20 +655,20 @@
     var box = $('metrics')
     if (!box) return
     box.textContent = ''
-    var available = data && data.available !== false
-    var rel = (available && data.relationship_metrics) || {}
+    var on = live(data)
+    var rel = (on && data.relationship_metrics) || {}
     var closeness = Number(rel.closeness)
     var trust = Number(rel.trust)
     var conflict = Number(rel.conflict)
-    var safeCloseness = Number.isFinite(closeness) ? closeness : 0
     var safeTrust = Number.isFinite(trust) ? trust : 0
+    var safeCloseness = Number.isFinite(closeness) ? closeness : 0
     var safeConflict = Number.isFinite(conflict) ? conflict : 0
 
     var list = document.createElement('dl')
     list.className = 'data-list'
-    list.appendChild(relationRow('亲近', safeCloseness, '', available))
-    list.appendChild(relationRow('信任', safeTrust, '', available))
-    list.appendChild(relationRow('冲突', safeConflict, '', available))
+    list.appendChild(relationRow('亲近', safeCloseness, on))
+    list.appendChild(relationRow('信任', safeTrust, on))
+    list.appendChild(relationRow('冲突', safeConflict, on))
     box.appendChild(list)
 
     var count = Number(rel.conflict_count)
@@ -542,9 +676,9 @@
     var foot = document.createElement('div')
     foot.className = 'relation-foot'
     var facts = [
-      ['认识', available ? knownDays() + ' 天' : '— 天'],
-      ['冲突', available ? count + ' 次' : '— 次'],
-      ['依恋', available ? attachmentOf(safeTrust, safeCloseness, safeConflict) : '—'],
+      ['认识', on ? knownDays() + ' 天' : DASH],
+      ['冲突', on ? count + ' 次' : DASH],
+      ['依恋', on ? attachmentOf(safeTrust, safeCloseness, safeConflict) : DASH],
     ]
     for (var i = 0; i < facts.length; i += 1) {
       var cell = document.createElement('span')
@@ -555,21 +689,21 @@
       foot.appendChild(cell)
     }
     box.appendChild(foot)
-    setText('relationHint', available ? '只读' : '无数据')
+    setText('relationHint', on ? '只读' : DASH)
   }
 
   function renderNarrative(data) {
     var box = $('narrative')
     if (!box) return
     box.textContent = ''
-    var available = data && data.available !== false
-    var narrative = (available && data.narrative) || {}
+    var on = live(data)
+    var narrative = (on && data.narrative) || {}
     var rows = [
-      ['意图', available ? (String(narrative.intent || '').trim() || '—') : '—'],
-      ['主动性', available && narrative.initiative !== undefined ? fmt(narrative.initiative) : '—'],
-      ['长度因子', available && narrative.length_factor !== undefined ? fmt(narrative.length_factor) : '—'],
-      ['元认知带', available ? (String(narrative.metacog_band || '').trim() || '—') : '—'],
-      ['允许纠偏', available ? (narrative.allow_correction === true ? '是' : '否') : '—'],
+      ['意图', on ? textOr(narrative.intent) : DASH],
+      ['主动性', on && narrative.initiative !== undefined ? fmt(narrative.initiative) : DASH],
+      ['长度因子', on && narrative.length_factor !== undefined ? fmt(narrative.length_factor) : DASH],
+      ['元认知带', on ? textOr(narrative.metacog_band) : DASH],
+      ['允许纠偏', on ? (narrative.allow_correction === true ? '是' : '否') : DASH],
     ]
     for (var i = 0; i < rows.length; i += 1) {
       var wrap = document.createElement('div')
@@ -581,70 +715,36 @@
       wrap.appendChild(dd)
       box.appendChild(wrap)
     }
-    setText('narrativeHint', available ? '上一轮' : '无数据')
+    setText('narrativeHint', on ? '上一轮' : DASH)
   }
 
-  /* -------------------------------------------------------------- 工具 --- */
+  /* --------------------------------------------------------------- tools --- */
 
   function renderRuntime(data) {
-    var available = data && data.available !== false
+    var on = live(data)
     var seconds = Math.max(0, Math.round((Date.now() - PAGE_START) / 1000))
     var uptime = seconds < 60 ? seconds + ' 秒'
       : (seconds < 3600 ? Math.round(seconds / 60) + ' 分钟' : Math.round(seconds / 3600) + ' 小时')
     setText('runtimeUptime', uptime)
-    setText('runtimeTurns', available && Array.isArray(data.history) ? String(data.history.length) : '—')
+    setText('runtimeTurns', on && Array.isArray(data.history) ? String(data.history.length) : DASH)
     var mode = $('embeddingMode')
-    setText('runtimeVector', mode ? (mode.value || 'auto') : '—')
-    setText('runSession', '会话 ' + shortSession())
-    setText('diagSession', SESSION || '未指定')
+    setText('runtimeVector', mode ? (mode.value || 'auto') : DASH)
+    setText('runSession', SESSION ? '会话 ' + shortSession() : DASH)
+    setText('diagSession', SESSION || DASH)
   }
 
   function renderDiagnostics(data) {
-    var available = data && data.available !== false
-    var degraded = available && Array.isArray(data.degraded) ? data.degraded : []
-    var errors = available && Array.isArray(data.errors) ? data.errors : []
+    var on = live(data)
+    var degraded = on && Array.isArray(data.degraded) ? data.degraded : []
+    var errors = on && Array.isArray(data.errors) ? data.errors : []
     var parts = degraded.concat(errors).filter(Boolean).map(function (item) {
       return String(item).slice(0, 40)
     })
-    setText('diagDegraded', parts.length ? parts.join('，') : '无')
-    var generated = available ? Number(data.generated_at) : NaN
+    setText('diagDegraded', parts.length ? parts.join('，') : (on ? '无' : DASH))
+    var generated = Number(on ? data.generated_at : NaN)
     setText('diagGenerated', Number.isFinite(generated) && generated > 0
-      ? new Date(generated).toLocaleTimeString() : '—')
-    setText('diagAdapter', available && data.adapter && data.adapter.version
-      ? String(data.adapter.version) : '—')
-  }
-
-  function loadStats() {
-    var rate = $('cacheStatText')
-    var detail = $('cacheDetail')
-    if (!rate) return
-    fetch('/api/biocore/stats', { headers: { accept: 'application/json' } })
-      .then(function (response) { return response.ok ? response.json() : null })
-      .then(function (body) {
-        var cache = body && body.cache ? body.cache : null
-        if (cache && Number(cache.turns) > 0) {
-          var hitRate = Number(cache.hit_rate) || 0
-          rate.textContent = (Math.round(hitRate * 1000) / 10) + '%'
-          if (detail) {
-            detail.textContent = (Number(cache.cache_read) || 0) + ' / ' + (Number(cache.prompt_tokens) || 0)
-          }
-          return
-        }
-        var embed = body && body.embed ? body.embed : null
-        var hit = embed ? (Number(embed.hit) || 0) : 0
-        var miss = embed ? (Number(embed.miss) || 0) : 0
-        if (hit + miss > 0) {
-          rate.textContent = (Math.round(hit / (hit + miss) * 1000) / 10) + '%'
-          if (detail) detail.textContent = 'hit ' + hit + ' / miss ' + miss
-          return
-        }
-        rate.textContent = '暂无数据'
-        if (detail) detail.textContent = '—'
-      })
-      .catch(function () {
-        rate.textContent = '暂无数据'
-        if (detail) detail.textContent = '—'
-      })
+      ? new Date(generated).toLocaleTimeString() : DASH)
+    setText('diagAdapter', on && data.adapter && data.adapter.version ? String(data.adapter.version) : DASH)
   }
 
   var traceFormatter = function () { return window.BioTraceView || null }
@@ -661,7 +761,7 @@
       empty: !rows.length,
       error: failed,
     }
-    setText('traceHint', rows.length ? '最近 ' + rows.length + ' 轮' : '还没有记录')
+    setText('traceHint', rows.length ? '最近 ' + rows.length + ' 轮' : DASH)
     if (formatted.empty) {
       var empty = document.createElement('p')
       empty.className = 'state-note'
@@ -677,7 +777,7 @@
       for (var c = 0; c < values.length; c += 1) {
         var cell = document.createElement('span')
         if (c === 0) cell.className = 'trace-time'
-        var cellText = String(values[c] || '—').split(' · ').join('，')
+        var cellText = String(values[c] || DASH).split(' · ').join('，')
         cell.textContent = cellText
         cell.title = cellText
         cell.setAttribute('data-label', ['时间', '状态变化', '意图', '长度来源', '闸命中', '记忆'][c])
@@ -700,7 +800,7 @@
       .catch(function () { renderTrace(null); return null })
   }
 
-  /* ------------------------------------------------------------ 状态轮询 --- */
+  /* ------------------------------------------------------------- polling --- */
 
   function finishBoot() {
     if (bootDone) return
@@ -710,21 +810,22 @@
 
   function render(data) {
     lastData = data
-    renderMetrics(data)
-    renderNow(data)
-    renderToday(data)
+    renderDial(data)
+    renderChannels(data)
     renderMemories(data)
+    renderState(data)
+    renderToday(data)
+    renderLoops(data)
+    renderDims(data)
+    renderSystem(data)
+    renderStrip(data)
     renderMemorySummary(data)
     renderRelation(data)
     renderNarrative(data)
     renderRuntime(data)
     renderDiagnostics(data)
-    renderChart(data)
-    var memory = data && data.available !== false && typeof data.memory_count === 'number'
-      ? '记忆 ' + data.memory_count : '记忆 -'
-    setText('footerMeta', '会话 ' + (SESSION || '-') + '　' + memory + '　每 ' + (POLL_MS / 1000) + ' 秒刷新')
-    var live = !!(data && data.available !== false)
-    document.body.classList.toggle('is-empty', !live)
+    setText('topSession', SESSION ? shortSession() : DASH)
+    document.body.classList.toggle('is-empty', !live(data))
     if (!data) renderEmpty('request_failed')
     else if (data.available === false) renderEmpty(String(data.reason || 'request_failed'))
     else clearEmpty()
@@ -735,7 +836,6 @@
     if (!SESSION) {
       setStatus(false, '未连接')
       render(null)
-      setText('motivation', '没有会话参数，先在聊天会话里打开')
       return Promise.resolve(null)
     }
     return fetch('/api/biocore/state?session=' + encodeURIComponent(SESSION), {
@@ -744,8 +844,8 @@
       .then(function (response) { return response.json() })
       .then(function (data) {
         lastSuccess = Date.now()
-        var live = data && data.available !== false
-        setStatus(live, live ? '已连接 0 秒前' : '还没有状态')
+        var on = live(data)
+        setStatus(on, on ? '已连接 0 秒前' : '还没有状态')
         render(data)
         return data
       })
@@ -772,10 +872,10 @@
           })
         }
       })
-      .catch(function () { /* optional: state extras already cover the chart */ })
+      .catch(function () { /* optional: state history already covers the strip */ })
   }
 
-  /* -------------------------------------------------------------- 开关 --- */
+  /* ------------------------------------------------------------- switches --- */
 
   function switchPost(key, value) {
     return fetch('/api/biocore/switch', {
@@ -872,23 +972,20 @@
       .catch(function () { /* keep defaults, POST still tries */ })
   }
 
-  /* -------------------------------------------------------------- 人设 --- */
+  /* -------------------------------------------------------------- persona --- */
 
   function personaStatus(message, tone) {
     var el = $('personaStatus')
     if (!el) return
     el.textContent = message
-    el.classList.toggle('persona-status-error', tone === 'error')
-    el.classList.toggle('persona-status-ok', tone === 'ok')
+    el.classList.toggle('warn', tone === 'error')
   }
 
-  /** One status line for the persona card: file, compile and persist state. */
   function personaPersistHint(message, tone) {
     var el = $('personaHint')
     if (!el) return
     el.textContent = message
-    el.classList.toggle('persona-status-error', tone === 'error')
-    el.classList.toggle('persona-status-ok', tone === 'ok')
+    el.classList.toggle('warn', tone === 'error')
   }
 
   function loadPersona() {
@@ -1047,7 +1144,7 @@
     loadPersonaPersist()
   }
 
-  /* -------------------------------------------------------- 模型与接口 --- */
+  /* ---------------------------------------------------------- model/config --- */
 
   function modelInputs() {
     return {
@@ -1283,7 +1380,7 @@
     })
   }
 
-  /* ------------------------------------------------------------ 布局/编辑 --- */
+  /* ------------------------------------------------------------ layout --- */
 
   var layoutApi = typeof window !== 'undefined' ? window.BioCorePanelLayout : null
   var layoutState = null
@@ -1326,7 +1423,7 @@
   function cardLabel(card) {
     var named = card.getAttribute('data-card-label')
     if (named) return named
-    var title = card.querySelector('h2')
+    var title = card.querySelector('.card-head b')
     return title ? title.textContent.trim() : card.getAttribute('data-card-id')
   }
 
@@ -1335,7 +1432,6 @@
     var body = document.body
     body.dataset.tab = activeTab
     body.classList.toggle('layout-editing', layoutEditing)
-    setText('pageTitle', layoutApi.TAB_LABELS[activeTab] || 'BioCore')
     var group = layoutEditing ? null : (layoutApi.TAB_GROUPS[activeTab] || [])
     var cards = layoutCards()
     for (var i = 0; i < cards.length; i += 1) {
@@ -1348,14 +1444,16 @@
       items[j].classList.toggle('active', on)
       items[j].setAttribute('aria-selected', on ? 'true' : 'false')
     }
+    if (layoutEditing) renderAddCards()
   }
 
   function setActiveTab(tab) {
     if (!layoutApi || !layoutApi.TAB_GROUPS[tab]) return
     activeTab = tab
     applyTabGroup()
-    if (tab === 'tools') loadStats()
-    if (layoutEditing) renderAddCards()
+    var grid = $('grid')
+    if (grid) grid.scrollTop = 0
+    if (tab === 'tools') renderCache()
   }
 
   function bindTabBar() {
@@ -1367,6 +1465,12 @@
       setActiveTab(button.getAttribute('data-tab'))
     })
     applyTabGroup()
+  }
+
+  function hostOf(card) {
+    var parent = card.parentElement
+    if (parent && parent.classList && parent.classList.contains('stack')) return parent
+    return $('grid')
   }
 
   function applyLayout(next, persist) {
@@ -1387,7 +1491,8 @@
       var node = byId[ordered[j]]
       if (!node) continue
       node.classList.toggle('is-hidden', layoutState.hidden.indexOf(ordered[j]) >= 0)
-      container.appendChild(node)
+      var host = hostOf(node)
+      if (host) host.appendChild(node)
     }
     renderAddCards()
     applyTabGroup()
@@ -1464,7 +1569,7 @@
     for (var i = 0; i < cards.length; i += 1) ensureHideButton(cards[i])
     renderAddCards()
     applyTabGroup()
-    if (layoutEditing) layoutToast('编辑模式：拖动排序，红色 − 隐藏卡片')
+    if (layoutEditing) layoutToast('编辑模式：拖动排序，橙色 − 隐藏卡片')
     else persistDomOrder()
   }
 
@@ -1486,17 +1591,22 @@
 
   function updateDrag(event) {
     if (!drag || event.pointerId !== drag.pointerId) return
-    var container = $('grid')
+    var all = layoutCards()
+    var cards = []
+    for (var i = 0; i < all.length; i += 1) {
+      if (all[i].parentElement !== drag.card.parentElement) continue
+      if (all[i].classList.contains('tab-off') || all[i].classList.contains('is-hidden')) continue
+      cards.push(all[i])
+    }
+    var container = drag.card.parentElement
     if (!container) return
-    var cards = layoutCards()
     var x = event.clientX
     var y = event.clientY
     var reference = null
     var last = null
-    for (var i = 0; i < cards.length; i += 1) {
-      var candidate = cards[i]
+    for (var j = 0; j < cards.length; j += 1) {
+      var candidate = cards[j]
       if (candidate === drag.card) continue
-      if (candidate.classList.contains('tab-off') || candidate.classList.contains('is-hidden')) continue
       var rect = candidate.getBoundingClientRect()
       last = rect
       if (y < rect.top) { reference = candidate; break }
@@ -1620,38 +1730,16 @@
     document.addEventListener('pointercancel', onDocPointerUp)
   }
 
-  /* ---------------------------------------------------------------- 侧栏 --- */
-
-  function railApply(collapsed) {
-    document.body.classList.toggle('rail-collapsed', !!collapsed)
-    var button = $('railToggle')
-    if (!button) return
-    var label = collapsed ? '展开导航' : '收起导航'
-    button.setAttribute('aria-expanded', String(!collapsed))
-    button.setAttribute('aria-label', label)
-    button.setAttribute('title', label)
-  }
-
-  function railInit() {
-    var storage = layoutStorage()
-    var key = layoutApi && layoutApi.RAIL_KEY ? layoutApi.RAIL_KEY : 'biocore-panel-rail-v1'
-    var collapsed = false
-    try { collapsed = !!storage && storage.getItem(key) === '1' } catch { collapsed = false }
-    railApply(collapsed)
-    var button = $('railToggle')
-    if (!button) return
-    button.addEventListener('click', function () {
-      var next = !document.body.classList.contains('rail-collapsed')
-      railApply(next)
-      try { if (storage) storage.setItem(key, next ? '1' : '0') } catch { /* ignore */ }
-    })
-  }
-
-  /* ---------------------------------------------------------------- boot --- */
+  /* ------------------------------------------------------------------ boot --- */
 
   function boot() {
-    applyTheme()
-    railInit()
+    watchTheme()
+    renderVersions()
+    setText('topSession', SESSION ? shortSession() : DASH)
+    setText('dataDirText', '数据目录：宿主托管')
+    tickClock()
+    window.setInterval(tickClock, 1000)
+
     if (layoutApi && layoutApi.TAB_GROUPS[INITIAL_TAB]) activeTab = INITIAL_TAB
     initLayout()
     bindAdvanced()
@@ -1665,7 +1753,6 @@
     if (!SESSION) {
       setStatus(false, '未连接')
       render(null)
-      setText('motivation', '没有会话参数，先在聊天会话里打开')
       renderTrace({ ok: true, rows: [] })
       window.setTimeout(finishBoot, 600)
       return
@@ -1674,7 +1761,7 @@
     loadSeries()
     fetchState()
     fetchTrace()
-    loadStats()
+    renderCache()
 
     function pollTick() {
       if (document.hidden) return
@@ -1683,15 +1770,21 @@
     }
     window.setInterval(pollTick, POLL_MS)
     window.setInterval(updateStatusClock, 1000)
-    window.setInterval(loadStats, STATS_MS)
+    window.setInterval(renderCache, STATS_MS)
     document.addEventListener('visibilitychange', function () {
       if (document.hidden) return
       fetchState()
       fetchTrace()
-      loadStats()
+      renderCache()
     })
-    window.addEventListener('resize', function () { renderChart(lastData) })
+    window.addEventListener('resize', function () { renderStrip(lastData) })
     window.setTimeout(finishBoot, 3000)
+  }
+
+  function renderVersions() {
+    setText('railVersion', 'v' + PANEL_VERSION)
+    setText('topBuild', 'BUILD ' + PANEL_VERSION)
+    setText('pluginVersion', PANEL_VERSION)
   }
 
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', boot)

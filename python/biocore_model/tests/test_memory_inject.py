@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 """task-221 (batch 2): query recall injection + embedding stats persistence."""
 import json
 import os

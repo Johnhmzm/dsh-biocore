@@ -1,12 +1,16 @@
-/** BioCore panel layout model (v3 rewrite, pure logic, no DOM).
+/** BioCore panel layout model (v4, pure logic, no DOM).
  *
- * One source of truth for: card registry (id -> tab/label/span), tab groups,
+ * One source of truth for: card registry (id -> tab/label), tab groups,
  * hide/restore, ordering and localStorage persistence. panel.js only wires DOM
  * events; selftest.mjs exercises this file inside a bare vm sandbox.
  *
  * Classification rule (hard): a card belongs to exactly one tab, and a tab is
  * either all controls (settings) or all data (dashboard/memory/relation) or all
  * diagnostics (tools). Never mixed.
+ *
+ * The dashboard is three columns of stacked cards plus the 24h strip; the
+ * column a card lives in is part of the markup, not of this model, so hiding
+ * and reordering stay a flat list of ids.
  */
 (function (root) {
   'use strict'
@@ -23,34 +27,33 @@
     tools: '工具',
   }
 
-  /** Card registry. span is the 12-column desktop width; h the desktop band. */
+  /** Card registry. col is the dashboard stack (1..3) or 0 for full width. */
   var CARD_META = [
-    { id: 'status', tab: 'dashboard', label: '此刻', span: 6, h: 208 },
-    { id: 'mood', tab: 'dashboard', label: '心情', span: 3, h: 208 },
-    { id: 'tension', tab: 'dashboard', label: '张力', span: 3, h: 208 },
-    { id: 'warmth', tab: 'dashboard', label: '暖', span: 3, h: 176 },
-    { id: 'heaviness', tab: 'dashboard', label: '沉', span: 3, h: 176 },
-    { id: 'clarity', tab: 'dashboard', label: '清', span: 3, h: 176 },
-    { id: 'channels-avg', tab: 'dashboard', label: '四通道均值', span: 3, h: 176 },
-    { id: 'chart', tab: 'dashboard', label: '24 小时曲线', span: 8, h: 200 },
-    { id: 'expression-now', tab: 'dashboard', label: '此刻的表达', span: 4, h: 200 },
-    { id: 'today', tab: 'dashboard', label: '今日统计', span: 12, h: 120 },
+    { id: 'intero', tab: 'dashboard', label: '自体感知', col: 1 },
+    { id: 'log', tab: 'dashboard', label: '记忆', col: 1 },
+    { id: 'state', tab: 'dashboard', label: '当前', col: 2 },
+    { id: 'today', tab: 'dashboard', label: '今日', col: 2 },
+    { id: 'loops', tab: 'dashboard', label: '待办', col: 2 },
+    { id: 'dims', tab: 'dashboard', label: '维度', col: 3 },
+    { id: 'cache', tab: 'dashboard', label: '缓存', col: 3 },
+    { id: 'system', tab: 'dashboard', label: '系统', col: 3 },
+    { id: 'chart', tab: 'dashboard', label: '24 小时', col: 0 },
 
-    { id: 'memory', tab: 'memory', label: '最近记忆', span: 8, h: 232 },
-    { id: 'memory-summary', tab: 'memory', label: '记忆概览', span: 4, h: 232 },
+    { id: 'memory', tab: 'memory', label: '最近记忆', col: 0 },
+    { id: 'memory-summary', tab: 'memory', label: '记忆概览', col: 0 },
 
-    { id: 'metrics', tab: 'relation', label: '关系数值', span: 6, h: 176 },
-    { id: 'narrative', tab: 'relation', label: '叙事摘要', span: 6, h: 176 },
+    { id: 'metrics', tab: 'relation', label: '关系数值', col: 0 },
+    { id: 'narrative', tab: 'relation', label: '叙事摘要', col: 0 },
 
-    { id: 'persona', tab: 'settings', label: '人设', span: 6, h: 320 },
-    { id: 'model', tab: 'settings', label: '模型与接口', span: 6, h: 320 },
-    { id: 'switches', tab: 'settings', label: '开关', span: 4, h: 320 },
-    { id: 'expression', tab: 'settings', label: '表达', span: 4, h: 320 },
-    { id: 'advanced', tab: 'settings', label: '维护', span: 4, h: 320 },
+    { id: 'persona', tab: 'settings', label: '人设', col: 0 },
+    { id: 'model', tab: 'settings', label: '模型与接口', col: 0 },
+    { id: 'switches', tab: 'settings', label: '开关', col: 0 },
+    { id: 'expression', tab: 'settings', label: '表达', col: 0 },
+    { id: 'advanced', tab: 'settings', label: '维护', col: 0 },
 
-    { id: 'trace', tab: 'tools', label: '这一轮为什么', span: 12, h: 280 },
-    { id: 'runtime', tab: 'tools', label: '运行时', span: 4, h: 200 },
-    { id: 'diagnostics', tab: 'tools', label: '缓存与诊断', span: 8, h: 200 },
+    { id: 'trace', tab: 'tools', label: '这一轮为什么', col: 0 },
+    { id: 'runtime', tab: 'tools', label: '运行时', col: 0 },
+    { id: 'diagnostics', tab: 'tools', label: '诊断', col: 0 },
   ]
 
   var DEFAULT_ORDER = CARD_META.map(function (card) { return card.id })

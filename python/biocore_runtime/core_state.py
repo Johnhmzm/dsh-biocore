@@ -20,6 +20,9 @@ Layout:
 
 Rules:
 - turn_end folds only the delta (never overwrites) through update();
+- a field may be proposed by several sources: every proposal is recorded in
+  doc["proposals"], and the folded delta comes from one named strategy (the
+  arbiter's weighted median by default). Sources are never added together;
 - every write is a locked read-modify-write with an atomic replace, so two
   sessions finishing at the same time never lose a delta;
 - migrate_session() merges a legacy session's core fields once per session id;
@@ -31,6 +34,14 @@ import json
 import os
 import time
 from pathlib import Path
+
+try:  # the same per-field strategy the field arbiter uses (no sums)
+    from . import arbiter as _arbiter
+except Exception:  # pragma: no cover
+    try:
+        from biocore_runtime import arbiter as _arbiter
+    except Exception:
+        _arbiter = None
 
 SCHEMA = 1
 FIELDS = ("v", "a", "stress", "energy", "social", "social_pain",
@@ -48,6 +59,8 @@ HISTORY_LIMIT = 288
 LOCK_TIMEOUT_S = 3.0
 LOCK_STALE_S = 10.0
 CORE_FILE = "core_state.json"
+PROPOSAL_KEEP = 6      # proposals kept per field
+FLAT_SOURCE = "state_sync"   # a flat {field: delta} dict has this one source
 
 
 def _num(value, default=0.0):
@@ -60,6 +73,67 @@ def _num(value, default=0.0):
 
 def _clamp(value, low, high):
     return max(low, min(high, _num(value, low)))
+
+
+def _source_weight(source):
+    if _arbiter is None:
+        return 1.0
+    key = str(source or "").strip().lower()
+    return float(_arbiter.DEFAULT_WEIGHTS.get(key, _arbiter.DEFAULT_WEIGHT))
+
+
+def _resolve(pairs):
+    """(delta, strategy) for one field; the strategies never add proposals."""
+    rows = [(delta, weight) for delta, weight in pairs or []
+            if abs(_num(delta, 0.0)) > 0.0]
+    if not rows:
+        return 0.0, "none"
+    if _arbiter is not None:
+        return _arbiter.resolve(rows)
+    return rows[0][0], "first"
+
+
+def sources_of(deltas):
+    """{field: [{source, delta}]} for flat, nested or list input.
+
+    flat   {"v": 0.03}                          -> one proposal, FLAT_SOURCE
+    nested {"memory_feedback": {"v": 0.03}}     -> one proposal per source
+    list   [{"source": "x", "field": "v", ...}] -> one proposal per row
+    """
+    data = deltas if isinstance(deltas, dict) else {}
+    out = {}
+    if isinstance(deltas, (list, tuple)):
+        for item in deltas:
+            if not isinstance(item, dict):
+                continue
+            key = str(item.get("field") or item.get("name") or "")
+            if key not in RANGES:
+                continue
+            out.setdefault(key, []).append(
+                {"source": str(item.get("source") or item.get("learner")
+                               or FLAT_SOURCE)[:32],
+                 "delta": round(_num(item.get("delta", item.get("value"))), 6)})
+        return out
+    if not data:
+        return out
+    nested = any(isinstance(value, dict) for value in data.values())
+    if nested:
+        for source, mapping in data.items():
+            if not isinstance(mapping, dict):
+                continue
+            for key, value in mapping.items():
+                if key not in RANGES:
+                    continue
+                out.setdefault(key, []).append(
+                    {"source": str(source)[:32],
+                     "delta": round(_num(value), 6)})
+        return out
+    for key, value in data.items():
+        if key not in RANGES:
+            continue
+        out.setdefault(key, []).append({"source": FLAT_SOURCE,
+                                        "delta": round(_num(value), 6)})
+    return out
 
 
 def path_for(store=None, data_dir=None):
@@ -104,6 +178,24 @@ def _normalize(raw):
     doc["history"] = history[-HISTORY_LIMIT:]
     doc["migrated_sessions"] = [str(item) for item in
                                 (data.get("migrated_sessions") or [])][-200:]
+    raw_props = data.get("proposals") if isinstance(data.get("proposals"), dict) else {}
+    fields = raw_props.get("fields") if isinstance(raw_props.get("fields"), dict) else {}
+    clean = {}
+    for key, row in list(fields.items())[:len(FIELDS)]:
+        if key not in RANGES or not isinstance(row, dict):
+            continue
+        rows = []
+        for item in (row.get("proposals") or [])[:PROPOSAL_KEEP]:
+            if not isinstance(item, dict):
+                continue
+            rows.append({"source": str(item.get("source") or "")[:32],
+                         "delta": round(_num(item.get("delta"), 0.0), 6),
+                         "weight": round(_num(item.get("weight"), 1.0), 4)})
+        clean[key] = {"strategy": str(row.get("strategy") or "")[:20],
+                      "delta": round(_num(row.get("delta"), 0.0), 6),
+                      "proposals": rows}
+    doc["proposals"] = {"ts": round(_num(raw_props.get("ts"), 0.0), 3),
+                        "fields": clean}
     return doc
 
 
@@ -205,7 +297,7 @@ def apply(path, deltas=None, absolute=None, now=None, session_id="",
           intero_fn=None, history=True):
     """Fold one turn into the global state; returns the new document."""
     stamp = round(_num(now, time.time()), 3)
-    adds = deltas if isinstance(deltas, dict) else {}
+    proposed = sources_of(deltas)
     fixed = absolute if isinstance(absolute, dict) else {}
 
     def _fn(doc):
@@ -214,14 +306,23 @@ def apply(path, deltas=None, absolute=None, now=None, session_id="",
         if prev_ts > 0 and stamp > prev_ts:
             dt_hours = max(0.0, min(24.0, (stamp - prev_ts) / 3600.0))
         prev_intero = doc.get("intero")
+        resolved = {}
+        for key, rows in proposed.items():
+            pairs = [(_num(row.get("delta"), 0.0), _source_weight(row.get("source")))
+                     for row in rows]
+            chosen, strategy = _resolve(pairs)
+            resolved[key] = {"strategy": strategy, "delta": round(chosen, 6),
+                             "proposals": [dict(item, weight=round(
+                                 _source_weight(item.get("source")), 4))
+                                 for item in rows][-PROPOSAL_KEEP:]}
         for key in FIELDS:
             if key in fixed:
                 low, high = RANGES[key]
                 doc[key] = round(_clamp(fixed[key], low, high), 4)
-            elif key in adds:
+            elif key in resolved:
                 low, high = RANGES[key]
                 doc[key] = round(_clamp(_num(doc.get(key), DEFAULTS[key])
-                                        + _num(adds.get(key), 0.0),
+                                        + _num(resolved[key]["delta"], 0.0),
                                         low, high), 4)
         if callable(intero_fn):
             intero = intero_fn(doc, prev_intero, dt_hours, stamp)
@@ -230,6 +331,7 @@ def apply(path, deltas=None, absolute=None, now=None, session_id="",
                               for key in ("tension", "warmth", "heaviness",
                                           "clarity")})
         doc["ts"] = stamp
+        doc["proposals"] = {"ts": stamp, "fields": resolved}
         if history:
             point = {"ts": stamp, "v": doc["v"]}
             if isinstance(doc.get("intero"), dict):
@@ -288,6 +390,7 @@ def snapshot(path):
         "ts": doc.get("ts", 0.0),
         "core": core_of(doc),
         "intero": doc.get("intero"),
+        "proposals": doc.get("proposals") or {"ts": 0.0, "fields": {}},
         "history": list(doc.get("history") or []),
     }
 

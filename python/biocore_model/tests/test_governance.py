@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 """task-223: memory governance (decay/index/consolidate/concepts) + relationship."""
 import json
 import tempfile

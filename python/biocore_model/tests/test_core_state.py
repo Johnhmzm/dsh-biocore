@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 """task-221: global core state + intero/series plumbing (DSH pipeline)."""
 import json
 import tempfile

@@ -3,443 +3,467 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<meta name="color-scheme" content="light">
-<title>生物核 仪器面板</title>
-<link rel="stylesheet" href="panel.css?v=30">
+<meta name="color-scheme" content="dark light">
+<title>生物核 · 主管终端</title>
+<link rel="icon" href="orb.png">
+<script>
+/* Theme before first paint: host <html data-theme> wins, then ?theme= preview,
+   otherwise CSS prefers-color-scheme decides. Keeps the switch flicker-free. */
+(function () {
+  var root = document.documentElement
+  var query = new URLSearchParams(window.location.search)
+  var pinned = query.get('theme')
+  window.__bioThemePinned = pinned === 'light' || pinned === 'dark' ? pinned : ''
+  function hostTheme() {
+    try {
+      var doc = window.parent && window.parent !== window ? window.parent.document : null
+      var value = doc && doc.documentElement ? doc.documentElement.getAttribute('data-theme') : ''
+      return value === 'light' || value === 'dark' ? value : ''
+    } catch (error) { return '' }
+  }
+  window.__bioHostTheme = hostTheme
+  var theme = window.__bioThemePinned || hostTheme()
+  if (theme) root.setAttribute('data-theme', theme)
+  else root.removeAttribute('data-theme')
+})()
+</script>
+<link rel="stylesheet" href="panel.css?v=32">
 </head>
-<body data-tab="dashboard" class="is-booting">
+<body data-tab="dashboard">
 <svg class="sprite" aria-hidden="true" focusable="false" xmlns="http://www.w3.org/2000/svg">
-  <symbol id="i-dashboard" viewBox="0 0 20 20"><rect x="3" y="3" width="6" height="6" rx="2"/><rect x="11" y="3" width="6" height="6" rx="2"/><rect x="3" y="11" width="6" height="6" rx="2"/><rect x="11" y="11" width="6" height="6" rx="2"/></symbol>
-  <symbol id="i-memory" viewBox="0 0 20 20"><path d="M5 3.5h10v13l-5-3-5 3z"/></symbol>
-  <symbol id="i-relation" viewBox="0 0 20 20"><path d="M10 16.2s-5.4-3.4-5.4-7a2.9 2.9 0 015.4-1.7 2.9 2.9 0 015.4 1.7c0 3.6-5.4 7-5.4 7z"/></symbol>
-  <symbol id="i-settings" viewBox="0 0 20 20"><circle cx="10" cy="10" r="2.6"/><path d="M10 3.2v2M10 14.8v2M3.2 10h2M14.8 10h2M5.2 5.2l1.4 1.4M13.4 13.4l1.4 1.4M14.8 5.2l-1.4 1.4M6.6 13.4l-1.4 1.4"/></symbol>
-  <symbol id="i-tools" viewBox="0 0 20 20"><path d="M11.6 4.4a3.2 3.2 0 00-3.9 3.9L3.6 12.4l2 2 4.1-4.1a3.2 3.2 0 003.9-3.9l-1.9 1.9-1.6-1.6 1.6-1.9z"/></symbol>
-  <symbol id="i-mood" viewBox="0 0 20 20"><circle cx="10" cy="10" r="6.6"/><path d="M7 11.4c.8 1 1.8 1.5 3 1.5s2.2-.5 3-1.5"/></symbol>
-  <symbol id="i-tension" viewBox="0 0 20 20"><path d="M3 10h3l2.2-4.6L11 15l2-5h4"/></symbol>
-  <symbol id="i-chart" viewBox="0 0 20 20"><path d="M3 14.5l3.6-4.2 3 2.6L17 5"/><path d="M3 17h14"/></symbol>
-  <symbol id="i-bars" viewBox="0 0 20 20"><path d="M3 6h14M3 10h14M3 14h9"/></symbol>
-  <symbol id="i-today" viewBox="0 0 20 20"><rect x="3" y="4.5" width="14" height="12" rx="2.4"/><path d="M3 8.5h14M7 3v3M13 3v3"/></symbol>
-  <symbol id="i-capacity" viewBox="0 0 20 20"><ellipse cx="10" cy="5.6" rx="6" ry="2.4"/><path d="M4 5.6v8.8c0 1.3 2.7 2.4 6 2.4s6-1.1 6-2.4V5.6"/><path d="M4 10c0 1.3 2.7 2.4 6 2.4s6-1.1 6-2.4"/></symbol>
-  <symbol id="i-clock" viewBox="0 0 20 20"><circle cx="10" cy="10" r="6.6"/><path d="M10 6v4.2l2.6 1.6"/></symbol>
-  <symbol id="i-route" viewBox="0 0 20 20"><circle cx="5.5" cy="5.5" r="2"/><circle cx="14.5" cy="14.5" r="2"/><path d="M7.5 5.5h4a3 3 0 013 3v4"/></symbol>
-  <symbol id="i-cache" viewBox="0 0 20 20"><rect x="3" y="4" width="14" height="4.4" rx="2"/><rect x="3" y="11.6" width="14" height="4.4" rx="2"/></symbol>
-  <symbol id="i-persona" viewBox="0 0 20 20"><circle cx="10" cy="6.8" r="2.9"/><path d="M4 15.6c1.2-2.6 3.4-4 6-4s4.8 1.4 6 4"/></symbol>
-  <symbol id="i-model" viewBox="0 0 20 20"><rect x="3" y="4.4" width="14" height="11.2" rx="2.4"/><path d="M7.6 8.4l-2 1.8 2 1.8M12.4 8.4l2 1.8-2 1.8"/></symbol>
-  <symbol id="i-switch" viewBox="0 0 20 20"><path d="M6.4 4.6h7.2a3.4 3.4 0 010 6.8H6.4a3.4 3.4 0 010-6.8z"/><circle cx="12.6" cy="8" r="1.4"/></symbol>
-  <symbol id="i-expression" viewBox="0 0 20 20"><path d="M3.4 6h13M3.4 10h13M3.4 14h7.6"/></symbol>
-  <symbol id="i-advanced" viewBox="0 0 20 20"><path d="M3.4 6h13M3.4 10h13M3.4 14h13"/><circle cx="7.4" cy="6" r="1.5"/><circle cx="12" cy="10" r="1.5"/><circle cx="6.4" cy="14" r="1.5"/></symbol>
+  <symbol id="i-dashboard" viewBox="0 0 24 24"><rect x="4" y="4" width="6" height="6"/><rect x="14" y="4" width="6" height="6"/><rect x="4" y="14" width="6" height="6"/><rect x="14" y="14" width="6" height="6"/></symbol>
+  <symbol id="i-memory" viewBox="0 0 24 24"><path d="M4 7h16M4 12h16M4 17h10"/><path d="M18 17h2"/></symbol>
+  <symbol id="i-relation" viewBox="0 0 24 24"><circle cx="8" cy="12" r="3"/><circle cx="17" cy="12" r="3"/><path d="M11 12h3"/></symbol>
+  <symbol id="i-settings" viewBox="0 0 24 24"><path d="M5 7h6M15 7h4M5 17h4M13 17h6"/><circle cx="12" cy="7" r="1.6"/><circle cx="10" cy="17" r="1.6"/></symbol>
+  <symbol id="i-tools" viewBox="0 0 24 24"><path d="M12 3l7 4.2v9.6L12 21l-7-4.2V7.2z"/><path d="M12 8v8"/></symbol>
   <symbol id="i-edit" viewBox="0 0 20 20"><path d="M13.4 3.6l3 3L7 16H4v-3z"/><path d="M11.4 5.6l3 3"/></symbol>
   <symbol id="i-check" viewBox="0 0 20 20"><path d="M4.4 10.4l3.6 3.6 7.6-8.4"/></symbol>
-  <symbol id="i-rail" viewBox="0 0 20 20"><rect x="2.6" y="3.6" width="14.8" height="12.8" rx="3"/><path d="M7.6 3.6v12.8M12.6 8l-2 2 2 2"/></symbol>
-  <symbol id="i-dot" viewBox="0 0 20 20"><circle cx="10" cy="10" r="4"/></symbol>
+  <symbol id="i-expand" viewBox="0 0 20 20"><path d="M4 8V4h4M16 12v4h-4"/><path d="M4 4l5 5M16 16l-5-5"/></symbol>
 </svg>
 
-<aside class="rail" id="rail" aria-label="主导航">
-  <div class="rail-top">
-    <span class="rail-mark" aria-hidden="true"><svg viewBox="0 0 20 20"><use href="#i-dot"></use></svg></span>
-    <span class="rail-word">BioCore</span>
-    <button class="rail-toggle" id="railToggle" type="button" aria-label="收起导航" aria-expanded="true" title="收起导航">
-      <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><use href="#i-rail"></use></svg>
+<div class="shell">
+  <nav class="rail" aria-label="主导航">
+    <div class="rail-logo" aria-hidden="true">BC</div>
+    <button class="rail-item active" type="button" data-tab="dashboard" aria-selected="true" title="仪表盘" aria-label="仪表盘">
+      <svg class="ico" aria-hidden="true"><use href="#i-dashboard"></use></svg>
     </button>
-  </div>
-  <nav class="rail-nav" aria-label="页面导航">
-    <button class="rail-item active" type="button" data-tab="dashboard" aria-selected="true" title="仪表盘"><svg class="ico" aria-hidden="true"><use href="#i-dashboard"></use></svg><span>仪表盘</span></button>
-    <button class="rail-item" type="button" data-tab="memory" aria-selected="false" title="记忆"><svg class="ico" aria-hidden="true"><use href="#i-memory"></use></svg><span>记忆</span></button>
-    <button class="rail-item" type="button" data-tab="relation" aria-selected="false" title="关系"><svg class="ico" aria-hidden="true"><use href="#i-relation"></use></svg><span>关系</span></button>
-    <button class="rail-item" type="button" data-tab="settings" aria-selected="false" title="配置"><svg class="ico" aria-hidden="true"><use href="#i-settings"></use></svg><span>配置</span></button>
-    <button class="rail-item" type="button" data-tab="tools" aria-selected="false" title="工具"><svg class="ico" aria-hidden="true"><use href="#i-tools"></use></svg><span>工具</span></button>
+    <button class="rail-item" type="button" data-tab="memory" aria-selected="false" title="记忆" aria-label="记忆">
+      <svg class="ico" aria-hidden="true"><use href="#i-memory"></use></svg>
+    </button>
+    <button class="rail-item" type="button" data-tab="relation" aria-selected="false" title="关系" aria-label="关系">
+      <svg class="ico" aria-hidden="true"><use href="#i-relation"></use></svg>
+    </button>
+    <button class="rail-item" type="button" data-tab="settings" aria-selected="false" title="配置" aria-label="配置">
+      <svg class="ico" aria-hidden="true"><use href="#i-settings"></use></svg>
+    </button>
+    <button class="rail-item" type="button" data-tab="tools" aria-selected="false" title="工具" aria-label="工具">
+      <svg class="ico" aria-hidden="true"><use href="#i-tools"></use></svg>
+    </button>
+    <div class="rail-foot"><span class="rail-ver" id="railVersion">v0.5.0</span></div>
   </nav>
-  <div class="rail-foot"><span class="rail-version" id="railVersion">v0.2.1</span></div>
-</aside>
 
-<main class="panel" id="panel">
-  <header class="topbar" id="topBar">
-    <h1 id="pageTitle">仪表盘</h1>
-    <nav class="seg" id="segTabs" aria-label="页面切换">
-      <button class="seg-item active" type="button" data-tab="dashboard" aria-selected="true">仪表盘</button>
-      <button class="seg-item" type="button" data-tab="memory" aria-selected="false">记忆</button>
-      <button class="seg-item" type="button" data-tab="relation" aria-selected="false">关系</button>
-      <button class="seg-item" type="button" data-tab="settings" aria-selected="false">配置</button>
-      <button class="seg-item" type="button" data-tab="tools" aria-selected="false">工具</button>
-    </nav>
-    <div class="topbar-actions">
-      <button id="layoutReset" class="ghost-button" type="button" hidden>恢复默认</button>
-      <button id="layoutFab" class="icon-button" type="button" aria-label="编辑布局" title="编辑布局">
-        <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><use href="#i-edit"></use></svg>
-      </button>
-      <button id="layoutDone" class="icon-button icon-button-accent" type="button" aria-label="完成编辑" title="完成编辑" hidden>
-        <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><use href="#i-check"></use></svg>
-      </button>
-    </div>
-  </header>
-
-  <div class="grid" id="grid" aria-label="卡片网格">
-
-    <section class="card status-card span-6 h-208" data-card-id="status" data-card-label="此刻">
-      <div class="orb-wrap" aria-hidden="true">
-        <div class="orb"><span class="orb-ring"></span></div>
+  <main class="main">
+    <header class="top" id="topBar">
+      <span class="brand">BIOCORE</span>
+      <span class="ttl" id="pageTitle">主管终端<em>OPERATOR TERMINAL</em></span>
+      <span class="chip" id="topChip">ONLINE</span>
+      <span class="chip" id="topBuild">BUILD 0.5.0</span>
+      <div class="top-right">
+        <span class="top-line"><i class="orb" id="orbState" aria-hidden="true"></i><span class="top-k">SESSION</span> <b class="num" id="topSession">—</b></span>
+        <span class="num" id="topClock">--:--:--</span>
+        <button id="layoutFab" class="icon-button" type="button" aria-label="编辑布局" title="编辑布局">
+          <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><use href="#i-edit"></use></svg>
+        </button>
+        <button id="layoutDone" class="icon-button icon-button-accent" type="button" aria-label="完成编辑" title="完成编辑" hidden>
+          <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><use href="#i-check"></use></svg>
+        </button>
+        <button id="layoutReset" class="chip chip-button" type="button" hidden>恢复默认</button>
       </div>
-      <div class="status-body">
-        <h2>她现在的样子</h2>
-        <p class="motivation" id="motivation">正在读取…</p>
-        <p class="status" id="status"><i class="dot"></i><span id="statusText">未连接</span></p>
-        <p class="state-note" id="emptyHint" hidden></p>
+    </header>
+
+    <div class="body" id="grid">
+
+      <div class="stack">
+        <section class="card" data-card-id="intero" data-card-label="自体感知">
+          <header class="card-head">
+            <i class="sq" aria-hidden="true"></i>
+            <b>INTEROCEPTION</b><span class="zh">/ 自体感知</span>
+            <span class="r" id="interoMeta">—</span>
+          </header>
+          <div class="hero">
+            <div class="dial" aria-label="心情指数">
+              <svg viewBox="0 0 168 168" aria-hidden="true">
+                <circle class="dial-track" cx="84" cy="84" r="72"></circle>
+                <circle class="dial-dash" cx="84" cy="84" r="72"></circle>
+                <circle class="dial-arc" id="dialArc" cx="84" cy="84" r="72"></circle>
+                <circle class="dial-ring" cx="84" cy="84" r="82"></circle>
+              </svg>
+              <div class="dial-v">
+                <b class="num" id="dialValue">—</b>
+                <span id="dialLabel">—</span>
+              </div>
+            </div>
+            <div class="chan-col">
+              <div class="chans">
+                <div class="ch" aria-label="绷紧">
+                  <span class="k">TENSION</span>
+                  <span class="tr"><i id="tensionBar"></i><u class="tk"></u></span>
+                  <span class="n num" id="tensionValue">—</span>
+                </div>
+                <div class="ch" aria-label="暖">
+                  <span class="k">WARMTH</span>
+                  <span class="tr"><i id="warmthBar"></i><u class="tk"></u></span>
+                  <span class="n num" id="warmthValue">—</span>
+                </div>
+                <div class="ch" aria-label="沉">
+                  <span class="k">WEIGHT</span>
+                  <span class="tr"><i id="heavinessBar"></i><u class="tk"></u></span>
+                  <span class="n num" id="heavinessValue">—</span>
+                </div>
+                <div class="ch" aria-label="清">
+                  <span class="k">CLARITY</span>
+                  <span class="tr"><i id="clarityBar"></i><u class="tk"></u></span>
+                  <span class="n num" id="clarityValue">—</span>
+                </div>
+              </div>
+              <p class="note" id="interoNote">—</p>
+            </div>
+          </div>
+        </section>
+
+        <section class="card" data-card-id="log" data-card-label="记忆">
+          <header class="card-head">
+            <i class="sq" aria-hidden="true"></i>
+            <b>EPISODIC LOG</b><span class="zh">/ 记忆</span>
+            <span class="r" id="logMeta">—</span>
+          </header>
+          <table class="log-table">
+            <thead><tr><th>TIME</th><th>TYPE</th><th>CONTENT</th><th class="ta-r">W</th></tr></thead>
+            <tbody id="memoryList"><tr class="is-empty"><td colspan="4">—</td></tr></tbody>
+          </table>
+        </section>
       </div>
-      <dl class="fact-list">
-        <div><dt>语气</dt><dd id="toneWord">–</dd></div>
-        <div><dt>关系</dt><dd id="relationWord">–</dd></div>
-        <div><dt>自主</dt><dd id="autonomyWord">–</dd></div>
-      </dl>
-    </section>
 
-    <section class="card metric-card span-3 h-208" data-card-id="mood" data-card-label="心情" title="心情指数范围 −1 到 1">
-      <header class="card-head">
-        <span class="card-ico"><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><use href="#i-mood"></use></svg></span>
-        <h2>心情</h2>
-        <span class="card-trail" id="moodArrow">→</span>
-      </header>
-      <p class="metric"><strong id="moodValue">–</strong><span class="metric-word" id="moodWord">—</span></p>
-      <p class="hint">指数范围 −1 到 1</p>
-      <div class="subblock">
-        <div class="data-row"><span>相对上一轮</span><b id="moodDelta">—</b></div>
-        <div class="bar"><i id="moodBar"></i></div>
+      <div class="stack">
+        <section class="card" data-card-id="state" data-card-label="当前">
+          <header class="card-head">
+            <i class="sq" aria-hidden="true"></i>
+            <b>STATE</b><span class="zh">/ 当前</span>
+            <span class="r">READ ONLY</span>
+          </header>
+          <div class="kv" aria-label="关系"><span class="k">RELATION</span><span id="stateRelation">—</span></div>
+          <div class="kv" aria-label="语气"><span class="k">TONE</span><span id="stateTone">—</span></div>
+          <div class="kv" aria-label="自主"><span class="k">AUTONOMY</span><span id="stateAutonomy">—</span></div>
+          <div class="kv"><span class="k">INTENT</span><span class="num" id="stateIntent">—</span></div>
+          <div class="kv"><span class="k">SOCIAL PAIN</span><span class="num" id="statePain">—</span></div>
+          <p class="note" id="motivation">—</p>
+          <p class="state-note" id="emptyHint" hidden></p>
+        </section>
+
+        <section class="card" data-card-id="today" data-card-label="今日">
+          <header class="card-head">
+            <i class="sq" aria-hidden="true"></i>
+            <b>TODAY</b><span class="zh">/ 今日</span>
+            <span class="r">00:00 — NOW</span>
+          </header>
+          <div class="tiles">
+            <div class="tile"><div class="k">NEW MEMORY</div><div class="n num" id="todayMem">—</div></div>
+            <div class="tile"><div class="k">SAMPLES</div><div class="n num" id="todayTurns">—</div></div>
+            <div class="tile"><div class="k">PROACTIVE</div><div class="n num" id="todayProactive">—</div></div>
+            <div class="tile"><div class="k">CACHE HIT</div><div class="n num" id="todayCache">—</div></div>
+          </div>
+        </section>
+
+        <section class="card" data-card-id="loops" data-card-label="待办">
+          <header class="card-head">
+            <i class="sq" aria-hidden="true"></i>
+            <b>OPEN LOOPS</b><span class="zh">/ 待办</span>
+            <span class="r" id="loopsMeta">—</span>
+          </header>
+          <div class="kv"><span class="k">PROMISE</span><span id="loopPromise">—</span></div>
+          <div class="kv"><span class="k">UNANSWERED</span><span id="loopUnanswered">—</span></div>
+          <div class="kv"><span class="k">REPAIR</span><span id="loopRepair">—</span></div>
+        </section>
       </div>
-    </section>
 
-    <section class="card metric-card span-3 h-208" data-card-id="tension" data-card-label="张力" title="0.65 以上为阈值区">
-      <header class="card-head">
-        <span class="card-ico"><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><use href="#i-tension"></use></svg></span>
-        <h2>张力</h2>
-        <span class="card-trail" id="tensionArrow">→</span>
-      </header>
-      <p class="metric"><strong id="tensionValue">–</strong><span class="metric-word" id="tensionWord">—</span></p>
-      <p class="hint">0.65 以上为阈值区</p>
-      <div class="subblock">
-        <div class="data-row empty-hide"><span>相对上一轮</span><b id="tensionDelta">—</b></div>
-        <div class="bar"><i id="tensionBar"></i><b class="bar-over" id="tensionOver"></b></div>
+      <div class="stack">
+        <section class="card" data-card-id="dims" data-card-label="维度">
+          <header class="card-head">
+            <i class="sq" aria-hidden="true"></i>
+            <b>DIMENSIONS</b><span class="zh">/ 维度</span>
+            <span class="r" id="dimsMeta">12 AXES</span>
+          </header>
+          <div class="kv-rows" id="dimsRows">
+            <div class="kv" data-dim="v"><span class="k">VALENCE</span><span class="num">—</span></div>
+            <div class="kv" data-dim="a"><span class="k">AROUSAL</span><span class="num">—</span></div>
+            <div class="kv" data-dim="dominance"><span class="k">DOMINANCE</span><span class="num">—</span></div>
+            <div class="kv" data-dim="stress"><span class="k">STRESS</span><span class="num">—</span></div>
+            <div class="kv" data-dim="social"><span class="k">SOCIAL</span><span class="num">—</span></div>
+            <div class="kv" data-dim="trust"><span class="k">TRUST</span><span class="num">—</span></div>
+            <div class="kv" data-dim="closeness"><span class="k">CLOSENESS</span><span class="num">—</span></div>
+            <div class="kv" data-dim="conflict"><span class="k">CONFLICT</span><span class="num">—</span></div>
+            <div class="kv" data-dim="needs.belonging"><span class="k">NEED BELONGING</span><span class="num">—</span></div>
+            <div class="kv" data-dim="needs.self_esteem"><span class="k">NEED ESTEEM</span><span class="num">—</span></div>
+            <div class="kv" data-dim="needs.control"><span class="k">NEED CONTROL</span><span class="num">—</span></div>
+            <div class="kv" data-dim="needs.meaningful_existence"><span class="k">NEED MEANING</span><span class="num">—</span></div>
+          </div>
+        </section>
+
+        <section class="card" data-card-id="cache" data-card-label="缓存">
+          <header class="card-head">
+            <i class="sq" aria-hidden="true"></i>
+            <b>CACHE</b><span class="zh">/ 缓存</span>
+            <span class="r">30S</span>
+          </header>
+          <div class="kv"><span class="k">HIT RATE</span><span class="num" id="cacheStatText">—</span></div>
+          <div class="tr cache-tr"><i id="cacheBar"></i></div>
+          <div class="kv"><span class="k">CACHE_READ</span><span class="num" id="cacheDetail">—</span></div>
+        </section>
+
+        <section class="card" data-card-id="system" data-card-label="系统">
+          <header class="card-head">
+            <i class="sq" aria-hidden="true"></i>
+            <b>SYSTEM</b><span class="zh">/ 系统</span>
+            <span class="r" id="systemMeta">—</span>
+          </header>
+          <div class="kv"><span class="k">ADAPTER</span><span class="num" id="sysAdapter">—</span></div>
+          <div class="kv"><span class="k">RECALL</span><span class="num" id="sysRecall">—</span></div>
+          <div class="kv"><span class="k">UPDATED</span><span class="num" id="sysUpdated">—</span></div>
+          <div class="kv"><span class="k">DEGRADED</span><span class="num" id="sysDegraded">—</span></div>
+        </section>
       </div>
-    </section>
 
-    <section class="card channel-card span-3 h-176" data-card-id="warmth" data-card-label="暖">
-      <header class="card-head">
-        <span class="card-ico"><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><use href="#i-tension"></use></svg></span>
-        <h2>暖</h2>
-        <span class="card-trail" id="warmthArrow">→</span>
-      </header>
-      <p class="metric metric-sm"><strong id="warmthValue">–</strong><span class="metric-word" id="warmthStatus">—</span></p>
-      <div class="data-row"><span>相对上一轮</span><b id="warmthDelta">—</b></div>
-      <div class="subblock">
-        <div class="bar"><i id="warmthBar"></i></div>
-        <p class="hint" id="warmthNote">—</p>
-      </div>
-    </section>
-
-    <section class="card channel-card span-3 h-176" data-card-id="heaviness" data-card-label="沉">
-      <header class="card-head">
-        <span class="card-ico"><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><use href="#i-tension"></use></svg></span>
-        <h2>沉</h2>
-        <span class="card-trail" id="heavinessArrow">→</span>
-      </header>
-      <p class="metric metric-sm"><strong id="heavinessValue">–</strong><span class="metric-word" id="heavinessStatus">—</span></p>
-      <div class="data-row"><span>相对上一轮</span><b id="heavinessDelta">—</b></div>
-      <div class="subblock">
-        <div class="bar"><i id="heavinessBar"></i></div>
-        <p class="hint" id="heavinessNote">—</p>
-      </div>
-    </section>
-
-    <section class="card channel-card span-3 h-176" data-card-id="clarity" data-card-label="清">
-      <header class="card-head">
-        <span class="card-ico"><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><use href="#i-tension"></use></svg></span>
-        <h2>清</h2>
-        <span class="card-trail" id="clarityArrow">→</span>
-      </header>
-      <p class="metric metric-sm"><strong id="clarityValue">–</strong><span class="metric-word" id="clarityStatus">—</span></p>
-      <div class="data-row"><span>相对上一轮</span><b id="clarityDelta">—</b></div>
-      <div class="subblock">
-        <div class="bar"><i id="clarityBar"></i></div>
-        <p class="hint" id="clarityNote">—</p>
-      </div>
-    </section>
-
-    <section class="card avg-card span-3 h-176" data-card-id="channels-avg" data-card-label="四通道均值">
-      <header class="card-head">
-        <span class="card-ico"><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><use href="#i-bars"></use></svg></span>
-        <h2>四通道均值</h2>
-        <span class="card-trail" id="avgHint">—</span>
-      </header>
-      <dl class="data-list">
-        <div><dt>绷紧</dt><dd id="avgTension">—</dd></div>
-        <div><dt>暖</dt><dd id="avgWarmth">—</dd></div>
-        <div><dt>沉</dt><dd id="avgHeaviness">—</dd></div>
-        <div><dt>清</dt><dd id="avgClarity">—</dd></div>
-      </dl>
-    </section>
-
-    <section class="card chart-card span-8 h-232" data-card-id="chart" data-card-label="24 小时曲线">
-      <header class="card-head">
-        <span class="card-ico"><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><use href="#i-chart"></use></svg></span>
-        <h2>心情 24 小时</h2>
-        <span class="card-trail" id="chartHint">—</span>
-      </header>
-      <div class="well chart-well">
-        <canvas id="moodChart" height="150" aria-label="心情 24 小时曲线"></canvas>
-        <p class="chart-empty" id="chartEmpty" hidden>还没有采样，聊过一轮之后这里会出现曲线</p>
-      </div>
-    </section>
-
-    <section class="card now-card span-4 h-232" data-card-id="expression-now" data-card-label="此刻的表达">
-      <header class="card-head">
-        <span class="card-ico"><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><use href="#i-expression"></use></svg></span>
-        <h2>此刻的表达</h2>
-        <span class="card-trail" id="nowHint">只读</span>
-      </header>
-      <dl class="data-list">
-        <div><dt>意图</dt><dd id="nowIntent">—</dd></div>
-        <div><dt>长度因子</dt><dd id="nowLength">—</dd></div>
-        <div><dt>主动性</dt><dd id="nowInitiative">—</dd></div>
-        <div><dt>元认知带</dt><dd id="nowBand">—</dd></div>
-      </dl>
-    </section>
-
-    <section class="card today-card span-12 h-120" data-card-id="today" data-card-label="今日统计">
-      <header class="card-head">
-        <span class="card-ico"><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><use href="#i-today"></use></svg></span>
-        <h2>今日</h2>
-        <span class="card-trail">本地时间 00:00 起</span>
-      </header>
-      <div class="triple">
-        <div class="triple-col"><span>新增记忆</span><strong id="todayMem">—</strong></div>
-        <div class="triple-col"><span>采样轮次</span><strong id="todayTurns">—</strong></div>
-        <div class="triple-col"><span>主动发送</span><strong id="todayProactive">—</strong></div>
-      </div>
-    </section>
-
-    <section class="card memory-card span-8 h-232" data-card-id="memory" data-card-label="最近记忆">
-      <header class="card-head">
-        <span class="card-ico"><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><use href="#i-memory"></use></svg></span>
-        <h2>最近记忆</h2>
-        <span class="card-trail" id="memoryHint">共 0 条</span>
-      </header>
-      <div class="table-head"><span>时间</span><span>类型</span><span>内容</span></div>
-      <div class="well list-well">
-        <ul class="memory-list" id="memoryList"><li class="empty">还没有记忆，聊几句就会记住</li></ul>
-      </div>
-    </section>
-
-    <section class="card capacity-card span-4 h-232" data-card-id="memory-summary" data-card-label="记忆概览">
-      <header class="card-head">
-        <span class="card-ico"><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><use href="#i-capacity"></use></svg></span>
-        <h2>记忆概览</h2>
-        <span class="card-trail" id="capText">0 / 200</span>
-      </header>
-      <div class="triple">
-        <div class="triple-col"><span>共</span><strong id="memTotal">0</strong></div>
-        <div class="triple-col"><span>今日新增</span><strong id="memToday">0</strong></div>
-        <div class="triple-col"><span>召回次数</span><strong id="memRecall">—</strong></div>
-      </div>
-      <div class="subblock">
-        <div class="data-row"><span>容量</span><b id="capFillText">0%</b></div>
-        <div class="bar"><i id="capFill"></i></div>
-      </div>
-    </section>
-
-    <section class="card relation-card span-6 h-176" data-card-id="metrics" data-card-label="关系数值">
-      <header class="card-head">
-        <span class="card-ico"><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><use href="#i-relation"></use></svg></span>
-        <h2>关系数值</h2>
-        <span class="card-trail" id="relationHint">只读</span>
-      </header>
-      <div class="relation" id="metrics"></div>
-    </section>
-
-    <section class="card narrative-card span-6 h-176" data-card-id="narrative" data-card-label="叙事摘要">
-      <header class="card-head">
-        <span class="card-ico"><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><use href="#i-expression"></use></svg></span>
-        <h2>叙事摘要</h2>
-        <span class="card-trail" id="narrativeHint">上一轮</span>
-      </header>
-      <dl class="data-list" id="narrative"></dl>
-    </section>
-
-    <section class="card persona-card span-6 h-380" data-card-id="persona" data-card-label="人设">
-      <header class="card-head">
-        <span class="card-ico"><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><use href="#i-persona"></use></svg></span>
-        <h2>人设</h2>
-        <span class="card-trail" id="personaStatus">读取中</span>
-      </header>
-      <label class="field field-block">
-        <span>人设提示词</span>
-        <textarea id="personaText" class="persona-text" rows="6" placeholder="性格、说话方式、在意什么"></textarea>
-      </label>
-      <div class="card-actions">
-        <button id="personaSave" class="primary-button" type="button">保存并编译</button>
-        <button id="personaPersist" class="ghost-button" type="button">设为常驻</button>
-        <button id="personaRollback" class="ghost-button" type="button" hidden>恢复原人设</button>
-      </div>
-      <p class="hint" id="personaHint">编译只改倾向，不写记忆与安全策略</p>
-    </section>
-
-    <section class="card model-card span-6 h-380" data-card-id="model" data-card-label="模型与接口">
-      <header class="card-head">
-        <span class="card-ico"><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><use href="#i-model"></use></svg></span>
-        <h2>模型与接口</h2>
-        <span class="card-trail" id="modelStatus">未保存</span>
-      </header>
-      <p class="group-title">Embedding 向量检索</p>
-      <p class="hint">只用于记忆检索，与对话模型无关</p>
-      <div class="field-grid">
-        <label class="field"><span>模式</span>
-          <select id="embeddingMode">
-            <option value="auto">auto</option>
-            <option value="remote">remote</option>
-            <option value="local">local</option>
-            <option value="off">off</option>
-          </select>
-        </label>
-        <label class="field"><span>模型</span>
-          <input id="modelName" type="text" placeholder="BAAI/bge-m3" autocomplete="off">
-        </label>
-        <label class="field field-wide"><span>Base URL</span>
-          <input id="modelBaseUrl" type="url" placeholder="https://api.example.com/v1" autocomplete="off">
-        </label>
-        <label class="field field-wide"><span>API Key</span>
-          <input id="modelApiKey" type="password" placeholder="留空表示沿用已保存的 Key" autocomplete="new-password">
-        </label>
-      </div>
-      <p class="group-title">Rerank 召回精排</p>
-      <label class="switch-row">
-        <span class="switch-text">
-          <span class="switch-label">启用重排</span>
-          <span class="switch-desc">召回后用 rerank 精排</span>
-        </span>
-        <input id="rerankEnabled" type="checkbox">
-      </label>
-      <div class="field-grid" id="rerankFields">
-        <label class="field"><span>模型</span>
-          <input id="rerankModel" type="text" placeholder="jina-reranker-v2-base-multilingual" autocomplete="off">
-        </label>
-        <label class="field"><span>Top N</span>
-          <input id="rerankTopN" type="number" min="1" max="100" value="20">
-        </label>
-        <label class="field"><span>Base URL</span>
-          <input id="rerankBaseUrl" type="url" placeholder="https://api.example.com/v1" autocomplete="off">
-        </label>
-        <label class="field"><span>API Key</span>
-          <input id="rerankApiKey" type="password" placeholder="留空表示沿用已保存的 Key" autocomplete="new-password">
-        </label>
-      </div>
-      <div class="card-actions">
-        <button id="modelSave" class="primary-button" type="button">保存设置</button>
-        <button id="modelTest" class="ghost-button" type="button">测试 Embedding</button>
-        <button id="rerankTest" class="ghost-button" type="button">测试 Rerank</button>
-      </div>
-    </section>
-
-    <section class="card switches-card span-8 h-420" data-card-id="switches" data-card-label="开关">
-      <header class="card-head">
-        <span class="card-ico"><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><use href="#i-switch"></use></svg></span>
-        <h2>开关</h2>
-        <span class="card-trail" id="switchHint">写入宿主 flags</span>
-      </header>
-      <div class="switches" id="switches"></div>
-    </section>
-
-    <section class="card expression-card span-4 h-420" data-card-id="expression" data-card-label="表达">
-      <header class="card-head">
-        <span class="card-ico"><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><use href="#i-expression"></use></svg></span>
-        <h2>表达</h2>
-        <span class="card-trail" id="expressionStatus">长度由人设决定</span>
-      </header>
-      <label class="switch-row">
-        <span class="switch-text">
-          <span class="switch-label">长度约束</span>
-          <span class="switch-desc">按目标与上限字数约束表达</span>
-        </span>
-        <input id="expressionToggle" type="checkbox">
-      </label>
-      <div class="field-grid" id="expressionFields" hidden>
-        <label class="field"><span>每句目标字数</span><input id="lengthTarget" type="number" min="1" max="200" value="10"></label>
-        <label class="field"><span>上限字数</span><input id="lengthMax" type="number" min="2" max="400" value="30"></label>
-      </div>
-      <div class="card-actions">
-        <button id="expressionSave" class="primary-button" type="button">保存表达</button>
-      </div>
-    </section>
-
-    <section class="card advanced-card span-12 h-120" data-card-id="advanced" data-card-label="维护">
-      <header class="card-head">
-        <span class="card-ico"><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><use href="#i-advanced"></use></svg></span>
-        <h2>维护</h2>
-        <span class="card-trail" id="advancedHint">只影响这台浏览器</span>
-      </header>
-      <div class="advanced-row">
-        <div class="data-inline"><span>出口清洗</span><b id="sanitizeReplyText">开</b></div>
-        <div class="card-actions">
-          <button id="resetLayout" class="ghost-button" type="button">恢复默认布局</button>
-          <button id="clearDraft" class="ghost-button" type="button">清空本地草稿</button>
+      <section class="strip" data-card-id="chart" data-card-label="24 小时">
+        <header class="card-head">
+          <i class="sq" aria-hidden="true"></i>
+          <b>MOOD TRACE</b><span class="zh">/ 24H</span>
+          <span class="r" id="chartHint">—</span>
+        </header>
+        <div class="hz">
+          <div class="hz-peak num"><span>PEAK</span><b id="peakValue">—</b></div>
+          <div class="hz-main">
+            <div class="tl" id="moodChart" role="img" aria-label="心情 24 小时"></div>
+            <div class="lb"><span>00</span><span>06</span><span>12</span><span>18</span><span>23</span></div>
+          </div>
         </div>
-      </div>
-    </section>
+        <p class="chart-empty" id="chartEmpty" hidden>还没有采样</p>
+      </section>
 
-    <section class="card trace-card span-12 h-280" data-card-id="trace" data-card-label="这一轮为什么">
-      <header class="card-head">
-        <span class="card-ico"><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><use href="#i-route"></use></svg></span>
-        <h2>这一轮为什么</h2>
-        <span class="card-trail" id="traceHint">最近 3 轮</span>
-      </header>
-      <div class="trace-head-row"><span>时间</span><span>状态变化</span><span>意图</span><span>长度来源</span><span>闸命中</span><span>记忆</span></div>
-      <div class="well list-well">
+      <section class="card" data-card-id="memory" data-card-label="最近记忆">
+        <header class="card-head">
+          <i class="sq" aria-hidden="true"></i>
+          <b>MEMORY</b><span class="zh">/ 最近记忆</span>
+          <span class="r" id="memoryHint">共 0 条</span>
+        </header>
+        <table class="log-table">
+          <thead><tr><th>TIME</th><th>TYPE</th><th>CONTENT</th><th class="ta-r">W</th></tr></thead>
+          <tbody id="memoryListFull"><tr class="is-empty"><td colspan="4">—</td></tr></tbody>
+        </table>
+      </section>
+
+      <section class="card" data-card-id="memory-summary" data-card-label="记忆概览">
+        <header class="card-head">
+          <i class="sq" aria-hidden="true"></i>
+          <b>CAPACITY</b><span class="zh">/ 记忆概览</span>
+          <span class="r" id="capText">—</span>
+        </header>
+        <div class="triple">
+          <div class="triple-col"><span>共</span><strong class="num" id="memTotal">—</strong></div>
+          <div class="triple-col"><span>今日新增</span><strong class="num" id="memToday">—</strong></div>
+          <div class="triple-col"><span>召回次数</span><strong class="num" id="memRecall">—</strong></div>
+        </div>
+        <div class="subblock">
+          <div class="data-row"><span>容量</span><b class="num" id="capFillText">—</b></div>
+          <div class="tr"><i id="capFill"></i></div>
+        </div>
+      </section>
+
+      <section class="card" data-card-id="metrics" data-card-label="关系数值">
+        <header class="card-head">
+          <i class="sq" aria-hidden="true"></i>
+          <b>RELATION</b><span class="zh">/ 关系数值</span>
+          <span class="r" id="relationHint">只读</span>
+        </header>
+        <div class="relation" id="metrics"></div>
+      </section>
+
+      <section class="card" data-card-id="narrative" data-card-label="叙事摘要">
+        <header class="card-head">
+          <i class="sq" aria-hidden="true"></i>
+          <b>NARRATIVE</b><span class="zh">/ 叙事摘要</span>
+          <span class="r" id="narrativeHint">上一轮</span>
+        </header>
+        <dl class="data-list" id="narrative"></dl>
+      </section>
+
+      <section class="card" data-card-id="persona" data-card-label="人设">
+        <header class="card-head">
+          <i class="sq" aria-hidden="true"></i>
+          <b>PERSONA</b><span class="zh">/ 人设</span>
+          <span class="r" id="personaStatus">读取中</span>
+        </header>
+        <label class="field field-block">
+          <span>人设提示词</span>
+          <textarea id="personaText" class="persona-text" rows="6" placeholder="性格、说话方式、在意什么"></textarea>
+        </label>
+        <div class="card-actions">
+          <button id="personaSave" class="primary-button" type="button">保存并编译</button>
+          <button id="personaPersist" class="ghost-button" type="button">设为常驻</button>
+          <button id="personaRollback" class="ghost-button" type="button" hidden>恢复原人设</button>
+        </div>
+        <p class="hint" id="personaHint">编译只改倾向，不写记忆与安全策略</p>
+      </section>
+
+      <section class="card" data-card-id="model" data-card-label="模型与接口">
+        <header class="card-head">
+          <i class="sq" aria-hidden="true"></i>
+          <b>MODEL</b><span class="zh">/ 模型与接口</span>
+          <span class="r" id="modelStatus">未保存</span>
+        </header>
+        <p class="group-title">Embedding 向量检索</p>
+        <p class="hint">只用于记忆检索，与对话模型无关</p>
+        <div class="field-grid">
+          <label class="field"><span>模式</span>
+            <select id="embeddingMode">
+              <option value="auto">auto</option>
+              <option value="remote">remote</option>
+              <option value="local">local</option>
+              <option value="off">off</option>
+            </select>
+          </label>
+          <label class="field"><span>模型</span>
+            <input id="modelName" type="text" placeholder="BAAI/bge-m3" autocomplete="off">
+          </label>
+          <label class="field field-wide"><span>Base URL</span>
+            <input id="modelBaseUrl" type="url" placeholder="https://api.example.com/v1" autocomplete="off">
+          </label>
+          <label class="field field-wide"><span>API Key</span>
+            <input id="modelApiKey" type="password" placeholder="留空表示沿用已保存的 Key" autocomplete="new-password">
+          </label>
+        </div>
+        <p class="group-title">Rerank 召回精排</p>
+        <label class="switch-row">
+          <span class="switch-text">
+            <span class="switch-label">启用重排</span>
+            <span class="switch-desc">召回后用 rerank 精排</span>
+          </span>
+          <input id="rerankEnabled" type="checkbox">
+        </label>
+        <div class="field-grid" id="rerankFields">
+          <label class="field"><span>模型</span>
+            <input id="rerankModel" type="text" placeholder="jina-reranker-v2-base-multilingual" autocomplete="off">
+          </label>
+          <label class="field"><span>Top N</span>
+            <input id="rerankTopN" type="number" min="1" max="100" value="20">
+          </label>
+          <label class="field"><span>Base URL</span>
+            <input id="rerankBaseUrl" type="url" placeholder="https://api.jina.ai/v1" autocomplete="off">
+          </label>
+          <label class="field"><span>API Key</span>
+            <input id="rerankApiKey" type="password" placeholder="留空表示沿用已保存的 Key" autocomplete="new-password">
+          </label>
+        </div>
+        <div class="card-actions">
+          <button id="modelSave" class="primary-button" type="button">保存设置</button>
+          <button id="modelTest" class="ghost-button" type="button">测试 Embedding</button>
+          <button id="rerankTest" class="ghost-button" type="button">测试 Rerank</button>
+        </div>
+      </section>
+
+      <section class="card" data-card-id="switches" data-card-label="开关">
+        <header class="card-head">
+          <i class="sq" aria-hidden="true"></i>
+          <b>SWITCHES</b><span class="zh">/ 开关</span>
+          <span class="r" id="switchHint">写入宿主 flags</span>
+        </header>
+        <div class="switches" id="switches"></div>
+      </section>
+
+      <section class="card" data-card-id="expression" data-card-label="表达">
+        <header class="card-head">
+          <i class="sq" aria-hidden="true"></i>
+          <b>EXPRESSION</b><span class="zh">/ 表达</span>
+          <span class="r" id="expressionStatus">长度由人设决定</span>
+        </header>
+        <label class="switch-row">
+          <span class="switch-text">
+            <span class="switch-label">长度约束</span>
+            <span class="switch-desc">按目标与上限字数约束表达</span>
+          </span>
+          <input id="expressionToggle" type="checkbox">
+        </label>
+        <div class="field-grid" id="expressionFields" hidden>
+          <label class="field"><span>每句目标字数</span><input id="lengthTarget" type="number" min="1" max="200" value="10"></label>
+          <label class="field"><span>上限字数</span><input id="lengthMax" type="number" min="2" max="400" value="30"></label>
+        </div>
+        <div class="card-actions">
+          <button id="expressionSave" class="primary-button" type="button">保存表达</button>
+        </div>
+      </section>
+
+      <section class="card" data-card-id="advanced" data-card-label="维护">
+        <header class="card-head">
+          <i class="sq" aria-hidden="true"></i>
+          <b>SERVICE</b><span class="zh">/ 维护</span>
+          <span class="r" id="advancedHint">只影响这台浏览器</span>
+        </header>
+        <div class="advanced-row">
+          <div class="data-inline"><span>出口清洗</span><b id="sanitizeReplyText">—</b></div>
+          <div class="card-actions">
+            <button id="resetLayout" class="ghost-button" type="button">恢复默认布局</button>
+            <button id="clearDraft" class="ghost-button" type="button">清空本地草稿</button>
+          </div>
+        </div>
+        <p class="hint" id="dataDirText">数据目录：宿主托管</p>
+      </section>
+
+      <section class="card" data-card-id="trace" data-card-label="这一轮为什么">
+        <header class="card-head">
+          <i class="sq" aria-hidden="true"></i>
+          <b>TRACE</b><span class="zh">/ 这一轮为什么</span>
+          <span class="r" id="traceHint">最近 3 轮</span>
+        </header>
+        <div class="trace-head-row"><span>时间</span><span>状态变化</span><span>意图</span><span>长度来源</span><span>闸命中</span><span>记忆</span></div>
         <div class="trace-list" id="traceList"><p class="state-note">还没有记录</p></div>
-      </div>
-    </section>
+      </section>
 
-    <section class="card runtime-card span-4 h-200" data-card-id="runtime" data-card-label="运行时">
-      <header class="card-head">
-        <span class="card-ico"><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><use href="#i-clock"></use></svg></span>
-        <h2>运行时</h2>
-        <span class="card-trail" id="runSession">会话 -</span>
-      </header>
-      <dl class="data-list">
-        <div><dt>页面运行</dt><dd id="runtimeUptime">—</dd></div>
-        <div><dt>采样点</dt><dd id="runtimeTurns">—</dd></div>
-        <div><dt>向量模式</dt><dd id="runtimeVector">—</dd></div>
-        <div><dt>状态刷新</dt><dd>5 <small>秒</small></dd></div>
-        <div><dt>统计刷新</dt><dd>30 <small>秒</small></dd></div>
-      </dl>
-    </section>
+      <section class="card" data-card-id="runtime" data-card-label="运行时">
+        <header class="card-head">
+          <i class="sq" aria-hidden="true"></i>
+          <b>RUNTIME</b><span class="zh">/ 运行时</span>
+          <span class="r" id="runSession">—</span>
+        </header>
+        <dl class="data-list">
+          <div><dt>页面运行</dt><dd id="runtimeUptime">—</dd></div>
+          <div><dt>采样点</dt><dd class="num" id="runtimeTurns">—</dd></div>
+          <div><dt>向量模式</dt><dd id="runtimeVector">—</dd></div>
+          <div><dt>会话</dt><dd class="num" id="diagSession">—</dd></div>
+          <div><dt>状态刷新</dt><dd>5 <small>秒</small></dd></div>
+          <div><dt>统计刷新</dt><dd>30 <small>秒</small></dd></div>
+        </dl>
+      </section>
 
-    <section class="card diagnostics-card span-8 h-200" data-card-id="diagnostics" data-card-label="缓存与诊断">
-      <header class="card-head">
-        <span class="card-ico"><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><use href="#i-cache"></use></svg></span>
-        <h2>缓存与诊断</h2>
-        <span class="card-trail">30 秒刷新</span>
-      </header>
-      <dl class="data-list data-list-inline">
-        <div><dt>缓存命中</dt><dd id="cacheStatText">暂无数据</dd></div>
-        <div><dt>cache_read / prompt</dt><dd id="cacheDetail">—</dd></div>
-        <div><dt>会话</dt><dd id="diagSession">—</dd></div>
-        <div><dt>数据目录</dt><dd id="dataDirText">宿主托管</dd></div>
-        <div><dt>插件版本</dt><dd id="pluginVersion">0.2.1</dd></div>
-        <div><dt>降级项</dt><dd id="diagDegraded">无</dd></div>
-        <div><dt>状态生成</dt><dd id="diagGenerated">—</dd></div>
-        <div><dt>适配器版本</dt><dd id="diagAdapter">—</dd></div>
-      </dl>
-    </section>
-  </div>
+      <section class="card" data-card-id="diagnostics" data-card-label="诊断">
+        <header class="card-head">
+          <i class="sq" aria-hidden="true"></i>
+          <b>DIAGNOSTICS</b><span class="zh">/ 诊断</span>
+          <span class="r" id="diagHint">30 秒刷新</span>
+        </header>
+        <dl class="data-list data-list-inline">
+          <div><dt>状态生成</dt><dd class="num" id="diagGenerated">—</dd></div>
+          <div><dt>适配器版本</dt><dd class="num" id="diagAdapter">—</dd></div>
+          <div><dt>插件版本</dt><dd class="num" id="pluginVersion">—</dd></div>
+          <div><dt>降级项</dt><dd id="diagDegraded">—</dd></div>
+        </dl>
+      </section>
+    </div>
+  </main>
+</div>
 
-  <section class="add-cards" id="addCards" hidden>
-    <h3>已隐藏的卡片</h3>
-    <div class="add-list" id="addList"></div>
-  </section>
-
-  <footer class="footer">
-    <span id="footerMeta">会话 - 每 5 秒刷新</span>
-    <span>只读投影</span>
-  </footer>
-
-  <div class="layout-toast" id="layoutToast" role="status" hidden></div>
-</main>
+<section class="add-cards" id="addCards" hidden>
+  <h3>已隐藏的卡片</h3>
+  <div class="add-list" id="addList"></div>
+</section>
 
 <nav class="tabbar" id="tabBar" aria-label="页面切换">
   <button class="tab-item active" type="button" data-tab="dashboard" aria-selected="true">
@@ -459,8 +483,10 @@
   </button>
 </nav>
 
-<script src="panel-layout.js?v=8"></script>
+<div class="layout-toast" id="layoutToast" role="status" hidden></div>
+
+<script src="panel-layout.js?v=9"></script>
 <script src="trace-view.js?v=5"></script>
-<script src="panel.js?v=9"></script>
+<script src="panel.js?v=11"></script>
 </body>
 </html>

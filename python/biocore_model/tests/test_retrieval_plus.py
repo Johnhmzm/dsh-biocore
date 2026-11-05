@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 """task-62: normalized channels, chunks, shards, predictive exploration."""
 import json
 import tempfile

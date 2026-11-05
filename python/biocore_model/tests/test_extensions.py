@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 """task-225 (5b): P0 memory extensions + expression modules."""
 import json
 import tempfile

@@ -52,9 +52,9 @@ assert.equal(body.available, true)
 assert.equal(body.session_id, 'abc')
 assert.equal(body.v, 0.42)
 assert.deepEqual(body.intero, { tension: 0.7, warmth: 0.2, heaviness: 0.5, clarity: 0.4 })
-assert.equal(body.tone.label, '先接住情绪')
+assert.equal(body.tone.label, '先接住情�?)
 assert.ok(['陌生', '熟悉', '亲近', '稳定'].includes(body.relation.stage))
-assert.ok(['静', '等', '想联系', '冷却'].includes(body.autonomy.state))
+assert.ok(['�?, '�?, '想联�?, '冷却'].includes(body.autonomy.state))
 assert.equal(body.memory_count, 3)
 for (const key of ['available', 'session_id', 'v', 'intero', 'tone', 'relation',
   'autonomy', 'memory_count', 'updated_at']) {
@@ -275,7 +275,7 @@ try {
   const ensured = await bridge.ensureState(stateFile)
   assert.equal(ensured.ok, true, JSON.stringify(ensured))
   assert.ok(existsSync(stateFile))
-  const turned = await bridge.runTurn(stateFile, '谢谢你，今天好多了')
+  const turned = await bridge.runTurn(stateFile, '谢谢你，今天好多�?)
   assert.equal(turned.ok, true, JSON.stringify(turned))
   assert.ok(turned.after, 'turn summary has after state')
   assert.ok(turned.reply_hint && 'length_scale' in turned.reply_hint)
@@ -304,20 +304,20 @@ try {
     stateDir: tmp3,
     runTurn: async (file, text) => { calls.push({ file, text }); return fakeTurnResult },
   })
-  const success = await handler({ rawInput: ' sync 今天好累 好', agent: { session: { id: 'sess-cmd-1' } } })
+  const success = await handler({ rawInput: ' sync 今天好累 �?, agent: { session: { id: 'sess-cmd-1' } } })
   assert.equal(success.kind, 'success')
   assert.equal(calls.length, 1)
   assert.equal(calls[0].file, sessionStateFile(tmp3, 'sess-cmd-1'))
-  assert.ok(success.text.includes('v 0.00→0.06'))
+  assert.ok(success.text.includes('v 0.00�?.06'))
   const usage = await handler({ rawInput: '', agent: { session: { id: 's' } } })
   assert.equal(usage.kind, 'error')
   const noSession = await handler({ rawInput: ' sync hi', agent: {} })
   assert.equal(noSession.kind, 'error')
-  assert.ok(summarizeTurn(fakeTurnResult).includes('压力 0.20→0.24'))
+  assert.ok(summarizeTurn(fakeTurnResult).includes('压力 0.20�?.24'))
 
   const realHandler = makeCommandHandler({ stateDir: tmp3 })
   const real = await realHandler({
-    rawInput: ' sync 谢谢你，今天好多了',
+    rawInput: ' sync 谢谢你，今天好多�?,
     agent: { session: { id: 'sess-real-' + Date.now() } },
   })
   assert.equal(real.kind, 'success', JSON.stringify(real))
@@ -606,20 +606,20 @@ await import(pathToFileURL(join(root, 'lib', 'client.js')).href + '?t=' + Date.n
 clientCtx.exports.apply(clientCtx)
 assert.equal(tabs.length, 1)
 assert.equal(tabs[0].kind, 'biocore')
-assert.equal(tabs[0].title(), '生物核')
+assert.equal(tabs[0].title(), '生物�?)
 const tabSlot = slots.find((item) => item.name === 'sidebar.right.pane.tab')
 assert.ok(tabSlot, 'pane tab slot registered')
 assert.deepEqual(tabSlot.inject('session-abcdef'), { sessionId: 'session-abcdef' })
 const render = clientCtx.exports.__test.renderPanel
 const tree = JSON.stringify(render(body, false, 'sess-1234abcd'))
-for (const needle of ['生物核', '绷紧', '暖', '沉', '清', '语气', '关系', '自主',
-  '已连接', '会话 sess-123']) {
+for (const needle of ['生物�?, '绷紧', '�?, '�?, '�?, '语气', '关系', '自主',
+  '已连�?, '会话 sess-123']) {
   assert.ok(tree.includes(needle), 'render missing ' + needle)
 }
-assert.ok(JSON.stringify(render(null, true, 'sess-1')).includes('连不上宿主'))
-assert.ok(JSON.stringify(render({ available: false, reason: 'bad_state' }, false, 's')).includes('状态文件坏了'))
-assert.ok(JSON.stringify(render({ available: true, v: 0 }, false, '')).includes('未连接'))
-ok('client renders 5 numbers + 3 words, session label, 未连接/状态损坏 states')
+assert.ok(JSON.stringify(render(null, true, 'sess-1')).includes('连不上宿�?))
+assert.ok(JSON.stringify(render({ available: false, reason: 'bad_state' }, false, 's')).includes('状态文件坏�?))
+assert.ok(JSON.stringify(render({ available: true, v: 0 }, false, '')).includes('未连�?))
+ok('client renders 5 numbers + 3 words, session label, 未连�?状态损�?states')
 
 
 /* ---------- task-213: left sidebar entry + main iframe panel ---------- */
@@ -681,9 +681,9 @@ ok('client renders 5 numbers + 3 words, session label, 未连接/状态损坏 st
   const testApi = clientCtx.exports.__test
   assert.ok(testApi.SWITCH_META.every(
     (item) => switchMod.SWITCH_KEYS.indexOf(item.key) >= 0))
-  assert.equal(testApi.confirmationText('safety_enabled', true), '确定要打开安全闸吗？')
+  assert.equal(testApi.confirmationText('safety_enabled', true), '确定要打开安全闸吗�?)
   assert.equal(testApi.confirmationText('safety_enabled', false), '确定要关闭安全闸吗？')
-  assert.ok(testApi.switchErrorText('settings_unavailable').includes('设置服务不可用'))
+  assert.ok(testApi.switchErrorText('settings_unavailable').includes('设置服务不可�?))
   const section = JSON.stringify(testApi.SwitchSection({
     switches: {
       safety_enabled: true, boundary_enabled: false,
@@ -693,7 +693,7 @@ ok('client renders 5 numbers + 3 words, session label, 未连接/状态损坏 st
     error: testApi.switchErrorText('write_failed'),
     onToggle() {},
   }))
-  for (const needle of ['安全闸', '底线', '危机兜底', '主动回复', '开关（写宿主设置）', '写入失败']) {
+  for (const needle of ['安全�?, '底线', '危机兜底', '主动回复', '开关（写宿主设置）', '写入失败']) {
     assert.ok(section.includes(needle), 'switch section missing ' + needle)
   }
   ok('client renders the four native switches with confirm text and rollback reason')
@@ -710,10 +710,10 @@ ok('client renders 5 numbers + 3 words, session label, 未连接/状态损坏 st
   for (const needle of ['moodChart', 'memoryList', 'switches', 'motivation', 'orb']) {
     assert.ok(panelHtml.includes(needle), 'panel.html missing ' + needle)
   }
-  for (const needle of ['心情', '绷紧', '暖', '沉', '清', '语气', '关系', '自主']) {
+  for (const needle of ['心情', '绷紧', '�?, '�?, '�?, '语气', '关系', '自主']) {
     assert.ok(panelHtml.includes(needle), 'panel.html missing ' + needle)
   }
-  for (const needle of ['安全闸', '底线', '危机兜底', '主动回复', '已连接', '未连接',
+  for (const needle of ['安全�?, '底线', '危机兜底', '主动回复', '已连�?, '未连�?,
     '/api/biocore/state', '/api/biocore/switch', 'confirm: true']) {
     assert.ok(panelJs.includes(needle), 'panel.js missing ' + needle)
   }
@@ -725,7 +725,7 @@ ok('client renders 5 numbers + 3 words, session label, 未连接/状态损坏 st
 
 {
   const extrasMod = await import(pathToFileURL(join(root, 'lib', 'modules', 'panel-data.js')).href)
-  const longText = '很长的记忆正文'.repeat(30)
+  const longText = '很长的记忆正�?.repeat(30)
   const sampleState = {
     now: 1000,
     core: {
@@ -735,7 +735,7 @@ ok('client renders 5 numbers + 3 words, session label, 未连接/状态损坏 st
     },
     relationship: { closeness: 0.6, trust: 0.55, conflict: 0.1, bids: 2 },
     last_turn: {
-      intent: 'hold', metacog_band: '中',
+      intent: 'hold', metacog_band: '�?,
       turn: { length_factor: 0.9, initiative: 0.4, allow_correction: false },
     },
     memory: {
@@ -835,8 +835,7 @@ ok('client renders 5 numbers + 3 words, session label, 未连接/状态损坏 st
   assert.equal(layout.STORAGE_KEY, 'biocore-panel-layout-v2')
   assert.deepEqual(Array.from(layout.TAB_ORDER), ['dashboard', 'memory', 'relation', 'settings', 'tools'])
   assert.deepEqual(Array.from(layout.cardsForTab(layout.DEFAULT_ORDER, 'dashboard')),
-    ['status', 'mood', 'tension', 'warmth', 'heaviness', 'clarity',
-      'channels-avg', 'chart', 'expression-now', 'today'])
+    ['intero', 'log', 'state', 'today', 'loops', 'dims', 'cache', 'system', 'chart'])
   assert.deepEqual(Array.from(layout.cardsForTab(layout.DEFAULT_ORDER, 'relation')),
     ['metrics', 'narrative'])
   assert.deepEqual(Array.from(layout.cardsForTab(layout.DEFAULT_ORDER, 'tools')),
@@ -851,18 +850,18 @@ ok('client renders 5 numbers + 3 words, session label, 未连接/状态损坏 st
     removeItem: (k) => store.delete(k),
   }
   layout.writeLayout(storage, layout.moveCard(layout.defaultLayout(), 'switches', -1))
-  assert.equal(layout.readLayout(storage).order[0], 'status')
+  assert.equal(layout.readLayout(storage).order[0], 'intero')
   layout.clearLayout(storage)
   assert.equal(store.has(layout.STORAGE_KEY), false)
   assert.equal(layout.dragIntent({ editing: false }).hold, false)
   assert.equal(layout.dragIntent({ editing: true, pointerType: 'touch' }).hold, true)
   const solo = layout.defaultLayout()
-  const hidTension = layout.hideCard(solo, 'tension')
-  assert.deepEqual(Array.from(layout.visibleIds(hidTension)).filter(function (id) {
-    return ['tension', 'warmth', 'heaviness', 'clarity'].indexOf(id) >= 0
-  }), ['warmth', 'heaviness', 'clarity'])
-  assert.ok(layout.showCard(hidTension, 'tension').hidden.indexOf('tension') < 0)
-  ok('layout: groups/order/hidden/storage/restore + edit-only drag + solo channel hide')
+  const hidToday = layout.hideCard(solo, 'today')
+  assert.deepEqual(Array.from(layout.visibleIds(hidToday)).filter(function (id) {
+    return ['state', 'today', 'loops'].indexOf(id) >= 0
+  }), ['state', 'loops'])
+  assert.ok(layout.showCard(hidToday, 'today').hidden.indexOf('today') < 0)
+  ok('layout: groups/order/hidden/storage/restore + edit-only drag + solo column hide')
 }
 
 {
@@ -886,13 +885,13 @@ ok('client renders 5 numbers + 3 words, session label, 未连接/状态损坏 st
   }
   try {
     assert.equal((await call('GET')).body.embedding.mode, 'auto')
-    const plainKey = 'sk-abcdef1234567890'
+    const plainKey = 'test-key-placeholder'
     const saved = await call('POST', { confirm: true, embedding: {
       mode: 'remote', base_url: 'https://api.example.com', model: 'deepseek-flash',
       api_key: plainKey, local_path: 'C:/models/bge-m3',
     } })
     assert.equal(saved.code, 200)
-    assert.ok(saved.body.embedding.api_key.includes('••'))
+    assert.ok(saved.body.embedding.api_key.includes('•�?))
     assert.equal(JSON.parse(readFileSync(join(dataDir, 'config.json'), 'utf8')).embedding.api_key, plainKey)
     assert.equal((await call('POST', { embedding: { mode: 'auto' } })).body.reason, 'confirm_required')
     assert.equal((await call('POST', { confirm: true, embedding: { mode: 'weird' } })).body.reason, 'bad_mode')
@@ -931,7 +930,7 @@ ok('client renders 5 numbers + 3 words, session label, 未连接/状态损坏 st
     assert.equal(empty.body.reason, 'no_persona')
     ok('persona GET before compile -> no_persona shape')
 
-    const text = '亲近、俏皮、温暖、先接情绪、好奇'
+    const text = '亲近、俏皮、温暖、先接情绪、好�?
     const compiled = await call('POST', { text, confirm: true })
     assert.equal(compiled.code, 200, JSON.stringify(compiled.body))
     assert.equal(compiled.body.ok, true)
@@ -1006,7 +1005,7 @@ ok('client renders 5 numbers + 3 words, session label, 未连接/状态损坏 st
   const api = clientCtx.exports.__test
   assert.equal(api.formatDelta(0.1, 0.14), '+0.04')
   assert.equal(api.formatDelta(0.1, 0.08), '-0.02')
-  assert.equal(api.formatDelta(undefined, 1), '—')
+  assert.equal(api.formatDelta(undefined, 1), '�?)
   ok('ui helpers: per-turn delta suffixes')
 
   const history = Array.from({ length: 70 }, (_, i) => ({ v: Math.sin(i / 6) * 0.5 }))
@@ -1019,8 +1018,8 @@ ok('client renders 5 numbers + 3 words, session label, 未连接/状态损坏 st
 
   for (const [data, error, label] of [
     [{ available: false, reason: 'no_state_yet' }, false, '这个会话还没聊过'],
-    [{ available: false, reason: 'bad_state' }, false, '状态文件坏了'],
-    [null, true, '连不上宿主'],
+    [{ available: false, reason: 'bad_state' }, false, '状态文件坏�?],
+    [null, true, '连不上宿�?],
   ]) {
     const status = api.statusOf(data, error, 's')
     assert.equal(status.label, label)
@@ -1030,8 +1029,8 @@ ok('client renders 5 numbers + 3 words, session label, 未连接/状态损坏 st
 
   const html = readFileSync(join(root, 'ui', 'panel.html'), 'utf8')
   const css = readFileSync(join(root, 'ui', 'panel.css'), 'utf8')
-  for (const id of ['mood', 'tension', 'warmth', 'heaviness', 'clarity', 'chart', 'memory', 'memory-summary',
-    'metrics', 'trace', 'runtime', 'persona', 'model', 'switches', 'advanced']) {
+  for (const id of ['intero', 'log', 'state', 'today', 'loops', 'dims', 'cache', 'system', 'chart',
+    'memory', 'memory-summary', 'metrics', 'trace', 'runtime', 'persona', 'model', 'switches', 'advanced']) {
     assert.ok(html.includes('data-card-id="' + id + '"'), 'missing card ' + id)
   }
   assert.ok(!/class="channels-wrap"[^>]*data-card-id/.test(html), 'channels wrapper must not be a layout card')
@@ -1073,7 +1072,7 @@ ok('client renders 5 numbers + 3 words, session label, 未连接/状态损坏 st
 {
   assert.equal(tabs.length, 1)
   assert.equal(tabs[0].kind, 'biocore')
-  assert.equal(tabs[0].title(), '生物核')
+  assert.equal(tabs[0].title(), '生物�?)
   ok('client right tab registered (kind biocore)')
 
   assert.deepEqual(Array.from(Object.values(switchMod.DEFAULT_SWITCHES)),
@@ -1184,7 +1183,7 @@ ok('client renders 5 numbers + 3 words, session label, 未连接/状态损坏 st
     assert.equal(empty.body.source, 'profile')
     ok('persona GET before compile -> no_persona shape')
 
-    const text = '亲近、俏皮、温暖、先接情绪、好奇'
+    const text = '亲近、俏皮、温暖、先接情绪、好�?
     const compiled = await callPersona('POST', { text, confirm: true })
     assert.equal(compiled.code, 200, JSON.stringify(compiled.body))
     assert.equal(compiled.body.ok, true)
@@ -1326,7 +1325,7 @@ ok('client renders 5 numbers + 3 words, session label, 未连接/状态损坏 st
       enabled: true, base_url: 'https://api.jina.ai/v1',
       model: 'jina-reranker-v2-base-multilingual', api_key: key, top_n: 15 } })
     assert.equal(saved.code, 200)
-    assert.ok(saved.body.rerank.api_key.includes('••'))
+    assert.ok(saved.body.rerank.api_key.includes('•�?))
     assert.equal(saved.body.rerank.api_key.includes(key), false)
     const stored = JSON.parse(readFileSync(join(dataDir, 'config.json'), 'utf8'))
     assert.equal(stored.rerank.api_key, key)
@@ -1356,7 +1355,7 @@ ok('client renders 5 numbers + 3 words, session label, 未连接/状态损坏 st
   assert.equal(sanitize.sanitizeReply('你好<bc>{"e":"sad","i":0.55}</bc>呀'), '你好呀')
   assert.equal(sanitize.sanitizeReply('A<biocore>{"e":"mad","i":0.2}</biocore>B'), 'AB')
   assert.equal(sanitize.sanitizeReply('先说结论<bc>{"e":"sad","i":0.55}'), '先说结论')
-  assert.equal(sanitize.sanitizeReply('真的吗？<bc>{"e":"sad","i":0.55}后面的都算标签内。正常'), '真的吗？正常')
+  assert.equal(sanitize.sanitizeReply('真的吗？<bc>{"e":"sad","i":0.55}后面的都算标签内。正�?), '真的吗？正常')
   ok('sanitize: closed/unclosed bc + biocore tags removed')
 }
 
@@ -1370,7 +1369,7 @@ ok('client renders 5 numbers + 3 words, session label, 未连接/状态损坏 st
 
 {
   const sanitize = await import(pathToFileURL(join(root, 'lib', 'modules', 'sanitize-reply.js')).href)
-  assert.equal(sanitize.sanitizeReply('<bc>{"e":"sad","i":0.5}</bc><bc>{"e":"mad","i":0.6}</bc>好'), '好')
+  assert.equal(sanitize.sanitizeReply('<bc>{"e":"sad","i":0.5}</bc><bc>{"e":"mad","i":0.6}</bc>�?), '�?)
   assert.equal(sanitize.sanitizeReply('   '), '')
   const original = '你好<bc>{"e":"sad","i":0.5}</bc>'
   assert.equal(sanitize.sanitizeReply(original, { enabled: false }), original)

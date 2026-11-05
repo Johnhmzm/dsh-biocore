@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 """task-222: self layer (persona/narrative/drift) + autonomy decision/limits."""
 import json
 import tempfile

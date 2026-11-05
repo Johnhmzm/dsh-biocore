@@ -117,50 +117,6 @@ def _validate_vector(value) -> Optional[List[float]]:
 
 
 CACHE_FILE_ENV = "BIOCORE_EMBEDDING_CACHE_FILE"
-STATS_FILE_ENV = "BIOCORE_EMBED_STATS_FILE"
-_STATS_FLUSHED = {}
-
-
-def _stats_file():
-    return os.environ.get(STATS_FILE_ENV) or None
-
-
-def _flush_stats():
-    """Persist counters so /stats keeps counting across spawn-per-call.
-
-    Each bridge call is a fresh process; the file accumulates deltas since the
-    last flush of this process (never raises, never blocks a turn).
-    """
-    path = _stats_file()
-    if not path:
-        return
-    try:
-        previous = {}
-        if os.path.isfile(path):
-            try:
-                with open(path, encoding="utf-8") as handle:
-                    loaded = json.load(handle)
-                if isinstance(loaded, dict):
-                    previous = loaded
-            except Exception:
-                previous = {}
-        merged = {}
-        for key in EMBED_STATS:
-            try:
-                before = int(previous.get(key, 0) or 0)
-            except Exception:
-                before = 0
-            merged[key] = before + EMBED_STATS[key] - _STATS_FLUSHED.get(key, 0)
-        directory = os.path.dirname(path)
-        if directory:
-            os.makedirs(directory, exist_ok=True)
-        tmp = path + ".tmp"
-        with open(tmp, "w", encoding="utf-8") as handle:
-            json.dump(merged, handle)
-        os.replace(tmp, path)
-        _STATS_FLUSHED.update(EMBED_STATS)
-    except Exception:
-        pass
 
 
 def _cache_file():
@@ -828,13 +784,6 @@ def _call_provider(provider, text, timeout):
 
 def embed(text, provider, cache=None, timeout=None):
     """Return a vector for text, or None (never raises); LRU cache optional."""
-    try:
-        return _embed_impl(text, provider, cache, timeout)
-    finally:
-        _flush_stats()
-
-
-def _embed_impl(text, provider, cache=None, timeout=None):
     if provider is None:
         return None
     normalized = normalize_text(text)

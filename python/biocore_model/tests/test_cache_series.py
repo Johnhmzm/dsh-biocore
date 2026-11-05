@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 """Contract migration 1: cache stats + series are computed by the core."""
 import json
 import tempfile

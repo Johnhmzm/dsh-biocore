@@ -46,6 +46,8 @@ try:
 except Exception:  # pragma: no cover
     _sanitize = None
 
+# [engineering] every cadence/limit below is a product decision (see
+# PAPER-MAP.md); there is no user study behind 30min / 3 per day / 120min.
 DEFAULTS = {
     "standby_enabled": False,
     "standby_model_base_url": "",

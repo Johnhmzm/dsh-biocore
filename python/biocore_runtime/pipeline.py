@@ -67,15 +67,15 @@ _PLUGIN_ROOT = str(Path(__file__).resolve().parents[1])
 if _PLUGIN_ROOT not in sys.path:
     sys.path.insert(0, _PLUGIN_ROOT)
 
-MAX_CHARS = 420
-TOP_K = 5
+MAX_CHARS = 420           # [engineering]
+TOP_K = 5                 # [engineering]
 INJECT_MAX_K = 10          # inject_block may ask for more when rerank prunes
 INJECT_MODES = ("query", "recent")
-HOURLY_CAP = 20
-MIN_CHARS = 8
-MAX_TEXT_CHARS = 2000
-MAX_STATE_CHARS = 200
-MAX_ENTRIES = 500
+HOURLY_CAP = 20           # [engineering] product rate limit, not a memory theory
+MIN_CHARS = 8             # [engineering]
+MAX_TEXT_CHARS = 2000     # [engineering]
+MAX_STATE_CHARS = 200     # [engineering]
+MAX_ENTRIES = 500         # [engineering]
 SESSION_MAX_LEN = 80
 _HOUR = 3600.0
 _WS = re.compile(r"\s+")
@@ -174,6 +174,86 @@ try:
     from biocore_model import sanitize as _sanitize
 except Exception:  # pragma: no cover
     _sanitize = None
+
+try:  # task-244: shadow coordinates for memory entries (write-only, switch off)
+    from biocore_memory import space as _space
+except Exception:  # pragma: no cover
+    try:
+        from .biocore_memory import space as _space
+    except Exception:
+        _space = None
+
+try:  # task-228: the shared field + its write-back arbiter (pure, optional)
+    from biocore_runtime import field as _field_mod
+    from biocore_runtime import arbiter as _arbiter_mod
+except Exception:  # pragma: no cover
+    try:
+        from . import field as _field_mod
+        from . import arbiter as _arbiter_mod
+    except Exception:
+        _field_mod = _arbiter_mod = None
+
+try:  # task-230: indicative priority from field surprise
+    from biocore_runtime import priority as _priority
+except Exception:  # pragma: no cover
+    try:
+        from . import priority as _priority
+    except Exception:
+        _priority = None
+
+try:  # task-234 (batch A1): the twelve perception/appraisal modules
+    from biocore_runtime import perception as _perception
+except Exception:  # pragma: no cover
+    try:
+        from . import perception as _perception
+    except Exception:
+        _perception = None
+
+try:  # task-236/238/239: the batch hooks + their registry
+    from biocore_runtime import batch_registry as _batch_registry
+    from biocore_runtime import batch_b as _batch_b
+    from biocore_runtime import batch_d as _batch_d
+    from biocore_runtime import batch_e as _batch_e
+except Exception:  # pragma: no cover
+    try:
+        from . import batch_registry as _batch_registry
+        from . import batch_b as _batch_b
+        from . import batch_d as _batch_d
+        from . import batch_e as _batch_e
+    except Exception:
+        _batch_registry = _batch_b = _batch_d = _batch_e = None
+
+try:  # batch C was written independently and may be absent in a stripped tree
+    from biocore_runtime import batch_c as _batch_c
+except Exception:  # pragma: no cover
+    try:
+        from . import batch_c as _batch_c
+    except Exception:
+        _batch_c = None
+
+try:  # task-229: the three time scales
+    from biocore_runtime import timescales as _timescales
+except Exception:  # pragma: no cover
+    try:
+        from . import timescales as _timescales
+    except Exception:
+        _timescales = None
+
+try:  # task-243: N-dimensional ontology (explicit / implicit, no sums)
+    from biocore_runtime import dimensions as _dimensions
+except Exception:  # pragma: no cover
+    try:
+        from . import dimensions as _dimensions
+    except Exception:
+        _dimensions = None
+
+try:  # task-243 段2: the expression policy (mode + wording hints only)
+    from biocore_runtime import expression as _expression
+except Exception:  # pragma: no cover
+    try:
+        from . import expression as _expression
+    except Exception:
+        _expression = None
 
 try:  # self-layer modules (all pure; optional so a stripped checkout still runs)
     from biocore_model import x_directives as _x_directives
@@ -486,6 +566,222 @@ def _signals_eval(store, session_id, user_text="", assistant_text="",
                                  state=state or {}, relationship=rel, now=now)
     except Exception:
         return None
+
+
+def _perception_state(store, payload=None, state=None, include_core=True):
+    """Session state + the host's payload blocks this batch owns.
+
+    The merged core keeps core_state authoritative for the body fields and does
+    not copy other payload blocks into the session state, so needs/attachment/
+    appraisal handed in by the host are overlaid here (read-time only; the
+    writeback persists them).
+    """
+    data = payload if isinstance(payload, dict) else {}
+    session_state = dict(state) if isinstance(state, dict) else {}
+    payload_state = data.get("state") if isinstance(data.get("state"), dict) else {}
+    for key in ("needs", "attachment", "appraisal", "affective_labor",
+                "comfort_streak", "sleep", "sleep_debt", "frustration_n",
+                "last_human_ts", "history", "regulation_history"):
+        value = payload_state.get(key)
+        if value is not None and session_state.get(key) is None:
+            session_state[key] = value
+    base = session_state.get("core") if isinstance(session_state.get("core"), dict) else {}
+    payload_core = payload_state.get("core") if isinstance(
+        payload_state.get("core"), dict) else {}
+    if payload_core and include_core:
+        core = dict(base)
+        core.update(payload_core)
+        session_state["core"] = core
+    if store is not None and _store_root(store) is not None:
+        shared = relationship_read(store)
+        rel = shared.get("relationship") or {}
+        sidecar = bool(shared.get("version")) or bool(
+            str(shared.get("path") or "") and Path(shared["path"]).exists())
+        current = session_state.get("relationship")
+        current = dict(current) if isinstance(current, dict) else {}
+        payload_rel = payload_state.get("relationship")
+        payload_rel = dict(payload_rel) if isinstance(payload_rel, dict) else {}
+        if sidecar:  # the shared sidecar owns trust/closeness/style
+            merged = dict(current)
+            merged.update(payload_rel)
+            merged.update(rel)
+        else:        # no sidecar yet: the host's numbers are the only data we have
+            merged = dict(rel)
+            merged.update(current)
+            merged.update(payload_rel)
+        session_state["relationship"] = merged
+    return session_state
+
+
+def _perception_on(store, payload=None):
+    """Batch A1 switch: one key for the whole perception batch."""
+    data = payload if isinstance(payload, dict) else {}
+    if data.get("perception_batch") is not None:
+        return _as_bool(data.get("perception_batch"), True)
+    return bool(_effective_switches(store, data.get("switches")).get(
+        "perception_batch", True))
+
+
+def _perception_read(store, session_id, payload=None, state=None, now=None):
+    """turn_start: one read-only snapshot of the twelve modules."""
+    if _perception is None or not store:
+        return {"enabled": False, "reason": "unavailable"}
+    data = payload if isinstance(payload, dict) else {}
+    try:
+        session_state = _perception_state(store, data, state)
+        return _perception.snapshot(
+            store, session_id, payload=data, state=session_state,
+            now=now, enabled_override=_perception_on(store, data))
+    except Exception as error:  # a broken batch never breaks a turn
+        return {"enabled": False, "reason": type(error).__name__}
+
+
+def _perception_write(store, session_id, payload=None, state=None, now=None):
+    """turn_end: appraisal/attachment/needs write-back + field proposals."""
+    if _perception is None or not store:
+        return {"enabled": False, "reason": "unavailable"}
+    data = payload if isinstance(payload, dict) else {}
+    try:
+        # the host's own core push stays a proposal for the arbiter, so it must
+        # not be written into the state behind the arbiter's back
+        session_state = _perception_state(store, data, state, include_core=False)
+        on = _perception_on(store, data)
+        result = _perception.writeback(
+            store, session_id, payload=data, state=session_state, now=now,
+            enabled_override=on, own_field=not field_enabled(data))
+        new_state = result.pop("_state", None)
+        if isinstance(new_state, dict) and result.get("enabled"):
+            _save_session_state(store, session_id, new_state)
+        return result
+    except Exception as error:
+        return {"enabled": False, "reason": type(error).__name__}
+
+
+def _push_core_deltas(store, session_id, payload=None, deltas=None,
+                      field_on=True):
+    """task-234: the accepted affect deltas reach the one global core state.
+
+    The merged core keeps <dataDir>/core_state.json authoritative for v/a/
+    stress/social. The arbiter (or perception, when the field is off) decides
+    the bounded delta, so the numbers must land there too -- otherwise the next
+    turn_start would read the old body and silently revert the turn.
+    """
+    adds = {key: _num(value) for key, value in (deltas or {}).items()
+            if key in ("v", "a", "stress", "social") and abs(_num(value)) > 1e-6}
+    if not adds or store is None:
+        return None
+    data = payload if isinstance(payload, dict) else {}
+    core_path = _core_state_path(data)
+    try:
+        if (_core_state is not None and _core_state.exists(core_path)):
+            doc = _core_state.apply(core_path, deltas=dict(adds),
+                                    now=time.time(), session_id=session_id,
+                                    intero_fn=_intero_from_core)
+            if doc:
+                state = _load_session_state(store, session_id)
+                core = dict(state.get("core") or {})
+                core.update(_core_state.core_of(doc))
+                if isinstance(doc.get("intero"), dict):
+                    core["intero"] = dict(doc["intero"])
+                    state["intero"] = dict(doc["intero"])
+                state["core"] = core
+                state["core_delta"] = dict(adds)
+                state["core_state_ts"] = doc.get("ts", 0.0)
+                _save_session_state(store, session_id, state)
+                return _core_state.snapshot(core_path)
+        elif not field_on:  # no global body and no field write: do it here
+            state = _load_session_state(store, session_id)
+            core = dict(state.get("core") or {})
+            for key, value in adds.items():
+                low, high = (-1.0, 1.0) if key == "v" else (0.0, 1.0)
+                core[key] = round(max(low, min(high, _num(core.get(key), 0.0)
+                                               + value)), 6)
+            state["core"] = core
+            _save_session_state(store, session_id, state)
+        return None
+    except Exception:
+        return None
+
+
+def _timescale_tick(store, session_id, payload=None, state=None, now=None):
+    """task-229: advance the seconds/minutes/hours layers once per turn."""
+    if _timescales is None or not store:
+        return {"enabled": False, "reason": "unavailable"}
+    data = payload if isinstance(payload, dict) else {}
+    try:
+        switches = _effective_switches(store, data.get("switches"))
+        if not switches.get("timescales", True):
+            return {"enabled": False, "reason": "disabled"}
+        session_state = (state if isinstance(state, dict)
+                         else _load_session_state(store, session_id))
+        model = _timescales.load(session_state)
+        core = session_state.get("core") if isinstance(
+            session_state.get("core"), dict) else {}
+        relationship = session_state.get("relationship") if isinstance(
+            session_state.get("relationship"), dict) else {}
+        sample = {"v": _num(core.get("v"), 0.0),
+                  "a": _num(core.get("a"), 0.5),
+                  "trust": relationship.get("trust")}
+        stamp = _num(now, time.time())
+        dt = max(0.0, stamp - _num(model.get("updated_ts"), 0.0))
+        model, report = _timescales.step(model, sample, dt, now=stamp)
+        session_state["timescales"] = model
+        _save_session_state(store, session_id, session_state)
+        return {"enabled": True, "report": report,
+                "values": _timescales.project(model)}
+    except Exception as error:  # a broken clock never breaks a turn
+        return {"enabled": False, "reason": type(error).__name__}
+
+
+def _batch_hooks():
+    """The four batch hooks that are importable in this checkout."""
+    hooks = {}
+    for name, module in (("b", _batch_b), ("c", _batch_c), ("d", _batch_d),
+                         ("e", _batch_e)):
+        if module is not None and callable(getattr(module, "apply_turn", None)):
+            hooks[name] = module
+    return hooks
+
+
+def _merge_batch_state(state, deltas):
+    """Merge the safe batch blocks into one session state (never core)."""
+    if not isinstance(state, dict) or not isinstance(deltas, dict):
+        return state
+    safe = getattr(_batch_registry, "SAFE_KEYS", ())
+    for key, value in deltas.items():
+        if key == "batches" and isinstance(value, dict):
+            bucket = state.get("batches") if isinstance(state.get("batches"),
+                                                        dict) else {}
+            for name, block in value.items():
+                if isinstance(block, dict):
+                    current = bucket.get(str(name)) if isinstance(
+                        bucket.get(str(name)), dict) else {}
+                    current.update(block)
+                    bucket[str(name)] = current
+            state["batches"] = bucket
+            continue
+        if safe and key not in safe:
+            continue
+        state[key] = value
+    return state
+
+
+def _batch_tick(store, session_id, phase, payload=None, state=None, now=None):
+    """Run b/c/d/e once, merge their safe deltas, keep the per-module monitor."""
+    if _batch_registry is None or not store:
+        return {"enabled": False, "reason": "unavailable"}
+    data = payload if isinstance(payload, dict) else {}
+    try:
+        switches = _effective_switches(store, data.get("switches"))
+        session_state = dict(state) if isinstance(state, dict) else {}
+        result = _batch_registry.tick(
+            store, session_id, phase, data, session_state, now=now,
+            switches=switches, hooks=_batch_hooks())
+    except Exception as error:  # a broken registry never breaks a turn
+        return {"enabled": False, "reason": type(error).__name__}
+    if isinstance(state, dict):
+        _merge_batch_state(state, result.get("state_deltas") or {})
+    return result
 
 
 def _governance_tick(store, now=None):
@@ -953,6 +1249,14 @@ def prompt_block(payload):
                 text = text + "\n" + "\n".join(lines[:6])
         except Exception:
             expression = None
+    policy, policy_extra = expression_prompt_extra(state, data)
+    policy_rows = [str(row.get("text") or "")
+                   for row in (policy_extra.get("hints") or [])
+                   if isinstance(row, dict)
+                   and row.get("source") == "expression_policy"
+                   and row.get("text")]
+    if policy_rows:
+        text = text + "\n" + "\n".join("- " + row for row in policy_rows[:2])
     thinking_line = thinking_style_line(data)
     persona_line = persona_prompt_line(data)
     if thinking_line:
@@ -966,6 +1270,8 @@ def prompt_block(payload):
         sections["expression"] = expression
     if persona_line:
         sections["persona"] = persona_line
+    if policy.get("enabled"):
+        sections["expression_policy"] = policy
     return {"ok": True, "phase": phase, "text": text, "chars": len(text),
             "sections": sections}
 
@@ -1004,6 +1310,483 @@ def _score(query, text):
     if not overlap:
         return 1.0 if str(query) and str(query) in str(text) else 0.0
     return round(overlap / float(len(q_tokens)), 4)
+
+
+def _space_switch(store, payload=None):
+    """spatial_recall: payload flag > flags.json / config > env > default OFF."""
+    data = payload if isinstance(payload, dict) else {}
+    if isinstance(data.get("spatial_recall"), bool):
+        return bool(data["spatial_recall"])
+    try:
+        switches = _effective_switches(store, None)
+    except Exception:
+        switches = {}
+    if isinstance(switches.get("spatial_recall"), bool):
+        return bool(switches["spatial_recall"])
+    if _space is not None:
+        return _space.enabled(flags=data, env=os.environ)
+    return False
+
+
+def _space_embed_info(store):
+    """Embedding provider / model names, kept in the coordinates for auditing."""
+    info = {"provider": "", "model": ""}
+    try:
+        cfg = _load_runtime_config(store)
+    except Exception:
+        cfg = {}
+    block = cfg.get("embedding") if isinstance(cfg.get("embedding"), dict) else cfg
+    if isinstance(block, dict):
+        info["provider"] = str(block.get("provider")
+                              or block.get("embedding_provider") or "")[:64]
+        info["model"] = str(block.get("model")
+                           or block.get("embedding_model") or "")[:64]
+    return info
+
+
+def _attach_space(entry, store, session_id, payload=None, now=None):
+    """Add the shadow coordinates to one NEW entry; failure leaves it untouched.
+
+    recall never reads this field: it is a write-only coordinate snapshot, and
+    a duplicate write keeps the coordinates the entry already has.
+    """
+    if _space is None or not isinstance(entry, dict):
+        return entry
+    data = payload if isinstance(payload, dict) else {}
+    if not _space_switch(store, data):
+        return entry
+    try:
+        relationship = relationship_read(store)["relationship"]
+    except Exception:
+        relationship = {}
+    try:
+        space = _space.build(entry, relationship, now=now,
+                             embed=_space_embed_info(store))
+    except Exception:      # coordinates are a shadow; never a reason to fail
+        space = None
+    if isinstance(space, dict):
+        entry = dict(entry)
+        entry["space"] = space
+    return entry
+
+
+# ------------------------------------------------------ surprise priority (task-230)
+def priority_enabled(payload=None):
+    """surprise_priority: payload flag > flags.json / config > env > default ON."""
+    if _priority is None:
+        return False
+    data = payload if isinstance(payload, dict) else {}
+    if isinstance(data.get("surprise_priority"), bool):
+        return bool(data["surprise_priority"])
+    try:
+        switches = _effective_switches(data.get("store") or _default_store(),
+                                       data.get("switches"))
+    except Exception:
+        switches = {}
+    if isinstance(switches.get("surprise_priority"), bool):
+        return bool(switches["surprise_priority"])
+    return _priority.enabled(flags=data, env=os.environ)
+
+
+def _priority_values(store, session_id):
+    """The six field numbers this session is currently sitting at."""
+    state = _load_session_state(store, session_id)
+    core = state.get("core") if isinstance(state.get("core"), dict) else {}
+    relationship = {}
+    try:
+        relationship = relationship_read(store)["relationship"]
+    except Exception:
+        relationship = state.get("relationship") or {}
+    return _priority.field_values(core, relationship), relationship
+
+
+def consolidation_priority(store, session_id, payload=None, limit=10):
+    """Read-only /state block: top candidates + each factor line."""
+    data = payload if isinstance(payload, dict) else {}
+    empty = {"schema": 0, "enabled": False, "reason": "unavailable",
+             "field_surprise": {}, "top": []}
+    if _priority is None:
+        return dict(empty)
+    sid = sanitize_session_id(session_id)
+    on = priority_enabled(data)
+    values, relationship = _priority_values(store, sid)
+    entries = _visible(load_memory(store, sid).get("entries"))
+    row = _priority.summary(entries, values, relationship, limit,
+                            enabled_override=on)
+    row["reason"] = "ok" if on else "disabled"
+    return row
+
+
+# ------------------------------------------- spatial recall / rerank (task-244)
+SPATIAL_RERANK_KEY = "spatial_rerank"
+RETRIEVAL_LAST_FILE = "retrieval_last.json"
+RERANK_ENV = {"rerank_base_url": "BIOCORE_RERANK_BASE_URL",
+              "rerank_model": "BIOCORE_RERANK_MODEL",
+              "rerank_api_key": "BIOCORE_RERANK_API_KEY",
+              "rerank_timeout": "BIOCORE_RERANK_TIMEOUT",
+              "rerank_top_n": "BIOCORE_RERANK_TOP_N"}
+
+
+def _spatial_rerank_switch(store, payload=None):
+    """spatial_rerank: payload flag > flags.json / config > env > default OFF."""
+    data = payload if isinstance(payload, dict) else {}
+    if isinstance(data.get(SPATIAL_RERANK_KEY), bool):
+        return bool(data[SPATIAL_RERANK_KEY])
+    try:
+        switches = _effective_switches(store, None)
+    except Exception:
+        switches = {}
+    if isinstance(switches.get(SPATIAL_RERANK_KEY), bool):
+        return bool(switches[SPATIAL_RERANK_KEY])
+    raw = str(os.environ.get("BIOCORE_SPATIAL_RERANK") or "").strip().lower()
+    if raw in ("1", "true", "on", "yes"):
+        return True
+    if raw in ("0", "false", "off", "no"):
+        return False
+    return False
+
+
+def _rerank_config(store, payload=None):
+    """BIOCORE_RERANK_* env > runtime config rerank block > payload.rerank."""
+    data = payload if isinstance(payload, dict) else {}
+    try:
+        cfg = _load_runtime_config(store) if store else {}
+    except Exception:
+        cfg = {}
+    block = cfg.get("rerank") if isinstance(cfg.get("rerank"), dict) else cfg
+    out = dict(block) if isinstance(block, dict) else {}
+    for key, env_key in RERANK_ENV.items():
+        value = str(os.environ.get(env_key) or "").strip()
+        if value:
+            out[key] = value
+    if isinstance(data.get("rerank"), dict):
+        out.update({key: value for key, value in data["rerank"].items()
+                    if not isinstance(value, dict)})
+    return out
+
+
+def _record_retrieval(store, row):
+    """<dataDir>/retrieval_last.json: what the last recall stage did."""
+    try:
+        data_dir = _store_data_dir(store) if store else None
+        if data_dir is None:
+            return False
+        row = dict(row)
+        row["ts"] = round(time.time(), 3)
+        _atomic_write(Path(data_dir) / RETRIEVAL_LAST_FILE, row)
+        return True
+    except Exception:
+        return False
+
+
+def _retrieval_last(store):
+    try:
+        data_dir = _store_data_dir(store) if store else None
+        if data_dir is None:
+            return {}
+        row = _load_json(Path(data_dir) / RETRIEVAL_LAST_FILE, {})
+        return row if isinstance(row, dict) else {}
+    except Exception:
+        return {}
+
+
+def _rerank_rows(store, query, rows, payload=None, stage="recall",
+                 transport=None, top_n=None):
+    """Optional recall post-stage: rerank the candidates, never break recall.
+
+    Off by default (spatial_rerank). Any failure -- missing config, timeout,
+    bad payload, exception -- returns the original list untouched and records
+    the reason in retrieval_last{stage, reranked, reason}.
+    """
+    data = payload if isinstance(payload, dict) else {}
+    rows = list(rows or [])
+    status = {"stage": str(stage), "enabled": False, "reranked": False,
+              "reason": "disabled", "candidates": len(rows), "kept": len(rows),
+              "session_id": str(data.get("session_id") or "")}
+    if not _spatial_rerank_switch(store, data):
+        _record_retrieval(store, status)
+        return rows, status
+    status["enabled"] = True
+    if _rerank_mod is None:
+        status["reason"] = "unavailable"
+        _record_retrieval(store, status)
+        return rows, status
+    if len(rows) < 2:
+        status["reason"] = "too_few"
+        _record_retrieval(store, status)
+        return rows, status
+    config = _rerank_config(store, data)
+    config["rerank_enabled"] = True
+    if top_n:
+        config["rerank_top_n"] = int(top_n)
+    reasons = []
+    try:
+        reranked = _rerank_mod.rerank_documents(
+            query, [str(row.get("text") or "") for row in rows], config,
+            transport=transport, on_reason=reasons.append)
+    except Exception:
+        reranked = None
+        reasons.append("error")
+    if not reranked:
+        status["reason"] = str(reasons[0] if reasons else "fallback")
+        _record_retrieval(store, status)
+        return rows, status
+    seen = set()
+    ordered = []
+    for item in reranked:
+        try:
+            index = int(item.get("index", -1))
+        except Exception:
+            continue
+        if 0 <= index < len(rows) and index not in seen:
+            seen.add(index)
+            row = dict(rows[index])
+            row["rerank_score"] = item.get("relevance_score")
+            ordered.append(row)
+    for index, row in enumerate(rows):
+        if index not in seen:
+            ordered.append(row)
+    status.update({"reranked": True, "reason": "ok", "kept": len(ordered)})
+    _record_retrieval(store, status)
+    return ordered, status
+
+
+def _space_vector(entry, store, payload=None):
+    """Write the embedding into the entry when a provider is configured."""
+    if _space is None or not isinstance(entry, dict):
+        return entry
+    data = payload if isinstance(payload, dict) else {}
+    if not _space_switch(store, data):
+        return entry   # switch off: no embedding cost, no vector written
+    text = str(entry.get("text") or "").strip()
+    if not text:
+        return entry
+    try:
+        from biocore_memory.recall.embedding import embed as _embed
+        from biocore_memory.recall.embedding import load_provider as _load_provider
+    except Exception:
+        return entry
+    config = {}
+    try:
+        config = _load_runtime_config(store) if store else {}
+    except Exception:
+        config = {}
+    merged = dict(config) if isinstance(config, dict) else {}
+    for key in ("embedding", "embedding_mode", "embedding_base_url",
+                "embedding_model", "embedding_api_key", "embedding_dim",
+                "base_url", "model", "api_key"):
+        if key in data:
+            merged[key] = data[key]
+    provider = None
+    try:
+        provider = _load_provider(merged)
+    except Exception:
+        provider = None
+    if provider is None:
+        return entry
+    try:
+        vector = _embed(text, provider)
+    except Exception:
+        vector = None
+    if not vector:
+        return entry
+    out = dict(entry)
+    out["vector"] = [round(float(value), 6) for value in vector]
+    out["embedding_model"] = str(getattr(provider, "model", "") or "")[:64]
+    out["embedding_provider"] = str(getattr(provider, "mode", "") or "")[:64]
+    return out
+
+
+# ------------------------------------------------------- space bench (task-244)
+BENCH_LABELS = {"A": "旧 recall", "B": "旧 recall + rerank",
+                "C": "空间邻居", "D": "空间邻居 + rerank"}
+
+
+def _bench_rank(ranked_ids, relevant, limit=5):
+    """rank of the first relevant id in the list (1-based, 0 = not found)."""
+    wanted = set(str(item) for item in (relevant or []))
+    for index, entry_id in enumerate(list(ranked_ids or [])[:limit]):
+        if str(entry_id) in wanted:
+            return index + 1
+    return 0
+
+
+def bench_metrics(ranked_ids, relevant, limit=5):
+    """Overlap@k and MRR for one query. No cross-combo number is invented."""
+    wanted = set(str(item) for item in (relevant or []))
+    top = [str(item) for item in list(ranked_ids or [])[:limit]]
+    if not wanted:
+        return {"overlap": None, "mrr": None, "found": 0}
+    rank = _bench_rank(top, wanted, limit)
+    return {"overlap": round(len(wanted & set(top)) / len(wanted), 6),
+            "mrr": round(1.0 / rank, 6) if rank else 0.0,
+            "found": 1 if rank else 0}
+
+
+def _bench_old_recall(entries, query, depth):
+    """The old recall exactly as tool_call('recall') ranks it (no rerank)."""
+    rows = []
+    for entry in entries:
+        score = _score(query, entry.get("text"))
+        if score <= 0:
+            continue
+        rows.append({"id": str(entry.get("id") or ""),
+                     "text": str(entry.get("text") or ""),
+                     "ts": _num(entry.get("ts"), 0.0), "score": score})
+    rows.sort(key=lambda row: (-row["score"], -row["ts"]))
+    return rows[:depth]
+
+
+def _bench_space_recall(entries, query, depth, now=None):
+    """The spatial neighbour order: lexicographic over the five axes."""
+    probed = _space.probe(entries, query=query, limit=depth, now=now) \
+        if _space is not None else {}
+    return [{"id": str(row.get("id") or ""),
+             "text": str(row.get("text") or ""),
+             "distance": row.get("distance") or {}}
+            for row in (probed.get("results") or [])]
+
+
+def _bench_rerank(store, payload, query, rows, transport=None, top_n=None):
+    """One rerank pass over a candidate list; failure returns it untouched."""
+    if _rerank_mod is None or len(rows) < 2:
+        return rows, "unavailable" if _rerank_mod is None else "too_few"
+    config = _rerank_config(store, payload)
+    config["rerank_enabled"] = True
+    if top_n:
+        config["rerank_top_n"] = int(top_n)
+    reasons = []
+    try:
+        reranked = _rerank_mod.rerank_documents(
+            query, [str(row.get("text") or "") for row in rows], config,
+            transport=transport, on_reason=reasons.append)
+    except Exception:
+        reranked = None
+        reasons.append("error")
+    if not reranked:
+        return rows, str(reasons[0] if reasons else "fallback")
+    seen = set()
+    ordered = []
+    for item in reranked:
+        try:
+            index = int(item.get("index", -1))
+        except Exception:
+            continue
+        if 0 <= index < len(rows) and index not in seen:
+            seen.add(index)
+            ordered.append(rows[index])
+    for index, row in enumerate(rows):
+        if index not in seen:
+            ordered.append(row)
+    return ordered, "ok"
+
+
+def space_bench(store, session_id="s1", queries=None, limit=5, now=None,
+                transport=None, top_n=None, depth=None, mode="text"):
+    """A/B/C/D comparison: old recall / +rerank / space / space+rerank.
+
+    Pseudo queries (no explicit list):
+      mode="text"  each entry's own text, ground truth = that entry (self recall)
+      mode="tag"   each entry's first tag, ground truth = every entry carrying it
+    """
+    sid = sanitize_session_id(session_id or "default")
+    stamp = _num(now, time.time())
+    entries = _visible(load_memory(store, sid).get("entries"))
+    depth = int(_int_param(depth if depth is not None else top_n,
+                           10, 2, 50))
+    limit = int(_int_param(limit, 5, 1, 20))
+    items = []
+    if isinstance(queries, list) and queries:
+        for raw in queries[:64]:
+            if isinstance(raw, dict):
+                items.append({"query": str(raw.get("query") or raw.get("text")
+                                           or ""),
+                              "ids": [str(item) for item in
+                                      (raw.get("ids") or [])]})
+            else:
+                items.append({"query": str(raw), "ids": []})
+    elif str(mode or "text").lower() == "tag":
+        groups = {}
+        for entry in entries:
+            for tag in (entry.get("tags") or []):
+                groups.setdefault(str(tag), []).append(
+                    str(entry.get("id") or ""))
+        for tag in sorted(groups)[:20]:
+            ids = [item for item in groups[tag] if item]
+            if ids:
+                items.append({"query": tag, "ids": ids})
+    else:
+        for entry in sorted(entries,
+                            key=lambda row: -_num(row.get("ts"), 0.0))[:20]:
+            text = str(entry.get("text") or "").strip()
+            if text:
+                items.append({"query": text,
+                              "ids": [str(entry.get("id") or "")]})
+    by_text = {str(entry.get("text") or ""): str(entry.get("id") or "")
+               for entry in entries}
+    stats = {key: {"overlap": [], "mrr": []} for key in BENCH_LABELS}
+    timings = {key: [] for key in BENCH_LABELS}
+    skipped = 0
+    details = []
+    for item in items:
+        query = item["query"].strip()
+        if not query:
+            continue
+        relevant = item["ids"] or ([by_text[query]] if query in by_text else [])
+        if not relevant:
+            skipped += 1
+            continue
+        started = time.perf_counter()
+        a_rows = _bench_old_recall(entries, query, depth)
+        a_ms = (time.perf_counter() - started) * 1000.0
+        started = time.perf_counter()
+        b_rows, b_reason = _bench_rerank(store, {}, query, a_rows,
+                                         transport=transport, top_n=top_n)
+        b_ms = (time.perf_counter() - started) * 1000.0
+        started = time.perf_counter()
+        c_rows = _bench_space_recall(entries, query, depth, now=stamp)
+        c_ms = (time.perf_counter() - started) * 1000.0
+        started = time.perf_counter()
+        d_rows, d_reason = _bench_rerank(store, {}, query, c_rows,
+                                         transport=transport, top_n=top_n)
+        d_ms = (time.perf_counter() - started) * 1000.0
+        # a combo's latency is the whole path it runs, not just its last step
+        timings["A"].append(a_ms)
+        timings["B"].append(a_ms + b_ms)
+        timings["C"].append(c_ms)
+        timings["D"].append(c_ms + d_ms)
+        for key, rows in (("A", a_rows), ("B", b_rows),
+                          ("C", c_rows), ("D", d_rows)):
+            metric = bench_metrics([row.get("id") for row in rows],
+                                   relevant, limit)
+            stats[key]["overlap"].append(metric["overlap"])
+            stats[key]["mrr"].append(metric["mrr"])
+        details.append({"query": query[:60], "relevant": relevant,
+                        "A": [row.get("id") for row in a_rows[:limit]],
+                        "B": [row.get("id") for row in b_rows[:limit]],
+                        "C": [row.get("id") for row in c_rows[:limit]],
+                        "D": [row.get("id") for row in d_rows[:limit]],
+                        "rerank_B": b_reason, "rerank_D": d_reason})
+    combos = {}
+    for key, label in BENCH_LABELS.items():
+        overlaps = [value for value in stats[key]["overlap"]
+                    if value is not None]
+        mrrs = [value for value in stats[key]["mrr"] if value is not None]
+        combos[key] = {
+            "label": label,
+            "overlap@5": round(sum(overlaps) / len(overlaps), 4) if overlaps else 0.0,
+            "mrr": round(sum(mrrs) / len(mrrs), 4) if mrrs else 0.0,
+            "ms": round(sum(timings[key]) / len(timings[key]), 3)
+            if timings[key] else 0.0,
+            "queries": len(overlaps)}
+    return {"ok": True, "session_id": sid, "store": str(store),
+            "mode": str(mode or "text"),
+            "queries": len(items) - skipped, "skipped": skipped,
+            "limit": limit, "depth": depth,
+            "combos": combos, "details": details[:10],
+            "rerank": {"enabled": bool(_spatial_rerank_switch(store, {})),
+                       "transport": "injected" if transport else "urllib",
+                       "config": sorted(_rerank_config(store, {}).keys())}}
 
 
 def _new_entry(text, role, tags, now):
@@ -1052,6 +1835,8 @@ def tool_call(name, args, store, session_id=None):
                 return {"ok": True, "entry": _compact(existing), "deduped": True}
         now = _num(args.get("ts"), time.time())
         entry = _new_entry(text, role, args.get("tags"), now)
+        entry = _space_vector(entry, store, args)
+        entry = _attach_space(entry, store, sid, args, now=now)
         entries.append(entry)
         if len(entries) > MAX_ENTRIES:
             doc["entries"] = entries[-MAX_ENTRIES:]
@@ -1071,6 +1856,25 @@ def tool_call(name, args, store, session_id=None):
             row["score"] = score
             rows.append(row)
         rows.sort(key=lambda row: (-row["score"], -_num(row.get("ts"), 0.0)))
+        if _priority is not None and priority_enabled(args) and rows:
+            # task-230: a surprising field lifts the memories that are far from
+            # the current expectation; everything else keeps its score.
+            try:
+                values, _rel = _priority_values(store, sid)
+                surprise = _priority.field_surprise(values)["value"]
+                if surprise >= _priority.SURPRISE_FLOOR:
+                    pool = {str(entry.get("id")): entry
+                            for entry in _visible(entries)}
+                    for row in rows:
+                        weight = _priority.recall_weight(
+                            pool.get(str(row.get("id"))), values)
+                        if weight != 1.0:
+                            row["score"] = round(row["score"] * weight, 6)
+                            row["surprise_weight"] = weight
+                    rows.sort(key=lambda row: (-row["score"],
+                                               -_num(row.get("ts"), 0.0)))
+            except Exception:
+                pass    # priority is optional; recall keeps the old order
         rerank_config = args.get("rerank_config")
         if (_rerank_mod is not None and isinstance(rerank_config, dict)
                 and rerank_config.get("rerank_enabled")):
@@ -1091,8 +1895,17 @@ def tool_call(name, args, store, session_id=None):
                     rows = ordered
             except Exception:
                 pass  # rerank is optional; recall keeps the local order
+        if not (isinstance(rerank_config, dict)
+                and rerank_config.get("rerank_enabled")):
+            # spatial_rerank (default off): the core-owned post-stage
+            rows, retrieval = _rerank_rows(store, query, rows, args,
+                                           stage="recall")
+        else:
+            retrieval = {"stage": "recall", "enabled": True, "reranked": True,
+                         "reason": "caller_config", "candidates": len(rows),
+                         "kept": len(rows)}
         return {"ok": True, "count": min(limit, len(rows)),
-                "results": rows[:limit]}
+                "results": rows[:limit], "retrieval": retrieval}
     target = str(args.get("id") or args.get("query") or "").strip()
     if not target:
         return {"ok": False, "reason": "id_or_query_required"}
@@ -1506,6 +2319,7 @@ def apply_intero_to_state(state, payload_state=None):
 RELATIONSHIP_FILE = "relationship.json"
 RELATIONSHIP_BASE_FILE = "relationship_base.json"
 RELATIONSHIP_FIELDS = ("trust", "closeness", "conflict")
+# [engineering] .02/turn is a hand-set step, not a fitted rate (PAPER-MAP.md).
 RELATIONSHIP_DELTA_LIMITS = {"trust": 0.02, "closeness": 0.02, "conflict": 0.02}
 ATTACHMENT_STYLES = ("secure", "anxious", "avoidant", "disorganized", "mixed")
 LOCK_TIMEOUT_S = 3.0
@@ -1746,6 +2560,393 @@ def merge_state_relationship_into_shared(session_id, payload):
     except Exception:
         pass
     return updated
+
+
+# ---------------------------------------------------------------- field + arbiter (task-228)
+# The six coupled fields live in biocore_runtime/field.py: read once at
+# turn_start, written once at turn_end. Learners only propose deltas;
+# arbiter.py resolves them (weighted median on conflict, per-apply cap, range
+# clip, txid idempotency). Switch "field_arbiter" defaults ON -- with it off
+# this whole section is inert and the host keeps its old direct writes.
+FIELD_LEARNERS = ("mood_recall", "affect_encoding", "memory_feedback",
+                  "preference_drift", "consolidation", "state_sync")
+
+
+def field_enabled(payload=None):
+    """Explicit payload key > flags.json > BIOCORE_FIELD_ARBITER > default ON."""
+    if _field_mod is None:
+        return False
+    data = payload if isinstance(payload, dict) else {}
+    return _field_mod.enabled(flags=data, env=os.environ,
+                              store=_relationship_store(data))
+
+
+def _field_store(payload):
+    data = payload if isinstance(payload, dict) else {}
+    return data.get("field_store") or _relationship_store(data)
+
+
+def _field_proposals(payload, field_value, state=None):
+    """Every learner delta for this turn, in one list.
+
+    * learner_deltas: {"memory_feedback": {"v": 0.03}, ...} or a list of
+      {"learner", "field", "delta", "weight"} -- the contract added by task-228.
+    * state (payload) and the persisted session state: whatever the host changed
+      on its own becomes one "state_sync" proposal, so a write the arbiter never
+      saw is still capped and counted instead of bypassing the field.
+
+    Identical proposals do not double-count: the arbiter takes the weighted
+    median, so two identical deltas collapse into one delta.
+    """
+    data = payload if isinstance(payload, dict) else {}
+    items = []
+    raw = data.get("learner_deltas")
+    if isinstance(raw, dict):
+        for learner, mapping in raw.items():
+            if not isinstance(mapping, dict):
+                continue
+            for key, delta in mapping.items():
+                items.append({"learner": str(learner), "field": key,
+                              "delta": delta})
+    elif isinstance(raw, (list, tuple)):
+        items.extend(dict(item) for item in raw if isinstance(item, dict))
+    # The persisted state is reconciled (the body's four values are adopted), so
+    # only its relationship change is still a proposal; a payload state is new
+    # input and may propose any field, always capped by the arbiter.
+    for source, names in ((data.get("state"), _field_mod.FIELDS),
+                          (state, _field_mod.RELATION_FIELDS)):
+        if not isinstance(source, dict) or not source:
+            continue
+        carried = _field_mod.present(source)
+        derived = _field_mod.from_state(source)
+        for name in names:
+            if name not in carried:
+                continue
+            if (name in _field_mod.RELATION_FIELDS
+                    and not isinstance(source.get("relationship"), dict)):
+                continue
+            delta = float(derived.get(name)) - float(field_value.get(name))
+            if abs(delta) > _field_mod.NOISE_EPS:
+                items.append({"learner": "state_sync", "field": name,
+                              "delta": round(delta, 6)})
+    return items
+
+
+def _field_current(session_id, payload, store, state=None):
+    """Persisted field (reconciled with the state) -> (Field, doc, reconciled)."""
+    sid = sanitize_session_id(session_id)
+    doc = _field_mod.load(store, sid)
+    if state is None:
+        state = _load_session_state(store, sid)
+    relationship = relationship_read(store)["relationship"]
+    derived = _field_mod.from_state(state, relationship)
+    stored = _field_mod.from_doc(doc) if doc.get("values") else None
+    resolved, reconciled = _field_mod.reconcile(stored, derived)
+    resolved.session_id = sid
+    resolved.version = max(int(doc.get("version") or 0),
+                           int(getattr(resolved, "version", 0) or 0))
+    return resolved, doc, bool(reconciled)
+
+
+def field_state_view(session_id, payload=None):
+    """Read-only projection for /state: {enabled, field, arbiter, version}."""
+    data = payload if isinstance(payload, dict) else {}
+    empty = {"enabled": False, "field": None, "arbiter": None, "version": 0}
+    if _field_mod is None:
+        return dict(empty, reason="unavailable")
+    if not field_enabled(data):
+        return dict(empty, reason="disabled")
+    store = _field_store(data)
+    if store is None:
+        return dict(empty, enabled=True, reason="no_store")
+    sid = sanitize_session_id(session_id)
+    doc = _field_mod.load(store, sid)
+    if doc.get("values"):
+        value = _field_mod.from_doc(doc)
+    else:  # nothing written yet: derive, never create the file on a read
+        value = _field_mod.from_state(_load_session_state(store, sid),
+                                      relationship_read(store)["relationship"])
+    arbiter_state = doc.get("arbiter") if isinstance(doc.get("arbiter"), dict) else {}
+    return {"enabled": True, "reason": "ok", "field": value.read(),
+            "version": int(value.version),
+            "arbiter": {"applied": int(_num(arbiter_state.get("applied"), 0)),
+                        "rejected": int(_num(arbiter_state.get("rejected"), 0)),
+                        "conflicts": int(_num(arbiter_state.get("conflicts"), 0)),
+                        "batches": int(_num(arbiter_state.get("batches"), 0)),
+                        "duplicates": int(_num(arbiter_state.get("duplicates"), 0)),
+                        # every proposal of the last batch, per field
+                        "strategy": str(arbiter_state.get("strategy") or ""),
+                        "proposals": dict(arbiter_state.get("proposals") or {})}}
+
+
+def field_turn_start(session_id, payload=None, state=None):
+    """turn_start: derive + reconcile + persist the field, hand back a copy."""
+    data = payload if isinstance(payload, dict) else {}
+    result = {"enabled": False, "field": None, "version": 0,
+              "reconciled": False, "source": "", "path": ""}
+    if _field_mod is None:
+        return dict(result, reason="unavailable")
+    if not field_enabled(data):
+        return dict(result, reason="disabled")
+    store = _field_store(data)
+    if store is None:
+        return dict(result, enabled=True, reason="no_store")
+    sid = sanitize_session_id(session_id)
+    value, doc, reconciled = _field_current(session_id, data, store, state=state)
+    value.ts = time.time()
+    out = _field_mod.doc(value, arbiter_state=doc.get("arbiter"), now=value.ts)
+    saved = _field_mod.save(store, out, sid)
+    return {"enabled": True, "reason": "ok", "field": value.read(),
+            "version": int(value.version), "reconciled": bool(reconciled),
+            "source": str(value.source),
+            "path": str(_field_mod.path(store, sid) or ""),
+            "saved": bool(saved)}
+
+
+def field_turn_end(session_id, payload=None):
+    """turn_end: arbitrate learner deltas and write the field back once."""
+    data = payload if isinstance(payload, dict) else {}
+    result = {"enabled": False, "field": None, "version": 0,
+              "arbiter": None, "applied": {}, "rejected": [], "conflicts": []}
+    if _field_mod is None or _arbiter_mod is None:
+        return dict(result, reason="unavailable")
+    if not field_enabled(data):
+        return dict(result, reason="disabled")
+    store = _field_store(data)
+    if store is None:
+        return dict(result, enabled=True, reason="no_store")
+    sid = sanitize_session_id(session_id)
+    state = _load_session_state(store, sid)
+    # turn_end adopts the body's own four values (core_state owns them, so its
+    # drift is not a proposal) while trust/closeness stay capped proposals.
+    doc = _field_mod.load(store, sid)
+    derived = _field_mod.from_state(state)
+    if doc.get("values"):
+        value = _field_mod.reconcile(_field_mod.from_doc(doc), derived,
+                                     adopt=_field_mod.AFFECT_FIELDS)[0]
+    else:
+        value = derived
+    value.session_id = sid
+    value.version = max(int(doc.get("version") or 0), int(value.version or 0))
+    value.ts = time.time()
+    arbiter = _arbiter_mod.Arbiter(state=doc.get("arbiter"))
+    proposals = _field_proposals(data, value, state=state)
+    txid = str(data.get("txid") or data.get("turn_id") or "").strip()
+    applied_out = arbiter.apply(value, proposals, txid=txid, enabled=True,
+                                now=value.ts)
+    new_state = _field_mod.to_state(state, value)
+    _save_session_state(store, sid, new_state)
+    _field_mod.save(store, _field_mod.doc(value, arbiter_state=arbiter.snapshot(),
+                                          now=value.ts), sid)
+    return {"enabled": True, "reason": "ok", "field": value.read(),
+            "version": int(value.version),
+            "arbiter": arbiter.stats(),
+            "applied": applied_out.get("applied") or {},
+            "rejected": applied_out.get("rejected") or [],
+            "conflicts": applied_out.get("conflicts") or [],
+            "resolved": applied_out.get("resolved") or {},
+            "duplicate": bool(applied_out.get("duplicate")),
+            "proposal_count": len(proposals),
+            "proposals": applied_out.get("proposals") or {},
+            "strategy": str(applied_out.get("strategy") or "")}
+
+
+# ------------------------------------------------------- dimensions (task-243)
+def dimensions_enabled(payload=None):
+    """dimensions_v2: payload flag > flags.json / config > env > default ON."""
+    if _dimensions is None:
+        return False
+    data = payload if isinstance(payload, dict) else {}
+    if isinstance(data.get("dimensions_v2"), bool):
+        return bool(data["dimensions_v2"])
+    try:
+        switches = _effective_switches(data.get("store") or _default_store(),
+                                       data.get("switches"))
+    except Exception:
+        switches = {}
+    if isinstance(switches.get("dimensions_v2"), bool):
+        return bool(switches["dimensions_v2"])
+    return _dimensions.enabled(flags=data, env=os.environ)
+
+
+def _dimensions_on(payload=None, store=None):
+    data = payload if isinstance(payload, dict) else {}
+    if store is not None and data.get("store") is None:
+        data = dict(data, store=str(store))
+    return dimensions_enabled(data)
+
+
+def dimensions_view(session_id, payload=None, state=None, store=None):
+    """Read-only /state.dimensions: {axis: {explicit, implicit, ambivalence}},
+    plus the four-channel projection. Never writes a file."""
+    data = payload if isinstance(payload, dict) else {}
+    empty = {"enabled": False, "schema": 0, "ts": 0.0, "hops": 0,
+             "axes": {}, "projection": {}, "actions": []}
+    if _dimensions is None:
+        return dict(empty, reason="unavailable")
+    if not _dimensions_on(data, store=store):
+        return dict(empty, reason="disabled")
+    root = store if store is not None else (data.get("store") or _default_store())
+    sid = sanitize_session_id(session_id)
+    if state is None:
+        state = _load_session_state(root, sid)
+    show_conflict = _dimensions.conflict_enabled(data, env=os.environ)
+    row = _dimensions.project(_dimensions.load(state), conflict=show_conflict)
+    return {"enabled": True, "reason": "ok",
+            "conflict_axis": bool(show_conflict),
+            "schema": int(_num(row.get("schema"), _dimensions.SCHEMA)),
+            "ts": _num(row.get("ts"), 0.0),
+            "hops": int(_num(row.get("hops"), 0)),
+            "axes": row.get("dims") or {},
+            "projection": row.get("projection") or {},
+            "actions": row.get("behavior") or []}
+
+
+def _dimension_writes(payload, applied_fields=None):
+    """Every write for this turn, one group per source, channel decided here.
+
+    explicit  what the turn said        payload.dimension_deltas.explicit,
+                                       arbiter-approved field deltas
+    implicit  what the body did        payload.dimension_deltas.implicit,
+                                       host state sync (delta/deltas keys)
+    Groups are never merged: each keeps its own evidence rows.
+    """
+    data = payload if isinstance(payload, dict) else {}
+    explicit, implicit = [], []
+    raw = data.get("dimension_deltas")
+    if isinstance(raw, dict):
+        for key, bucket in (("explicit", explicit), ("implicit", implicit)):
+            mapping = raw.get(key)
+            if isinstance(mapping, dict):
+                bucket.append((mapping, "payload." + key))
+    if isinstance(applied_fields, dict) and applied_fields:
+        explicit.append((applied_fields, "field_applied"))
+    synced = _state_deltas(data)
+    if synced:
+        implicit.append((synced, "state_sync"))
+    return explicit, implicit
+
+
+def dimensions_write(session_id, payload=None, state=None, applied_fields=None,
+                     store=None, now=None):
+    """turn_end: absorb this turn's writes, persist them, hand back the view."""
+    data = payload if isinstance(payload, dict) else {}
+    result = {"enabled": False, "written": 0, "sources": [],
+              "axes": {}, "projection": {}, "actions": []}
+    if _dimensions is None:
+        return dict(result, reason="unavailable")
+    if not _dimensions_on(data, store=store):
+        return dict(result, reason="disabled")
+    root = store if store is not None else (data.get("store") or _default_store())
+    sid = sanitize_session_id(session_id)
+    state = state if isinstance(state, dict) else _load_session_state(root, sid)
+    stamp = now if now is not None else time.time()
+    model = _dimensions.load(state)
+    explicit, implicit = _dimension_writes(data, applied_fields)
+    written = 0
+    sources = []
+    for channel, groups in (("explicit", explicit), ("implicit", implicit)):
+        for mapping, source in groups:
+            picked = _dimensions.pick(mapping)
+            if "conflict" in picked:
+                # relationship conflict only: a task disagreement never lands
+                event = str(data.get("conflict_event") or source)
+                if not _dimensions.is_conflict_event(event):
+                    picked.pop("conflict", None)
+            if not picked:
+                continue
+            model = _dimensions.absorb(model, **{channel: picked},
+                                       source=source, now=stamp)
+            written += len(picked)
+            sources.append({"channel": channel, "source": source,
+                            "axes": sorted(picked)})
+    if written:
+        new_state = dict(state)
+        new_state["dimensions"] = model
+        _save_session_state(root, sid, new_state)
+    row = _dimensions.project(
+        model, conflict=_dimensions.conflict_enabled(data, env=os.environ))
+    return {"enabled": True, "reason": "ok", "written": written,
+            "sources": sources,
+            "schema": int(row.get("schema") or _dimensions.SCHEMA),
+            "ts": _num(row.get("ts"), 0.0),
+            "hops": int(row.get("hops") or 0),
+            "axes": row.get("dims") or {},
+            "projection": row.get("projection") or {},
+            "actions": row.get("behavior") or []}
+
+
+# ------------------------------------------------------- expression (task-243)
+def expression_enabled(payload=None):
+    """expression_policy: payload flag > flags.json / config > env > default ON."""
+    if _expression is None:
+        return False
+    data = payload if isinstance(payload, dict) else {}
+    for key in ("expression_policy", "expr_policy"):
+        if isinstance(data.get(key), bool):
+            return bool(data[key])
+    try:
+        switches = _effective_switches(data.get("store") or _default_store(),
+                                       data.get("switches"))
+    except Exception:
+        switches = {}
+    if isinstance(switches.get("expression_policy"), bool):
+        return bool(switches["expression_policy"])
+    return _expression.enabled(flags=data, env=os.environ)
+
+
+def _expression_intent(payload):
+    data = payload if isinstance(payload, dict) else {}
+    return str(data.get("intent") or data.get("tendency") or "")
+
+
+def expression_policy_for(state=None, payload=None):
+    """Read-only: {mode, hints, sources}. Never rendered, never persisted."""
+    data = payload if isinstance(payload, dict) else {}
+    empty = {"enabled": False, "schema": 0, "mode": "authentic", "hints": {},
+             "sources": [], "reason": "unavailable"}
+    if _expression is None:
+        return dict(empty)
+    if not expression_enabled(data):
+        return dict(empty, reason="disabled")
+    session_state = state if isinstance(state, dict) else {}
+    model = _dimensions.load(session_state) if _dimensions is not None else None
+    relationship = session_state.get("relationship")
+    if not isinstance(relationship, dict):
+        relationship = None
+        root = data.get("store")
+        if root:
+            try:
+                relationship = relationship_read(root)["relationship"]
+            except Exception:
+                relationship = None
+    row = _expression.policy(model, relationship, _expression_intent(data))
+    return {"enabled": True,
+            "schema": int(row.get("schema") or _expression.SCHEMA),
+            "mode": str(row.get("mode") or "authentic"),
+            "hints": dict(row.get("hints") or {}),
+            "sources": list(row.get("sources") or []),
+            "reason": str(row.get("reason") or "")}
+
+
+def expression_prompt_extra(state=None, payload=None):
+    """One seam: batch_d.prompt_extra merged with the expression rows.
+
+    batch_d keeps ownership of tone / length / avoid / sources; the expression
+    policy only appends its own hint rows into that same list.
+    """
+    data = payload if isinstance(payload, dict) else {}
+    policy_row = expression_policy_for(state, data)
+    base = {}
+    if _batch_d is not None:
+        try:
+            base = _batch_d.prompt_extra(state if isinstance(state, dict) else {},
+                                         data)
+        except Exception:
+            base = {}
+    if _expression is None:
+        return policy_row, base
+    return policy_row, _expression.merge_extra(base, policy_row)
 
 
 # ---------------------------------------------------------------- persona profile
@@ -2125,11 +3326,14 @@ CORE_DEFAULTS = {
     "governance": True, "index": True, "consolidate": True,
     "evict": True, "evict_delete": False,
     "relationship_governance": True,
+    "perception_batch": True,
+    "batch_b": True, "batch_c": True, "batch_d": True, "batch_e": True,
+    "timescales": True,
     "self_layer": True, "motivation": True,
     "autonomy": True, "standby": False, "retrieval_plus": True,
     "safety_enabled": False, "boundary_enabled": False,
     "crisis_safety_enabled": False,
-    "proactive_send": True,
+    "proactive_send": False,
     "recall_mode": "query",
 }
 
@@ -2601,6 +3805,7 @@ def dispatch(action, payload=None):
             merge_shared_relationship_into_state(session_id, data)
             session_state = apply_persona_to_session(session_id, data)
             session_state = session_state if isinstance(session_state, dict) else {}
+            field_host_state = dict(session_state)
             state_store = _relationship_store(data)
             core_path = _core_state_path(data)
             if _core_state is not None and core_path is not None:
@@ -2642,8 +3847,26 @@ def dispatch(action, payload=None):
             session_state["last_human_ts"] = time.time()
             if state_store is not None:
                 _save_session_state(state_store, session_id, session_state)
+            field_state = dict(session_state)
+            if not isinstance(data.get("state"), dict):
+                host_core = field_host_state.get("core")
+                if isinstance(host_core, dict):
+                    merged_core = dict(field_state.get("core") or {})
+                    merged_core.update(host_core)
+                    field_state["core"] = merged_core
+            field_view = field_turn_start(session_id, data, state=field_state)
             _signals_eval(store, session_id, user_text=user_text,
                           state=session_state, now=time.time())
+            perception_view = _perception_read(store, session_id, data,
+                                               state=session_state,
+                                               now=time.time())
+            batch_view = _batch_tick(store, session_id, "turn_start", data,
+                                     state=session_state, now=time.time())
+            if state_store is not None and batch_view.get("enabled"):
+                _save_session_state(state_store, session_id, session_state)
+            # read-only: the turn opens on the dimensions written last time
+            dimensions_view_start = dimensions_view(
+                session_id, data, state=session_state, store=state_store)
             capture_enabled = _as_bool(data.get("capture"), True)
             captured_user = {"captured": False, "entry_id": "", "reason": "disabled"}
             capture_store = data.get("store")
@@ -2675,6 +3898,10 @@ def dispatch(action, payload=None):
                     "constraints": self_layer_constraints(
                         dict(data, user_text=user_text)),
                     "state": session_state,
+                    "field": field_view,
+                    "perception": perception_view,
+                    "batches": batch_view,
+                    "dimensions": dimensions_view_start,
                     "captured_user": captured_user}
         if action == "turn_end":
             session_id = str(data.get("session_id") or "").strip()
@@ -2834,10 +4061,43 @@ def dispatch(action, payload=None):
                     store, narrative={"kind": relationship_info.get("kind"),
                                       "text": str(data.get("user_text") or "")[:60]},
                     now=time.time())
+            perception_out = _perception_write(
+                store, session_id, data,
+                state=(_load_session_state(store, session_id)
+                       if store is not None else {}),
+                now=time.time())
+            perception_fields = perception_out.get("field_deltas") or {}
+            batch_state = (_load_session_state(store, session_id)
+                           if store is not None else {})
+            batch_view = _batch_tick(store, session_id, "turn_end", data,
+                                     state=batch_state, now=time.time())
+            if store is not None and batch_view.get("enabled"):
+                _save_session_state(store, session_id, batch_state)
+            batch_fields = batch_view.get("field_deltas") or {}
+            if perception_fields or batch_fields:
+                data = dict(data)
+                merged_learner = dict(data.get("learner_deltas") or {})
+                merged_learner.update(perception_fields)
+                if batch_fields:
+                    merged_learner["batch"] = dict(batch_fields)
+                data["learner_deltas"] = merged_learner
+            field_on = field_enabled(data)
             decision = captured.get("decision") or {}
             entry = captured.get("entry") or {}
             trace = build_trace(session_id, data, gate, {"entry_id": entry.get("id")})
             trace_file = trace_append(store, session_id, trace)
+            field_view = field_turn_end(session_id, data)
+            applied_fields = dict((field_view or {}).get("applied") or {})
+            if not applied_fields and not field_on:
+                applied_fields = dict((perception_fields or {})
+                                      .get("appraisal") or {})
+            core_pushed = _push_core_deltas(store, session_id, data,
+                                            applied_fields, field_on=field_on)
+            dimensions_out = dimensions_write(session_id, data,
+                                              applied_fields=applied_fields,
+                                              store=store)
+            timescale_view = _timescale_tick(store, session_id, data,
+                                             now=time.time())
             return {
                 "ok": True,
                 "gate": {"blocked": gate["blocked"], "action": gate["action"],
@@ -2851,7 +4111,12 @@ def dispatch(action, payload=None):
                 "removed_tags": int(removed_tags),
                 "trace": trace,
                 "trace_file": trace_file,
-                "core_state": core_snapshot,
+                "field": field_view,
+                "perception": perception_out,
+                "batches": batch_view,
+                "dimensions": dimensions_out,
+                "timescales": timescale_view,
+                "core_state": core_pushed or core_snapshot,
                 "governance": governance_info,
                 "relationship": relationship_info,
                 "identity": identity_info,
@@ -2962,6 +4227,68 @@ def dispatch(action, payload=None):
                     stored_state.get("persona_version") or "")
             if _store_root(store) is not None:
                 body["relationship"] = relationship_read(store)["relationship"]
+            field_view = field_state_view(session_id, data)
+            if field_view.get("field") is not None:
+                body["field"] = field_view["field"]
+                body["field_version"] = int(field_view.get("version") or 0)
+                body["arbiter"] = field_view.get("arbiter") or {}
+            if _perception is not None:
+                perception_view = _perception.summary(
+                    store, session_id,
+                    enabled_override=_perception_on(store, data))
+                if perception_view.get("enabled"):
+                    body["emotion"] = perception_view.get("emotion") or {}
+                    # the six coupled values as they stand now, not as they
+                    # stood when the turn started
+                    body["affect"] = dict(field_view.get("field")
+                                          or perception_view.get("affect") or {})
+                    body["attachment"] = perception_view.get("attachment") or {}
+                    body["needs"] = perception_view.get("needs") or {}
+                    body["appraisal"] = perception_view.get("appraisal") or {}
+                    body["regulation"] = perception_view.get("regulation") or {}
+                    body["sleep"] = perception_view.get("sleep") or {}
+                    body["situation"] = perception_view.get("situation") or {}
+                    body["waiting"] = perception_view.get("waiting") or {}
+                    body["esteem"] = perception_view.get("esteem") or {}
+                    # per-source components (no fused single number)
+                    body["labor"] = perception_view.get("labor") or {}
+                    body["envy"] = perception_view.get("envy") or {}
+                    body["needs_bias_rows"] = (
+                        perception_view.get("needs_bias_rows") or {})
+                    body["perception"] = {
+                        "modules": perception_view.get("modules") or {},
+                        "counts": perception_view.get("counts") or {},
+                        "writeback": perception_view.get("writeback") or {}}
+            if _timescales is not None:
+                scale_view = _timescales.summary(
+                    _load_session_state(store, session_id),
+                    enabled_override=bool(switches.get("timescales", True)))
+                if scale_view.get("enabled"):
+                    body["timescales"] = {key: scale_view[key] for key in
+                                          ("fast", "medium", "slow", "ts")}
+            if _batch_registry is not None:
+                batch_summary = _batch_registry.summary(store)
+                body["batches"] = batch_summary.get("batches") or {}
+                body["batch_monitor"] = {
+                    "modules": batch_summary.get("modules") or {},
+                    "totals": batch_summary.get("totals") or {},
+                    "ts": batch_summary.get("ts")}
+            expression_show = expression_policy_for(
+                _load_session_state(store, session_id),
+                dict(data, store=str(store)))
+            if expression_show.get("enabled"):
+                body["expression_policy"] = expression_show
+            retrieval_last = _retrieval_last(store)
+            if retrieval_last:
+                body["retrieval_last"] = retrieval_last
+            priority_view = consolidation_priority(store, session_id, data)
+            if priority_view.get("enabled") or priority_view.get("top"):
+                body["consolidation_priority"] = priority_view
+            dimensions_show = dimensions_view(session_id, data, store=store)
+            if dimensions_show.get("enabled"):
+                body["dimensions"] = {
+                    key: dimensions_show[key] for key in
+                    ("schema", "ts", "hops", "axes", "projection", "actions")}
             body["switches"] = {key: bool(switches.get(key)) for key in
                                 ("core_enabled", "mood_recall",
                                  "affect_encoding", "memory_feedback",
@@ -3013,6 +4340,32 @@ def dispatch(action, payload=None):
             if not result:
                 return {"ok": True, "reranked": False, "results": fallback}
             return {"ok": True, "reranked": True, "results": result}
+        if action == "space":
+            if _space is None:
+                return {"ok": False, "reason": "space_unavailable"}
+            session_id = str(data.get("session_id") or "").strip()
+            if not session_id:
+                return bad("missing session_id")
+            sid = sanitize_session_id(session_id)
+            rows = _visible(load_memory(store, sid).get("entries"))
+            probed = _space.probe(rows, entry_id=data.get("id"),
+                                  query=data.get("query"),
+                                  vector=data.get("vector"),
+                                  limit=data.get("limit"),
+                                  now=_num(data.get("now"), time.time()))
+            return {"ok": bool(probed.get("ok")),
+                    "enabled": _space_switch(store, data),
+                    "session_id": sid, "probe": probed}
+        if action == "space_bench":
+            if _space is None:
+                return {"ok": False, "reason": "space_unavailable"}
+            session_id = str(data.get("session_id") or "").strip() or "default"
+            return space_bench(store, session_id=session_id,
+                               queries=data.get("queries"),
+                               limit=data.get("limit"), now=data.get("now"),
+                               top_n=data.get("top_n"),
+                               depth=data.get("depth"),
+                               mode=data.get("mode"))
         if action == "trace":
             session_id = str(data.get("session_id") or "").strip()
             if not session_id:

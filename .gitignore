@@ -5,3 +5,4 @@ _shots/
 node_modules/
 __pycache__/
 *.pyc
+.npmrc-publish
