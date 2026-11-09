@@ -4279,7 +4279,7 @@ def _inject_summarizer(store, payload):
     return summarizer_from_config(store, pl)
 
 
-def inject_block(session_id, store, max_chars=MAX_CHARS, top_k=TOP_K,
+def inject_block(session_id, store, max_chars=None, top_k=TOP_K,
                  query="", mode="query", rerank_config=None, now=None,
                  include_superseded=False, payload=None, as_of=None):
     """Top-k session memories as one bounded Chinese prompt block.
@@ -4304,7 +4304,11 @@ def inject_block(session_id, store, max_chars=MAX_CHARS, top_k=TOP_K,
     limit = _int_param(top_k, TOP_K, 1, INJECT_MAX_K)
     text_query = clean_text(query, MAX_TEXT_CHARS)
     chosen = str(mode or "query").strip().lower()
-    if _event_layer_on(store, payload):
+    # An enabled switch with zero events is not a working event layer: it
+    # returns a two-line shell and the merge below then hands that shell back,
+    # which is how a 14k budget produced a 326-character block.
+    _events_ready = bool((_load_event_state(store, session_id).get("events") or []))
+    if _event_layer_on(store, payload) and _events_ready:
         # both views, not either/or: claims carry the correction/conflict state,
         # sentences carry the fact itself. The event layer used to return first,
         # which made the sentence branch below unreachable.
@@ -4336,7 +4340,7 @@ def inject_block(session_id, store, max_chars=MAX_CHARS, top_k=TOP_K,
                                 break
                 _lines = _claims_state_lines(_hit_events or _evs, limit=8)
                 _head = chr(10).join(_lines)
-                _room = max(200, RECALL_INJECT_CHARS - len(_head) - 1)
+                _room = max(200, budget - len(_head) - 1)
                 _sent = _sentence_recall_block(
                     store, session_id, text_query, _pool, _evs, payload=payload,
                     rerank_config=rerank_config, now=None, budget_chars=_room)
@@ -4359,7 +4363,7 @@ def inject_block(session_id, store, max_chars=MAX_CHARS, top_k=TOP_K,
                         len(_pool), len(_evs))
             _block = _sentence_recall_block(store, session_id, text_query, _pool, _evs,
                                             payload=payload, rerank_config=rerank_config,
-                                            now=now)
+                                            now=now, budget_chars=budget)
         except Exception as exc:
             logger.warning("[sentence] fallback: %s: %s",
                            type(exc).__name__, str(exc)[:160])
@@ -4397,7 +4401,7 @@ def inject_block(session_id, store, max_chars=MAX_CHARS, top_k=TOP_K,
                 _state_lines = []
             if _state_lines:
                 _head = chr(10).join(_state_lines)
-                _room = max(200, RECALL_INJECT_CHARS - len(_head) - 1)
+                _room = max(200, budget - len(_head) - 1)
                 _again = _sentence_recall_block(
                     store, session_id, text_query, _pool, _evs, payload=payload,
                     rerank_config=rerank_config, now=now, budget_chars=_room)
