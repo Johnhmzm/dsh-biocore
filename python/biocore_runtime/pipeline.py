@@ -117,6 +117,13 @@ EVENT_TOP = int(os.environ.get("BIOCORE_EVENT_TOP") or 0)
 # 0 = no cap: the budget decides how many events are delivered. A positive
 # value is a debugging clamp (P20 has 163 events; a hard 12 threw away 151)
 # how many events the block may try to place (not sentences)
+try:  # learned proactive policy (Q table); optional
+    from biocore_model import policy_learning as _policy_learning
+except Exception:  # pragma: no cover
+    _policy_learning = None
+
+BODY_SWITCH_KEY = "body"
+BODY_ON = str(os.environ.get("BIOCORE_BODY") or "0").strip().lower() in ("1", "true", "on", "yes")
 SENTENCE_RERANK_ON = str(os.environ.get("BIOCORE_SENTENCE_RERANK") or "1").strip().lower() not in ("0", "false", "off", "no")
 SENTENCE_RERANK_POOL = int(os.environ.get("BIOCORE_SENTENCE_RERANK_POOL") or 60)
 
@@ -3622,6 +3629,14 @@ def _sentence_recall_block(store, session_id, query, entries, events, payload=No
                     qvecs.append(list(vector))
     except Exception:
         qvecs = []
+    # mood-congruent recall (Bower 1981): entries encoded in a mood close to the
+    # current one are easier to bring back. The label has been written at capture
+    # time all along and never read; the term is inert when labels are absent.
+    _state_now = (payload or {}).get("state") if isinstance(payload, dict) else {}
+    _now_v = 0.0
+    if isinstance(_state_now, dict):
+        _now_v = _num(_state_now.get("v", _state_now.get("valence")), 0.0)
+    _mood_w = float(os.environ.get("BIOCORE_MOOD_WEIGHT") or 0.06)
     scored = []
     for row in pool:
         if qvecs:
@@ -3629,6 +3644,13 @@ def _sentence_recall_block(store, session_id, query, entries, events, payload=No
             value = max((_ch.cosine(qv, vector) for qv in qvecs), default=0.0)
         else:
             value = _ch.lexical_score(text, str(row.get("text") or ""))
+        _aff = row.get("affect")
+        if _mood_w and isinstance(_aff, dict):
+            try:
+                _env_v = float(_aff.get("v", _aff.get("valence")) or 0.0)
+                value = float(value) + _mood_w * (1.0 - abs(_env_v - _now_v) / 2.0)
+            except Exception:
+                pass
         scored.append((float(value), row))
     grouped = {}
     order = []
@@ -4297,9 +4319,95 @@ def _inject_summarizer(store, payload):
     return summarizer_from_config(store, pl)
 
 
+def _body_enabled(store, payload=None):
+    """body: payload flag > switches config > env > default OFF."""
+    data = payload if isinstance(payload, dict) else {}
+    if isinstance(data.get(BODY_SWITCH_KEY), bool):
+        return bool(data[BODY_SWITCH_KEY])
+    # hosts send switches as {"switches": {"body": true}}, not at the top level
+    nested = data.get("switches")
+    if isinstance(nested, dict) and isinstance(nested.get(BODY_SWITCH_KEY), bool):
+        return bool(nested[BODY_SWITCH_KEY])
+    try:
+        switches = _effective_switches(store, None)
+        if isinstance(switches.get(BODY_SWITCH_KEY), bool):
+            return bool(switches[BODY_SWITCH_KEY])
+    except Exception:
+        pass
+    return bool(BODY_ON)
+
+
+def body_turn(store, session_id, text, payload=None):
+    """Feed one user turn into the digital-fly body and return its state.
+
+    The body lives in the substrate; this process dies every turn, so the state
+    is persisted next to the session and re-injected on the way back in.
+    """
+    try:
+        from biocore_runtime import mindbase_bridge as _mb
+        if not _mb.available():
+            return {}
+        cfg = _load_runtime_config(store) or {}
+        digest = _mb.load_digest(store, session_id)
+        # one appraisal call covers both: what was said now, and what she just
+        # recalled. A second call for the memory would double the turn cost.
+        probe = text
+        if digest:
+            probe = text + "\n（她刚想起：" + digest[:200] + "）"
+        dims = _mb.appraise_text(probe, cfg.get("summarizer") or {})
+        return _mb.turn(store, session_id, text, dims, with_memory=False)
+    except Exception as exc:
+        logger.warning("[body] turn failed: %s: %s", type(exc).__name__, str(exc)[:120])
+        return {}
+
+
+def body_line(store, session_id):
+    try:
+        from biocore_runtime import mindbase_bridge as _mb
+        return _mb.state_line(_mb.load_state(store, session_id))
+    except Exception:
+        return ""
+
+
 def inject_block(session_id, store, max_chars=None, top_k=TOP_K,
                  query="", mode="query", rerank_config=None, now=None,
                  include_superseded=False, payload=None, as_of=None):
+    """Public entry: the block plus, when enabled, the body's own state.
+
+    The body is fed with this turn and its state is put on top of the block, so
+    the layer that decides wording can see how she feels -- not just what was
+    said. Everything is behind the body switch and never raises.
+    """
+    _core = _inject_block_core(
+        session_id, store, max_chars=max_chars, top_k=top_k, query=query,
+        mode=mode, rerank_config=rerank_config, now=now,
+        include_superseded=include_superseded, payload=payload, as_of=as_of)
+    try:
+        # Feed the body; do NOT render it here. The reverse injection already
+        # exists (expr_state.render_state_block): one render path, one source of
+        # truth. Adding a second line in the block made her feel two things at
+        # once, from two different states.
+        if _body_enabled(store, payload):
+            text_query = str(query or "").strip()
+            if text_query:
+                body_turn(store, session_id, text_query, payload)
+    except Exception as exc:
+        logger.warning("[body] feed failed: %s: %s", type(exc).__name__, str(exc)[:120])
+    return _core
+
+
+def body_state(store, session_id):
+    """Body state for the host to pass as payload['body_state']."""
+    try:
+        from biocore_runtime import mindbase_bridge as _mb
+        return _mb.load_state(store, session_id)
+    except Exception:
+        return {}
+
+
+def _inject_block_core(session_id, store, max_chars=None, top_k=TOP_K,
+                       query="", mode="query", rerank_config=None, now=None,
+                       include_superseded=False, payload=None, as_of=None):
     """Top-k session memories as one bounded Chinese prompt block.
 
     mode="query"  recall this turn's words (engine.recall + env embedder,
@@ -4594,6 +4702,30 @@ def _state_block(state, budget):
     autonomy_state = str(autonomy.get("state") or "").strip()
     if autonomy_state and autonomy_state not in ("静", ""):
         parts.append("自主" + autonomy_state)
+    # the substrate body: a decision (speak/silence) and a slower tension. This
+    # is the only place DSH renders state, so it has to appear here; the AstrBot
+    # side gets it from expr_state.render_state_block instead.
+    body = state.get("body") if isinstance(state.get("body"), dict) else {}
+    if body:
+        action = str(body.get("action") or "")
+        if action == "silence":
+            parts.append("身体不想开口")
+        # Measured range after one turn: 0.008 after praise, 0.068 after being
+        # cursed at. A 0.2 threshold never fired, so the body was invisible.
+        stress = _num(body.get("stress"), 0.0)
+        needs = state.get("needs") if isinstance(state.get("needs"), dict) else {}
+        if needs:
+            # L3-L5 are what survival-only fitness could never rank
+            if _num(needs.get("competence"), 0.5) >= 0.6:
+                parts.append("还算拿得出手")
+            elif _num(needs.get("competence"), 0.5) <= 0.4:
+                parts.append("有点没底气")
+            if _num(needs.get("autonomy"), 0.5) <= 0.35:
+                parts.append("像被推着走")
+        if stress >= 0.15:
+            parts.append("身上绷得紧(%.2f)" % stress)
+        elif stress >= 0.05:
+            parts.append("身上有点紧(%.2f)" % stress)
     text = "此刻：" + "；".join(parts) + "。"
     if len(text) > budget:
         text = text[:max(1, budget - 1)] + "…"
@@ -5781,6 +5913,30 @@ def proactive_tick(session_id, last_human_ts=None, switches=None, store=None,
         result["reason"] = "no_commitment"
         return result
 
+    # the body gets a vote: a body that does not want to open its mouth should
+    # not be overruled by a clock. Until now speak/silence only coloured wording.
+    try:
+        _bs = body_state(store, sid)
+        if _bs:
+            result["body"] = {"action": _bs.get("action"),
+                              "stress": round(float(_bs.get("stress") or 0.0), 3)}
+            if str(_bs.get("action") or "") == "silence":
+                result["reason"] = "body_silence"
+                return result
+    except Exception:
+        pass
+    # the learned policy finally has a reader: if this hour and this mood have
+    # taught it that reaching out backfires, stay quiet
+    try:
+        _pol = q_decision(store, sid, data)
+        if _pol.get("samples", 0) >= 5 and _pol.get("top") in ("withdraw", "rest"):
+            result["reason"] = "learned_withdraw"
+            result["policy"] = _pol
+            return result
+        q_note_choice(store, sid, _pol.get("top") or "approach", data)
+        result["policy"] = _pol
+    except Exception:
+        pass
     text = _proactive_compose(loop, max_chars)
     result.update({"should_send": True, "text": text, "reason": "ok",
                    "trust": round(trust, 4),
@@ -7560,6 +7716,28 @@ def dispatch(action, payload=None):
             user_text = clean_text(data.get("user_text"))
             switches = _effective_switches(store, data.get("switches"))
             data["switches"] = switches
+            # advance the substrate body with this turn, then hand its state to
+            # whatever renders the prompt (perception -> expr_state)
+            if _body_enabled(store, data):
+                try:
+                    # time passes even when nobody talks
+                    from biocore_runtime import mindbase_bridge as _mbc
+                    _now = data.get("now")
+                    _mbc.advance(store, session_id,
+                                 float(_now) if isinstance(_now, (int, float)) else time.time())
+                    body_turn(store, session_id, user_text, data)
+                    _body = body_state(store, session_id)
+                    data["body_state"] = _body
+                    # prompt_block renders data["state"], so the body has to sit
+                    # inside it to reach expr_state.render_state_block
+                    _st = data.get("state") if isinstance(data.get("state"), dict) else {}
+                    _st = dict(_st)
+                    if _body:
+                        _st["body"] = _body
+                    data["state"] = _st
+                except Exception as exc:
+                    logger.warning("[body] turn_start failed: %s: %s",
+                                   type(exc).__name__, str(exc)[:120])
             if not switches.get("core_enabled", True):
                 return {"ok": True, "prompt_block": "", "state": {},
                         "disabled": True, "reason": "core_disabled"}
@@ -7606,6 +7784,38 @@ def dispatch(action, payload=None):
                 session_state = apply_intero_to_state(session_state,
                                                       data.get("state"))
             session_state["last_human_ts"] = time.time()
+            # credit the previous proactive choice: the human just spoke, so
+            # whatever it did, it worked (or did not, when the gap was long)
+            try:
+                _gap_min = _num(data.get("gap_minutes"), 0.0)
+                q_reward_last(store, session_id, True, _gap_min * 60.0, data)
+            except Exception:
+                pass
+            # prompt_block renders session_state, not data["state"]; the body
+            # has to sit here or the line never shows
+            if _body_enabled(store, data):
+                try:
+                    _b = body_state(store, session_id)
+                    if _b:
+                        session_state["body"] = _b
+                        # ONE source of truth: the body owns v/a/stress. The
+                        # bio layer keeps explaining and constraining, but it
+                        # no longer re-derives a second set of numbers beside
+                        # the body (that is why a greeting erased 18 hours).
+                        _core = session_state.get("core")
+                        if isinstance(_core, dict):
+                            _core = dict(_core)
+                            _core["v"] = float(_b.get("valence") or 0.0)
+                            _core["a"] = float(_b.get("arousal") or 0.5)
+                            _core["stress"] = float(_b.get("stress") or 0.0)
+                            session_state["core"] = _core
+                        session_state["v"] = _core.get("v", 0.0) if isinstance(_core, dict) else 0.0
+                        # continuous iteration: one hill-climb step per turn
+                        from biocore_runtime import mindbase_bridge as _mbx
+                        session_state["needs"] = _mbx.micro_evolve(
+                            store, session_id, _b)
+                except Exception:
+                    pass
             if state_store is not None:
                 _save_session_state(state_store, session_id, session_state)
             field_state = dict(session_state)
@@ -7677,13 +7887,36 @@ def dispatch(action, payload=None):
             switches = _effective_switches(store, data.get("switches"))
             data["switches"] = switches
             if not switches.get("core_enabled", True):
-                return {"ok": True, "gate": {"blocked": False, "action": "pass",
+                return {"ok": True, "exchange_grade": data.get("exchange_grade"),
+                    "gate": {"blocked": False, "action": "pass",
                                              "text": str(data.get("assistant_text") or ""),
                                              "rule": "", "label": ""},
                         "captured": None, "clean_text": str(data.get("assistant_text") or ""),
                         "trace": None, "trace_file": "", "disabled": True,
                         "reason": "core_disabled"}
             raw_assistant = clean_text(data.get("assistant_text"))
+            # the brain grades the exchange; the body only consumes the number
+            try:
+                if _body_enabled(store, data):
+                    from biocore_runtime import mindbase_bridge as _mbj
+                    _jcfg = _load_runtime_config(store) or {}
+                    _grade = _mbj.judge_exchange(
+                        str(data.get("user_text") or ""), raw_assistant,
+                        _jcfg.get("summarizer") or {})
+                    if _grade:
+                        q_reward_last(store, session_id, True, None, data,
+                                      reward=_grade.get("reward"))
+                        # the layer under the policy: DAN writes the cue->value
+                        # association into the mushroom body
+                        _mbj.teach(store, session_id,
+                                   str(data.get("user_text") or "")[:120],
+                                   _grade.get("reward"))
+                        _mbj.micro_evolve(store, session_id,
+                                          body_state(store, session_id))
+                        data["exchange_grade"] = _grade
+            except Exception as exc:
+                logger.warning("[learn] grade failed: %s: %s",
+                               type(exc).__name__, str(exc)[:120])
             do_sanitize = _as_bool(data.get("sanitize_reply"), True)
             cleaned = raw_assistant
             sanitized = False
@@ -7883,6 +8116,7 @@ def dispatch(action, payload=None):
                 "captured": {"captured": bool(decision.get("capture")),
                              "entry_id": str(entry.get("id") or ""),
                              "reason": str(decision.get("reason") or "")},
+                "exchange_grade": data.get("exchange_grade"),
                 "clean_text": cleaned,
                 "sanitized": bool(sanitized),
                 "removed_tags": int(removed_tags),
@@ -8281,7 +8515,46 @@ def dispatch(action, payload=None):
                                or _rerank_config_from(
                                    _load_runtime_config(store).get("rerank"))),
                 payload=data)
+            # keep the top recalled lines: next turn's appraisal rides on them,
+            # so memory colours the body without a second model call
+            try:
+                if _body_enabled(store, data):
+                    from biocore_runtime import mindbase_bridge as _mb
+                    _lines = [ln for ln in str((result or {}).get("text") or "").splitlines()
+                              if ln.startswith("- ")][:3]
+                    if _lines:
+                        _mb.save_digest(store, session_id, _lines)
+                        # and into the substrate's own memory, so the fly brain
+                        # holds the same episodes the prompt does
+                        _mb.mirror_recall(store, session_id, _lines)
+            except Exception:
+                pass
             return {"ok": True, **result}
+        if action == "body_evolve":
+            # Offline evolution of the substrate. Explicitly NOT on the per-turn
+            # path: it runs the fly body in its own environment for a while and
+            # returns the best genome, which a caller may then pin.
+            from biocore_runtime import mindbase_bridge as _mb
+            if not _mb.available():
+                return {"ok": False, "reason": "mindbase_unavailable"}
+            gens = _int_param(data.get("generations"), 3, 1, 200)
+            pop = _int_param(data.get("population"), 6, 4, 64)
+            steps = _int_param(data.get("steps"), 40, 10, 2000)
+            out = _mb.evolve(generations=gens, population=pop, steps=steps,
+                             seed=_int_param(data.get("seed"), 1, 1, 10 ** 6))
+            try:
+                import json as _json
+                from pathlib import Path as _Path
+                target = _Path(_store_data_dir(store)) / "mindbase_genome.json"
+                target.write_text(_json.dumps({"genome": out.get("best"),
+                                               "fitness": out.get("fitness"),
+                                               "bounds": out.get("bounds")},
+                                              ensure_ascii=False), encoding="utf-8")
+            except Exception:
+                pass
+            return {"ok": True, "best": out.get("best"),
+                    "fitness": out.get("fitness"),
+                    "history": out.get("history")}
         if action == "configure":
             return configure(data)
         return {"ok": False, "reason": "unknown_action", "action": action}
@@ -8316,3 +8589,117 @@ def main(argv=None):
 
 if __name__ == "__main__":
     raise SystemExit(main())
+
+
+# ---------------------------------------------------------------- learned policy
+Q_FILE = "policy_q.json"
+
+
+def _q_path(store, session_id):
+    import os as _o
+    import re as _r
+    sid = _r.sub(r"[^0-9A-Za-z_.-]", "_", str(session_id or "s1"))[:60]
+    return _o.path.join(str(store), "sessions", sid, Q_FILE)
+
+
+def _q_load(store, session_id):
+    import json as _j
+    try:
+        with open(_q_path(store, session_id), "r", encoding="utf-8") as fh:
+            data = _j.load(fh)
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def _q_save(store, session_id, table):
+    import json as _j
+    import os as _o
+    try:
+        path = _q_path(store, session_id)
+        _o.makedirs(_o.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as fh:
+            _j.dump(table, fh, ensure_ascii=False)
+        return True
+    except Exception:
+        return False
+
+
+def q_context(payload=None):
+    """Context key for the learned policy: gap phase x attachment x hour."""
+    if _policy_learning is None:
+        return ""
+    data = payload if isinstance(payload, dict) else {}
+    now = data.get("now")
+    hour = int(((float(now) if isinstance(now, (int, float)) else time.time())
+                % 86400) // 3600)
+    gap_min = _num(data.get("gap_minutes"), 0.0)
+    phase = ("expect" if gap_min < 30 else
+             "protest" if gap_min < 180 else
+             "loss" if gap_min < 720 else "withdraw")
+    rel = data.get("relationship") if isinstance(data.get("relationship"), dict) else {}
+    style = str(rel.get("attachment") or data.get("attachment") or "secure")
+    return _policy_learning.make_context(phase, style, hour)
+
+
+def q_decision(store, session_id, payload=None):
+    """What the policy has learned about this hour and this mood."""
+    if _policy_learning is None:
+        return {}
+    table = _q_load(store, session_id)
+    key = q_context(payload)
+    if not key:
+        return {}
+    rows = _policy_learning.policy_view(table, key)
+    return {"context": key, "rows": rows,
+            "top": (rows[0]["action"] if rows else ""),
+            "samples": sum(int(r.get("n") or 0) for r in rows)}
+
+
+def q_reward_last(store, session_id, responded, gap_s=None, payload=None, reward=None):
+    """Credit the last chosen action with what actually happened."""
+    if _policy_learning is None:
+        return {}
+    table = _q_load(store, session_id)
+    meta = table.get("__last__") if isinstance(table.get("__last__"), dict) else {}
+    if not meta:
+        return {}
+    try:
+        if reward is not None:
+            # the model's own grade wins: it read both sides of the exchange
+            r = max(-1.0, min(1.0, float(reward)))
+        elif gap_s is None:
+            gap_s = max(0.0, time.time() - float(meta.get("ts") or time.time()))
+            r = _policy_learning.reward(bool(responded), float(gap_s), 0.0)
+        else:
+            r = _policy_learning.reward(bool(responded), float(gap_s), 0.0)
+    except Exception:
+        r = 1.0 if responded else -0.5
+    table = _policy_learning.update(table, str(meta.get("context") or ""),
+                                    str(meta.get("action") or ""), r)
+    table.pop("__last__", None)
+    _q_save(store, session_id, table)
+    return {"reward": r, "action": meta.get("action"), "context": meta.get("context")}
+
+
+def q_note_choice(store, session_id, action, payload=None):
+    """Remember the choice so the next turn can score it."""
+    if _policy_learning is None:
+        return False
+    table = _q_load(store, session_id)
+    # an unanswered choice must still teach the policy something: score the
+    # previous one as ignored once it has gone stale
+    prev = table.get("__last__")
+    if isinstance(prev, dict):
+        try:
+            age = time.time() - float(prev.get("ts") or 0.0)
+        except Exception:
+            age = 0.0
+        if age > 1800.0:
+            table = _policy_learning.update(
+                table, str(prev.get("context") or ""),
+                str(prev.get("action") or ""),
+                _policy_learning.reward(False, age, 0.0))
+    table["__last__"] = {"action": str(action), "context": q_context(payload),
+                         "ts": round(time.time(), 3)}
+    return _q_save(store, session_id, table)
