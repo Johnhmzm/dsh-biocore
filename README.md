@@ -119,11 +119,16 @@ feedback_memory   用户反馈 → 直接影响关系与倾向
 
 ## 四、安装
 
+**推荐从插件市场安装**：市场会同时写好 `bundles`，装完重启即可用。
+
+命令行安装只把包放进 `node_modules`，还需要自己把包名加进 profile 的 `dsh.profile.bundles`
+（见第七节）——否则插件不会报错、也不会出现，`/api/biocore/*` 全部 404。
+
 ```bash
-pnpm add dsh-biocore
+dsh plugin --profile web add dsh-biocore   # 等价于 pnpm add，不写 bundles
 ```
 
-对外访问时启动加两个参数，放行域名：
+对外访问时启动加两个参数放行域名：
 
 ```bash
 dsh --profile web --port 3080 \
@@ -133,49 +138,64 @@ dsh --profile web --port 3080 \
 
 ---
 
-## 五、现状
+## 五、现在能做到什么（已实现，附验证方式）
 
-```
-可用    状态读写、面板、人设编译、逐轮注入与写回、记忆强度与反馈
-部分    事件层与断言、自主发起的门控、策略学习接线、日级迭代
-未完成  反馈闭环的最后一环（学到的结果回到"要不要开口"）、周级倾向漂移
-```
+### 身体
 
-三项未完成不是"以后再说"，是下一阶段的全部工作。
+| 能力 | 表现 | 怎么验 |
+| --- | --- | --- |
+| 状态随对话改变 | 被夸效价上升，被骂效价下降、压力升高 | 同一句话正负两种说法，看状态行变化 |
+| 无人时自己走 | 没有消息也会随时间推进，压力会累积 | 断 18 小时再说话，压力高于断开前 |
+| 经历改变基线 | 一次难听的对话，12 小时后仍更紧张、主动性更低 | 对比挨骂/被夸两条会话 12 小时后的状态 |
+| 自发选择 | 静置时会出现「想说话 / 不想说」的分化 | 12 个随机种子静置 200 步，动作不全相同 |
+| 情绪影响措辞 | 状态写进提示词，回复长度与语气随之变化 | 开关身体各生成一次回复，长度差约 25% |
+
+### 学习
+
+| 能力 | 表现 | 怎么验 |
+| --- | --- | --- |
+| 模型判分 | 每条回复由模型打分（接住情绪 / 说教 / 伤人） | `turn_end` 返回 `exchange_grade` |
+| 策略学习 | 学会该时段该怎么办，学出「别主动」就不再发 | `policy_q.json` 里 `approach` 的 Q 值随反馈变化 |
+| 关联学习 | 蘑菇体把「什么线索预示什么结果」写进权重 | `mindbase_mb.json`，正负训练后预测值分开 |
+| 每轮微迭代 | 噪声幅度随适应度微调，一天几轮也能单调改进 | `mindbase_needs.json` 里的 `noise_amp` |
+
+### 记忆
+
+| 能力 | 表现 | 怎么验 |
+| --- | --- | --- |
+| 按相关性排序 | 注入块顶部是与当前话题相关的内容，而非最早的对话 | 换话题提问，块首内容随之变化 |
+| 预算生效 | 配置的 `inject_chars` 真的用满 | 块长度接近配置值 |
+| 精排参与 | rerank 把该看的句子提到前 10 | 前 10 命中率 60.9% → 69.4% |
+| 情绪一致性 | 高兴时更容易想起高兴的事 | 同一条记忆、两种状态，召回的句子不同 |
+| 两套记忆互通 | 主记忆里召回过的句子，果蝇脑也能检索到 | `mindbase_mirror.json` 有记录且可 retrieve |
 
 ---
 
-## 六、文档
+## 六、还没做到
 
-- [接口与实现细节](docs/README-DETAIL.md)：接口、hook、文件结构、测试
+```
+意义(L5)      已接承诺识别，但样本少，多数时候停在中性 0.5
+身体出口      能「否决」主动消息，还不能「主动发起」
+情绪标签      依赖 capture 写入，旧条目没有标签，情绪召回只对新记忆生效
+```
 
 ---
 
-## 七、手动安装时才需要的一步
-
-从插件市场安装，市场会把插件写进 profile 的 `bundles`，装完重启即可——**不需要看这一节**。
-
-只有用 `pnpm add` 手动安装时，才要自己补这一步：`pnpm add` 只把包放进 `node_modules`，
-而 DSH 只加载写进 `bundles` 的插件。少了它不会报错，也不会出现——所有 `/api/biocore/*` 返回 404。
+## 七、手动安装才需要：写进 bundles
 
 编辑 `~/.dsh/profiles/<profile>/package.json`：
 
 ```json
 {
-  "dsh": {
-    "profile": {
-      "bundles": [
-        "...",
-        "dsh-biocore"
-      ]
-    }
-  },
+  "dsh": { "profile": { "bundles": [ "...", "dsh-biocore" ] } },
   "dependencies": { "dsh-biocore": "0.5.12" }
 }
 ```
 
-然后重启实例。启动日志出现 `__bioWorker started` 才算加载成功；
-`/api/biocore/stats` 返回 `200` 即为正常（`available:false, reason:no_session` 表示还没进会话）。
+重启后启动日志出现 `__bioWorker started` 才算加载成功；`/api/biocore/stats` 返回 `200` 即为正常
+（`available:false, reason:no_session` 表示还没进会话）。
+
+---
 
 ## 八、发版前必须跑的检查
 
@@ -184,5 +204,14 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts\check_release_hygien
 ```
 
 检查密钥、截图（白名单外一律拦下）、数据目录、超大文件；退出码 0 才允许发布。
-推送后必须用 `git ls-remote` 的 SHA 与本地 `git rev-parse HEAD` 比对确认，
+推送后必须用 `git ls-remote` 的 SHA 与本地 `git rev-parse HEAD` 比对，
 **不要相信 `git push` 的输出**——被拒绝时它同样会打印带 `->` 的行。
+
+---
+
+## 九、文档
+
+- [接口与实现细节](docs/README-DETAIL.md)：接口、hook、文件结构、测试
+- [宿主链路](https://github.com/Johnhmzm/astrbot_plugin_biocore/blob/main/docs/HOST-WIRING.md)：从对话到生物层的通路与四处断点
+- [评估口径](https://github.com/Johnhmzm/astrbot_plugin_biocore/blob/main/docs/METRICS.md)：三个分母、位置指标、二次精排结论
+- [涌现](https://github.com/Johnhmzm/astrbot_plugin_biocore/blob/main/docs/EMERGENCE.md)：可观测定义与实测条件
