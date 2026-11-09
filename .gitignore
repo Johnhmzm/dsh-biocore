@@ -1,0 +1,11 @@
+.backups/
+_shots/
+*.tgz
+*.log
+node_modules/
+__pycache__/
+*.pyc
+.npmrc-publish
+shots/
+.backups/
+data/

@@ -1,0 +1,24 @@
+# dsh-biocore bundle layer: insert our plugin with its defaults.
+- insert:
+    - id: dsh-biocore
+      name: dsh-biocore
+      config:
+        # Empty = auto: config > BIOCORE_UI_DATA_DIR > <DSH_PROFILE_DIR>/data > <plugin>/data
+        # Both sessions/ and flags.json live under this one directory.
+        dataDir: ''
+        # Memory (task-203): capture both sides, inject <=420 chars, 20/hour.
+        memoryEnabled: true
+        # Standalone session/event capture listener (off: capture happens in core turn_start/end)
+        memoryCaptureEnabled: false
+        injectMaxChars: 420
+        hourlyCap: 20
+        # Proactive push (task-205): both switches must be true; default OFF.
+        # No timer / no delivery while proactiveEnabled=false.
+        proactiveEnabled: false
+        proactiveSend: false
+        proactiveIntervalMinutes: 30
+        proactiveMinGapMinutes: 180
+        proactivePerHour: 2
+        proactiveMinTrust: 0.6
+        proactiveMaxChars: 60
+        proactiveRequireOpenLoop: true
