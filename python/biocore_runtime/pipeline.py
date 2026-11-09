@@ -4433,8 +4433,7 @@ def _inject_block_core(session_id, store, max_chars=None, top_k=TOP_K,
     # An enabled switch with zero events is not a working event layer: it
     # returns a two-line shell and the merge below then hands that shell back,
     # which is how a 14k budget produced a 326-character block.
-    _events_ready = bool((_load_event_state(store, session_id).get("events") or []))
-    if _event_layer_on(store, payload) and _events_ready:
+    if _event_layer_on(store, payload):
         # both views, not either/or: claims carry the correction/conflict state,
         # sentences carry the fact itself. The event layer used to return first,
         # which made the sentence branch below unreachable.
@@ -4477,7 +4476,12 @@ def _inject_block_core(session_id, store, max_chars=None, top_k=TOP_K,
             except Exception as exc:
                 logger.warning("[sentence] merge fallback: %s: %s",
                                type(exc).__name__, str(exc)[:160])
-        return event_block
+        if not (event_block.get("events_shown") or event_block.get("events_picked")):
+            # A layer that has nothing to show must not hand back a shell and
+            # pretend: fall through to the sentence path below.
+            event_block = None
+        else:
+            return event_block
     if SENTENCE_RECALL_ON and str(text_query).strip():
         # reachable without the event layer: production runs segment recall,
         # so a block nested inside _event_layer_block never executed
