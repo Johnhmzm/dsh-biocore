@@ -196,3 +196,10 @@ dsh --profile web --port 3080 --public-url https://your.host:3080/ --trusted-hos
 ```
 
 不写进「能做到」的东西，就是还没做到。
+
+---
+
+## 九、更多
+
+- [实现说明](docs/README-DETAIL.md)：一轮怎么走、每个状态变量谁在写、身体与学习机制、配置在哪
+- [参与开发](CONTRIBUTING.md)：发版流程、验证顺序、内部文档索引
