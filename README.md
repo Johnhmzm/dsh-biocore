@@ -130,11 +130,3 @@ dsh --profile web --port 3080 --public-url https://your.host:3080/ --trusted-hos
 ```
 
 不写进「能做到」的东西，就是还没做到。
-
----
-
-## 六、文档
-
-- [接口与实现细节](docs/README-DETAIL.md)：接口、hook、文件结构、测试怎么跑
-
-改代码或排查问题请看 [CONTRIBUTING.md](CONTRIBUTING.md)，那里有链路图、常见断点与验证顺序。
