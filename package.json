@@ -1,6 +1,6 @@
 {
   "name": "dsh-biocore",
-  "version": "0.5.13",
+  "version": "0.5.14",
   "type": "module",
   "description": "BioCore DSH UI: per-session state tab, standalone instrument panel, /api/biocore/state, session/event one_turn updates, /bio sync.",
   "main": "lib/index.js",

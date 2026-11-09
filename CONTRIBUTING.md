@@ -36,3 +36,38 @@ $r.StartsWith($l)   # 必须是 True
 /api/biocore/stats 返回 200       路由已注册
 真实对话的状态行出现数值与读法      核心已生效
 ```
+
+## 发版前置：必须先在 3081 冒烟
+
+**没有在 3081 上跑过的一律不发。** 这一步能抓住三类问题：插件没被加载、包没装上、装上了但代码没生效。
+
+```powershell
+# 1) 起一个独立实例（不要动 3080，那是正在用的界面）
+cd C:\Users\Administrator\Desktop\deepseek
+$a = '/c start "" /b dsh --profile web --port 3081 --no-open'
+Start-Process cmd.exe -ArgumentList $a -WindowStyle Hidden -RedirectStandardOutput .\3081.log -RedirectStandardError .\3081.err
+Start-Sleep -Seconds 20
+
+# 2) 从日志里取 token（形如 http://127.0.0.1:3081/?token=...）
+Get-Content .\3081.log -Tail 3
+
+# 3) 确认插件加载（两个都要 200）
+$t = '<token>'
+Invoke-WebRequest "http://127.0.0.1:3081/?token=$t" -UseBasicParsing -SessionVariable s | Out-Null
+Invoke-WebRequest "http://127.0.0.1:3081/api/biocore/stats" -WebSession $s | Select-Object StatusCode
+Invoke-WebRequest "http://127.0.0.1:3081/api/biocore/state" -WebSession $s | Select-Object StatusCode
+
+# 4) 跑一轮真实对话，确认状态行出现数值与读法
+# 5) 关掉实例
+```
+
+判定标准：
+
+| 现象 | 结论 |
+| --- | --- |
+| 启动日志无 `__bioWorker started` | 插件未加载，检查 bundles |
+| `/api/biocore/*` 404 | 同上 |
+| 状态行只有文字没有数值 | 装的是旧包，检查 profile 里的版本号 |
+| 状态行有数值但没「读法」 | 包是旧的，或进程未重启 |
+
+任何一条不过，先修再发——**不要在 3080 上试，那是用户正在用的界面**。
