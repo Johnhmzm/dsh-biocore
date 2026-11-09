@@ -117,6 +117,9 @@ EVENT_TOP = int(os.environ.get("BIOCORE_EVENT_TOP") or 0)
 # 0 = no cap: the budget decides how many events are delivered. A positive
 # value is a debugging clamp (P20 has 163 events; a hard 12 threw away 151)
 # how many events the block may try to place (not sentences)
+SENTENCE_RERANK_ON = str(os.environ.get("BIOCORE_SENTENCE_RERANK") or "1").strip().lower() not in ("0", "false", "off", "no")
+SENTENCE_RERANK_POOL = int(os.environ.get("BIOCORE_SENTENCE_RERANK_POOL") or 60)
+
 EVENT_SCORE_W_MAX = 0.9
 EVENT_SCORE_W_REST = 0.1
 EVENT_SCORE_TOL = 0.03
@@ -3678,7 +3681,22 @@ def _sentence_recall_block(store, session_id, query, entries, events, payload=No
         scored = sorted(scored, key=lambda pair: (
             0 if str(pair[1].get("id") or "") in _pinned else 1,
             -float(pair[0])))
-        # flat sentence delivery: every sentence ranked by cosine, packed
+        # Optional rerank over the head of the cosine ranking. The block used to
+        # be cosine-only: rerank_config was accepted by this function and never
+        # read, so a configured reranker never took part in sentence delivery.
+        if SENTENCE_RERANK_ON and len(scored) > 1:
+            _pool_n = max(1, min(SENTENCE_RERANK_POOL, len(scored)))
+            _head_rows = [row for _value, row in scored[:_pool_n]]
+            try:
+                _ordered, _rr = _rerank_rows(store, text, _head_rows, payload,
+                                             stage="sentence")
+            except Exception:
+                _ordered, _rr = None, {"reranked": False}
+            if _ordered and (_rr or {}).get("reranked"):
+                _score_of = {id(row): value for value, row in scored}
+                scored = ([(float(_score_of.get(id(row), 0.0)), row) for row in _ordered]
+                          + scored[_pool_n:])
+        # flat sentence delivery: every sentence ranked, packed
         # until the budget is spent -- no event grouping, no event order
         header_s = "【相关记忆】"
         limit_s = max(50, budget - 90)
@@ -4949,7 +4967,17 @@ def _spatial_rerank_switch(store, payload=None):
         return True
     if raw in ("0", "false", "off", "no"):
         return False
-    return False
+    # No explicit switch: honour a configured reranker instead of silently
+    # ignoring it. A reranker that is set up but never called is the same bug
+    # as a parameter that is accepted and never read.
+    try:
+        cfg = _rerank_config(store, data)
+        enabled = cfg.get("rerank_enabled")
+        if enabled is None:
+            enabled = cfg.get("enabled")
+        return bool(enabled and cfg.get("model"))
+    except Exception:
+        return False
 
 
 def _rerank_config(store, payload=None):
@@ -5023,8 +5051,21 @@ def _rerank_rows(store, query, rows, payload=None, stage="recall",
         return rows, status
     config = _rerank_config(store, data)
     config["rerank_enabled"] = True
+    # The store config names these base_url/model/api_key, while the reranker
+    # only reads rerank_* keys. Without this mapping every call reported
+    # missing_config and no reranker ever ran.
+    if not config.get("rerank_base_url"):
+        config["rerank_base_url"] = config.get("base_url")
+    if not config.get("rerank_model"):
+        config["rerank_model"] = config.get("model")
+    if not config.get("rerank_api_key"):
+        config["rerank_api_key"] = config.get("api_key")
+    if not config.get("rerank_timeout"):
+        config["rerank_timeout"] = config.get("timeout")
     if top_n:
         config["rerank_top_n"] = int(top_n)
+    elif not config.get("rerank_top_n"):
+        config["rerank_top_n"] = config.get("top_n")
     reasons = []
     try:
         reranked = _rerank_mod.rerank_documents(
