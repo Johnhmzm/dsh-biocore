@@ -41,7 +41,8 @@ lib/modules             宿主侧：payload 构造、注入接线
 
 | 文档 | 讲什么 |
 | --- | --- |
-| [docs/README-DETAIL.md](docs/README-DETAIL.md) | 接口、hook、文件结构、测试怎么跑 |
+| [docs/README-DETAIL.md](docs/README-DETAIL.md) | 实现说明：组成、一轮怎么走、状态变量、身体/学习/注入机制、配置位置、测试 |
+| [docs/HISTORY.md](docs/HISTORY.md) | 开发期验收记录（task-197…214，仅存档） |
 | [docs/DSH-PROACTIVE-FEASIBILITY.md](docs/DSH-PROACTIVE-FEASIBILITY.md) | 主动发起的可行性评估与取舍 |
 | [HOST-WIRING](https://github.com/Johnhmzm/astrbot_plugin_biocore/blob/main/docs/HOST-WIRING.md) | 宿主链路图与常见断点 |
 | [METRICS](https://github.com/Johnhmzm/astrbot_plugin_biocore/blob/main/docs/METRICS.md) | 三个分母、位置指标、二次精排结论 |
