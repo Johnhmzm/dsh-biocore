@@ -151,10 +151,12 @@ dsh --profile web --port 3080 \
 
 ---
 
-## 七、安装后必须做的一步：注册到 profile
+## 七、手动安装时才需要的一步
 
-`pnpm add dsh-biocore` 只是把包装进 `node_modules`。**DSH 只加载写进 profile `bundles` 的插件**，
-少了这一步，插件不会报错、也不会出现——所有 `/api/biocore/*` 会返回 404。
+从插件市场安装，市场会把插件写进 profile 的 `bundles`，装完重启即可——**不需要看这一节**。
+
+只有用 `pnpm add` 手动安装时，才要自己补这一步：`pnpm add` 只把包放进 `node_modules`，
+而 DSH 只加载写进 `bundles` 的插件。少了它不会报错，也不会出现——所有 `/api/biocore/*` 返回 404。
 
 编辑 `~/.dsh/profiles/<profile>/package.json`：
 
@@ -167,13 +169,13 @@ dsh --profile web --port 3080 \
         "dsh-biocore"
       ]
     }
-  }
+  },
   "dependencies": { "dsh-biocore": "0.5.12" }
 }
 ```
 
 然后重启实例。启动日志出现 `__bioWorker started` 才算加载成功；
-用 `/api/biocore/stats` 应返回 `200`（`available:false, reason:no_session` 属正常，表示还没进会话）。
+`/api/biocore/stats` 返回 `200` 即为正常（`available:false, reason:no_session` 表示还没进会话）。
 
 ## 八、发版前必须跑的检查
 
