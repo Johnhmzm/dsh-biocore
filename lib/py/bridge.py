@@ -277,8 +277,19 @@ def _deepseek_key():
 
 def _summarizer_config(store):
     """The summariser block of the store's core_config.json (no silent default)."""
-    for name in ("core_config.json", "config.json"):
-        path = os.path.join(str(store or ""), name)
+    # The host keeps memories in <data>/memory but the config in <data>/.
+    # Only looking inside the store made every run raise "no summarizer block"
+    # and memory injection failed with adapter_error.
+    roots = [str(store or "")]
+    try:
+        parent = os.path.dirname(str(store or "").rstrip("\\/"))
+        if parent and parent not in roots:
+            roots.append(parent)
+    except Exception:
+        pass
+    for root in roots:
+      for name in ("core_config.json", "config.json"):
+        path = os.path.join(root, name)
         if not os.path.isfile(path):
             continue
         try:

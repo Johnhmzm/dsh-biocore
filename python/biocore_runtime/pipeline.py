@@ -7239,6 +7239,15 @@ def _load_runtime_config(store):
     doc = {}
     if data_dir is not None:
         doc = _load_json(data_dir / CORE_CONFIG_FILE, {})
+        if not isinstance(doc, dict) or not doc:
+            # The host stores memories under <data>/memory but keeps the config
+            # at <data>/core_config.json. Reading only the store-local file made
+            # every run report "no summarizer block" and fail memory injection.
+            try:
+                parent = Path(data_dir).parent / CORE_CONFIG_FILE
+                doc = _load_json(parent, {})
+            except Exception:
+                doc = {}
     if not isinstance(doc, dict) or not doc:
         doc = _RUNTIME_CONFIG
     return doc if isinstance(doc, dict) else {}
