@@ -148,3 +148,39 @@ dsh --profile web --port 3080 \
 ## 六、文档
 
 - [接口与实现细节](docs/README-DETAIL.md)：接口、hook、文件结构、测试
+
+---
+
+## 七、安装后必须做的一步：注册到 profile
+
+`pnpm add dsh-biocore` 只是把包装进 `node_modules`。**DSH 只加载写进 profile `bundles` 的插件**，
+少了这一步，插件不会报错、也不会出现——所有 `/api/biocore/*` 会返回 404。
+
+编辑 `~/.dsh/profiles/<profile>/package.json`：
+
+```json
+{
+  "dsh": {
+    "profile": {
+      "bundles": [
+        "...",
+        "dsh-biocore"
+      ]
+    }
+  }
+  "dependencies": { "dsh-biocore": "0.5.12" }
+}
+```
+
+然后重启实例。启动日志出现 `__bioWorker started` 才算加载成功；
+用 `/api/biocore/stats` 应返回 `200`（`available:false, reason:no_session` 属正常，表示还没进会话）。
+
+## 八、发版前必须跑的检查
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts\check_release_hygiene.ps1
+```
+
+检查密钥、截图（白名单外一律拦下）、数据目录、超大文件；退出码 0 才允许发布。
+推送后必须用 `git ls-remote` 的 SHA 与本地 `git rev-parse HEAD` 比对确认，
+**不要相信 `git push` 的输出**——被拒绝时它同样会打印带 `->` 的行。
