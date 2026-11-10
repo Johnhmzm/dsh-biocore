@@ -123,6 +123,7 @@ class DialogueBody:
         # message never survives; the anchor is what an experience changes.
         self.anchor = {"valence": 0.0, "arousal": 0.5, "stress": 0.0}
         self.commit = {"open": 0.0, "kept": 0.0}
+        self.integral = {"valence": 0.0, "stress": 0.0}
         self.noise = None
         if noise:
             try:
@@ -151,13 +152,62 @@ class DialogueBody:
         try:
             a = self.anchor
             aff = self.mind.affect
-            aff.v = max(-1.0, min(1.0, aff.v + ANCHOR_GAIN * (a["valence"] - aff.v)))
-            aff.stress = max(0.0, min(1.0, aff.stress + ANCHOR_GAIN * (a["stress"] - aff.stress)))
+            # PI 控制：比例项负责快速回拉，积分项消除持续扰动留下的稳态误差；
+            # 积分限幅（anti-windup）防止长时间偏差把积分项推到饱和。
+            for key, getter, setter, lo, hi in (
+                ("valence", lambda: aff.v, lambda v: setattr(aff, "v", v), -1.0, 1.0),
+                ("stress", lambda: aff.stress, lambda v: setattr(aff, "stress", v), 0.0, 1.0),
+            ):
+                cur = float(getter())
+                err = float(a[key]) - cur
+                self.integral[key] = float(self.integral.get(key, 0.0)) + err * PI_KI_DT
+                self.integral[key] = max(-PI_I_LIMIT, min(PI_I_LIMIT, self.integral[key]))
+                u = PI_KP * err + PI_KI * self.integral[key]
+                new = cur + u
+                setter(max(lo, min(hi, new)))
         except Exception:
             pass
 
+    def apply_outputs(self, outs, scale: float = 1.0) -> int:
+        """把 8 个评价输出分别落到身体字段上（而不是只推一个效价）。
+
+        之前只有一个 push_gain：所有维度压成一个推力，所以「被骂伤到的是信任
+        还是自尊」在身体里根本不存在。这里让每个输出走自己的通道。
+        """
+        applied = 0
+        if not isinstance(outs, dict):
+            return 0
+        aff = self.mind.affect
+        try:
+            for key, field in (("v", "v"), ("a", "a"), ("stress", "stress"),
+                               ("d", "dominance")):
+                if key in outs:
+                    cur = float(getattr(aff, field, 0.0))
+                    setattr(aff, field, max(-1.0, min(1.0, cur + float(outs[key]) * scale)))
+                    applied += 1
+        except Exception:
+            pass
+        try:
+            drives = self.mind.drives.values
+            for key, field in (("social", "social"), ("trust", "safety")):
+                if key in outs:
+                    cur = float(drives.get(field, 0.5))
+                    drives[field] = max(0.0, min(1.0, cur + float(outs[key]) * scale))
+                    applied += 1
+        except Exception:
+            pass
+        try:
+            if "self_esteem" in outs:
+                sm = self.mind.self_model
+                cur = float(getattr(sm, "agency", 0.5))
+                sm.agency = max(0.0, min(1.0, cur + float(outs["self_esteem"]) * scale))
+                applied += 1
+        except Exception:
+            pass
+        return applied
+
     def feed(self, text: str, dims: Optional[Dict[str, float]] = None,
-             ticks: int = 1) -> Dict[str, float]:
+             ticks: int = 1, outs=None) -> Dict[str, float]:
         """Advance the body by one user message."""
         from mindbase.types import Event
         d = dims or {}
@@ -226,6 +276,9 @@ class DialogueBody:
                 "mood": round(float(A.get("mood") or 0.0), 4),
                 "agency": round(float(self_.get("agency") or 0.0), 4),
                 "social_drive": round(float(dr.get("social") or 0.0), 4),
+                "drive_safety": round(float(dr.get("safety") or 0.5), 4),
+                "drive_energy": round(float(dr.get("energy") or 0.5), 4),
+                "drive_curiosity": round(float(dr.get("curiosity") or 0.5), 4),
                 "action": str(ai.get("action") or ""),
                 "anchor_valence": round(float(self.anchor["valence"]), 4),
                 "anchor_stress": round(float(self.anchor["stress"]), 4),
@@ -365,6 +418,16 @@ def body_for(store, session_id, seed: int = 1) -> "DialogueBody":
             body.anchor["stress"] = float(prev.get("anchor_stress") or 0.0)
             body.commit["open"] = float(prev.get("commit_open") or 0.0)
             body.commit["kept"] = float(prev.get("commit_kept") or 0.0)
+            try:
+                dv = body.mind.drives.values
+                for key, field in (("drive_safety", "safety"),
+                                   ("drive_energy", "energy"),
+                                   ("drive_curiosity", "curiosity"),
+                                   ("social_drive", "social")):
+                    if key in prev:
+                        dv[field] = max(0.0, min(1.0, float(prev[key])))
+            except Exception:
+                pass
         except Exception:
             pass
         try:
@@ -412,10 +475,10 @@ def load_digest(store, session_id) -> str:
 
 
 def turn(store, session_id, text: str, dims: Optional[Dict[str, float]] = None,
-         seed: int = 1, with_memory: bool = True) -> Dict[str, float]:
+         seed: int = 1, with_memory: bool = True, outs=None) -> Dict[str, float]:
     """One user turn: resume, feed, persist, return the new state."""
     body = body_for(store, session_id, seed=seed)
-    state = body.feed(text, dims)
+    state = body.feed(text, dims, outs=outs)
     if with_memory:
         digest = load_digest(store, session_id)
         if digest:
@@ -751,6 +814,154 @@ def restore_mb(body, store, session_id):
 
 
 CLOCK_FILE = "mindbase_clock.json"
+PREV_FILE = "mindbase_prev.json"
+LEARN_FILE = "learn_log.jsonl"
+LEARN_CAP = 5000
+
+
+def log_learn(store, session_id, dims, outs, before, after):
+    """一行一条：评价值 → 八个输出 → 状态怎么变。
+
+    这是拟合评价矩阵唯一需要的数据，没有它 49 个权重只能继续手设。
+    """
+    import json
+    import os
+    if not isinstance(dims, dict) or not dims:
+        return False
+    row = {
+        "dims": {k: round(float(dims.get(k) or 0.0), 4) for k in
+                 ("goal", "blame", "control", "certainty", "novelty", "involve", "hit")},
+        "outs": {k: round(float(v), 4) for k, v in (outs or {}).items()
+                 if isinstance(v, (int, float))},
+        "before": {k: round(float((before or {}).get(k) or 0.0), 4)
+                   for k in ("valence", "arousal", "stress", "social_drive")},
+        "after": {k: round(float((after or {}).get(k) or 0.0), 4)
+                  for k in ("valence", "arousal", "stress", "social_drive")},
+    }
+    try:
+        path = _body_path(store, session_id).replace(BODY_STATE_FILE, LEARN_FILE)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        lines = []
+        if os.path.exists(path):
+            try:
+                with open(path, "r", encoding="utf-8") as fh:
+                    lines = [ln for ln in fh.read().splitlines() if ln.strip()]
+            except Exception:
+                lines = []
+        lines.append(json.dumps(row, ensure_ascii=False))
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write("\n".join(lines[-LEARN_CAP:]) + "\n")
+        return True
+    except Exception:
+        return False
+
+
+def save_prev(store, session_id, state):
+    """Snapshot before this turn touches anything: the KL baseline."""
+    import json
+    import os
+    try:
+        path = _body_path(store, session_id).replace(BODY_STATE_FILE, PREV_FILE)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as fh:
+            json.dump({k: float(v) for k, v in (state or {}).items()
+                       if isinstance(v, (int, float))}, fh)
+        return True
+    except Exception:
+        return False
+
+
+def load_prev(store, session_id):
+    import json
+    try:
+        with open(_body_path(store, session_id).replace(BODY_STATE_FILE, PREV_FILE),
+                  "r", encoding="utf-8") as fh:
+            return json.load(fh)
+    except Exception:
+        return {}
+
+
+# PI 控制器参数：P 沿用原来的回拉强度，I 小而慢，只负责消掉稳态误差
+PI_KP = float(_os.environ.get("BIOCORE_PI_KP") or 0.04)
+PI_KI = float(_os.environ.get("BIOCORE_PI_KI") or 0.010)
+PI_KI_DT = float(_os.environ.get("BIOCORE_PI_DT") or 1.0)
+PI_I_LIMIT = float(_os.environ.get("BIOCORE_PI_LIMIT") or 0.6)
+ANCHOR_GAIN = PI_KP
+
+NORM_FILE = "mindbase_norm.json"
+NORM_ALPHA = 0.05     # how fast the personal baseline follows her
+NORM_MIN = 8          # samples before z is trustworthy
+
+
+def _norm_path(store, session_id):
+    return _body_path(store, session_id).replace(BODY_STATE_FILE, NORM_FILE)
+
+
+def norm_update(store, session_id, state, alpha=None):
+    """Running mean/std per dimension, then her position in her own units.
+
+    Absolute numbers are not readable: "-0.15" means nothing without knowing
+    where she usually sits. z = (x - mean) / std is what a model can read.
+    """
+    import json
+    import math
+    import os
+    a = float(alpha if alpha is not None else NORM_ALPHA)
+    keys = ("valence", "arousal", "stress", "social_drive")
+    try:
+        with open(_norm_path(store, session_id), "r", encoding="utf-8") as fh:
+            doc = json.load(fh)
+    except Exception:
+        doc = {}
+    rows = doc.get("rows") or {}
+    out = {}
+    for key in keys:
+        val = (state or {}).get(key)
+        if not isinstance(val, (int, float)):
+            continue
+        cur = rows.get(key) or {"n": 0, "mean": 0.0, "var": 0.04}
+        n = int(cur.get("n") or 0)
+        mean = float(cur.get("mean") or 0.0)
+        var = float(cur.get("var") or 0.04)
+        if n < 1:
+            mean, var = float(val), 0.04
+        else:
+            delta = float(val) - mean
+            mean = mean + a * delta
+            var = (1 - a) * var + a * delta * delta
+        if n >= NORM_MIN:
+            sd = max(1e-3, math.sqrt(max(var, 1e-6)))
+            out[key] = round((float(val) - mean) / sd, 2)
+        else:
+            out[key] = 0.0
+        rows[key] = {"n": n + 1, "mean": round(mean, 5), "var": round(var, 5)}
+    try:
+        os.makedirs(os.path.dirname(_norm_path(store, session_id)), exist_ok=True)
+        with open(_norm_path(store, session_id), "w", encoding="utf-8") as fh:
+            json.dump({"rows": rows, "alpha": a}, fh)
+    except Exception:
+        pass
+    return out
+
+
+KL_SIGMA = {"valence": 0.25, "arousal": 0.15, "dominance": 0.30,
+            "stress": 0.20, "social_drive": 0.25}
+
+
+def state_kl(before, after):
+    """How far one exchange moved the state, in nats (diagonal Gaussian KL).
+
+    A number, not a verdict: it says "this landed" -- not "this was good".
+    """
+    import math
+    total = 0.0
+    for key, sigma in KL_SIGMA.items():
+        a = (before or {}).get(key)
+        c = (after or {}).get(key)
+        if not isinstance(a, (int, float)) or not isinstance(c, (int, float)):
+            continue
+        total += ((float(c) - float(a)) ** 2) / (2.0 * sigma * sigma)
+    return round(total, 5)
 TICK_SECONDS = 60.0        # one body tick per simulated minute
 MAX_CATCHUP_TICKS = 480    # 8 hours: beyond that the gap is a "night", not a gap
 

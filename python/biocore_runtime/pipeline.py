@@ -122,6 +122,13 @@ try:  # learned proactive policy (Q table); optional
 except Exception:  # pragma: no cover
     _policy_learning = None
 
+# retrieval temperature: 0 = deterministic top-k (a hard sort, T -> 0).
+# Above 0 the block is filled by weighted sampling, so near-miss sentences can
+# get in. Whether that helps is measured, not assumed.
+RETRIEVE_TEMP = float(os.environ.get("BIOCORE_RETRIEVE_TEMP") or 0.0)
+# share of the pool that may be reshuffled by temperature
+RETRIEVE_TAIL = float(os.environ.get("BIOCORE_RETRIEVE_TAIL") or 0.15)
+
 BODY_SWITCH_KEY = "body"
 BODY_ON = str(os.environ.get("BIOCORE_BODY") or "0").strip().lower() in ("1", "true", "on", "yes")
 SENTENCE_RERANK_ON = str(os.environ.get("BIOCORE_SENTENCE_RERANK") or "1").strip().lower() not in ("0", "false", "off", "no")
@@ -3724,6 +3731,27 @@ def _sentence_recall_block(store, session_id, query, entries, events, payload=No
         limit_s = max(50, budget - 90)
         used_s = len(header_s)
         out_lines, skipped, shown_ids = [], [], []
+        if RETRIEVE_TEMP > 0:
+            # weighted sampling without replacement in O(n log n):
+            # key_i = -ln(U_i) / w_i, take the smallest keys (Efraimidis-Spirakis).
+            # The first version drew one item at a time from the pool -- O(n^2),
+            # which never finished on 766 rows x 170 questions.
+            import math as _m
+            import random as _r
+            _rng = _r.Random(int(time.time()) % 100000)
+            if scored:
+                # Only the tail is sampled: the head stays deterministic so the
+                # recall cost of diversity is paid where it is cheapest.
+                _cut = int(len(scored) * (1.0 - RETRIEVE_TAIL))
+                _head, _tail = scored[:_cut], scored[_cut:]
+                _top = max(_v for _v, _row in _tail) if _tail else 0.0
+                _keys = []
+                for _v, _row in _tail:
+                    _w = _m.exp((_v - _top) / RETRIEVE_TEMP)
+                    _u = max(1e-12, _rng.random())
+                    _keys.append((-_m.log(_u) / max(_w, 1e-12), _v, _row))
+                _keys.sort(key=lambda item: item[0])
+                scored = list(_head) + [(_v, _row) for _k, _v, _row in _keys]
         for score, row in scored:
             when = _day_str(float(row.get("ts") or 0.0)) if row.get("ts") else ""
             body_text = str(row.get("text") or "").strip()
@@ -4355,7 +4383,22 @@ def body_turn(store, session_id, text, payload=None):
         if digest:
             probe = text + "\n（她刚想起：" + digest[:200] + "）"
         dims = _mb.appraise_text(probe, cfg.get("summarizer") or {})
-        return _mb.turn(store, session_id, text, dims, with_memory=False)
+        # 7x7 评价矩阵在这里第一次真正上电：dims 进去，八个输出各自落到身体
+        outs = None
+        try:
+            from biocore_model import appraisal as _ap
+            if dims:
+                outs = _ap.appraise(dims, confidence=0.7)
+        except Exception:
+            outs = None
+        state = _mb.turn(store, session_id, text, dims, with_memory=False, outs=outs)
+        try:
+            # 拟合评价矩阵要的数据：dims、outs、状态前后
+            _mb.log_learn(store, session_id, dims, outs,
+                          _mb.load_prev(store, session_id), state)
+        except Exception:
+            pass
+        return state
     except Exception as exc:
         logger.warning("[body] turn failed: %s: %s", type(exc).__name__, str(exc)[:120])
         return {}
@@ -4731,8 +4774,18 @@ def _state_block(state, budget):
             parts.append("身上绷得紧(%.2f)" % stress)
         elif stress >= 0.05:
             parts.append("身上有点紧(%.2f)" % stress)
+    norm = state.get("norm") if isinstance(state.get("norm"), dict) else {}
+    zline = ""
+    if norm:
+        bits = []
+        for key, name in (("valence", "效价"), ("stress", "紧张"), ("social_drive", "社交")):
+            if key in norm:
+                zv = _num(norm.get(key), 0.0)
+                bits.append("%s%+.1fσ" % (name, zv))
+        if bits:
+            zline = "｜相对你平常：" + " ".join(bits)
     tail = ("；".join(parts) + "。") if parts else ""
-    text = "此刻：" + numbers + "。" + reading + ("｜" + tail if tail else "")
+    text = "此刻：" + numbers + "。" + reading + zline + ("｜" + tail if tail else "")
     if len(text) > budget:
         text = text[:max(1, budget - 1)] + "…"
     return text
@@ -7737,6 +7790,12 @@ def dispatch(action, payload=None):
                     from biocore_runtime import mindbase_bridge as _mbc
                     _now = data.get("now")
                     _nowv = float(_now) if isinstance(_now, (int, float)) else time.time()
+                    try:
+                        # the state as it was before this turn touched it
+                        _mbc.save_prev(store, session_id,
+                                       _mbc.load_state(store, session_id))
+                    except Exception:
+                        pass
                     _gap = _mbc.advance(store, session_id, _nowv)
                     # while she was alone she did things: replay + muse, batched
                     # by elapsed time so volume accumulates without burning calls
@@ -7819,6 +7878,13 @@ def dispatch(action, payload=None):
                     _b = body_state(store, session_id)
                     if _b:
                         session_state["body"] = _b
+                        try:
+                            # her position in her own units, not absolute numbers
+                            _z = _mbc.norm_update(store, session_id, _b)
+                            if _z:
+                                session_state["norm"] = _z
+                        except Exception:
+                            pass
                         # ONE source of truth: the body owns v/a/stress. The
                         # bio layer keeps explaining and constraining, but it
                         # no longer re-derives a second set of numbers beside
@@ -7938,16 +8004,39 @@ def dispatch(action, payload=None):
                             from biocore_runtime import theta as _th
                             _cur = _th.values(store)
                             _mbj.refresh_theta(store)
+                            _now_state = body_state(store, session_id)
+                            _kl = _mbj.state_kl(_mbj.load_prev(store, session_id),
+                                                _now_state)
+                            data["state_kl"] = _kl
+                            # 表达层要用的字段：长度、句数、问句数；关系层：信任与亲密
+                            _reply = str(raw_assistant or "")
+                            _expr = {"chars": float(len(_reply)),
+                                     "sent": float(_reply.count("。") + _reply.count("！")
+                                                   + _reply.count("？") + _reply.count("!") + _reply.count("?")),
+                                     "quest": float(_reply.count("？") + _reply.count("?"))}
+                            logger.info("[learn] expr chars=%.0f sent=%.0f", _expr["chars"], _expr["sent"])
+                            _rel = {}
+                            _rs = data.get("relationship")
+                            if not isinstance(_rs, dict) or not _rs:
+                                try:
+                                    _rs = relationship_read(store).get("relationship") or {}
+                                except Exception:
+                                    _rs = {}
+                            if isinstance(_rs, dict):
+                                for _k in ("trust", "closeness", "stage"):
+                                    if isinstance(_rs.get(_k), (int, float)):
+                                        _rel[_k] = float(_rs[_k])
                             _th.log_turn(store, _cur, _grade.get("reward"),
-                                         body_state(store, session_id))
+                                         _now_state, kl=_kl, expr=_expr, rel=_rel)
                             if len(_th.read_log(store)) % 20 == 0:
                                 _moved = _th.iterate(store)
                                 if _moved.get("accepted"):
                                     _mbj.refresh_theta(store)
                                     data["theta"] = {"version": _moved.get("version"),
                                                      "knob": _moved.get("knob")}
-                        except Exception:
-                            pass
+                        except Exception as _exc:
+                            logger.warning("[learn] log failed: %s: %s",
+                                           type(_exc).__name__, str(_exc)[:120])
                         _mbj.micro_evolve(store, session_id,
                                           body_state(store, session_id))
                         data["exchange_grade"] = _grade
@@ -8154,6 +8243,7 @@ def dispatch(action, payload=None):
                              "entry_id": str(entry.get("id") or ""),
                              "reason": str(decision.get("reason") or "")},
                 "exchange_grade": data.get("exchange_grade"),
+                "state_kl": data.get("state_kl"),
                 "clean_text": cleaned,
                 "sanitized": bool(sanitized),
                 "removed_tags": int(removed_tags),

@@ -34,9 +34,23 @@ BOUNDS = {
     "noise_amp": (0.05, 0.60),
 }
 STEP = 0.05          # 5% move per proposal
+# An Adam-style update was implemented and measured: it changed the endpoint by
+# 0.001 of a 0.55 target -- inside the noise. With a handful of iterations and a
+# correlation as the "gradient", momentum has nothing to average. Left out.
 MIN_VAL_GAIN = 0.004  # a proposal must beat the incumbent by this on validation
                       # (kept below one step's effect, or nothing ever passes)
-MIN_ROWS = 20        # below this there is nothing to learn from
+MIN_ROWS = 20        # floor: below this there is nothing to learn from at all
+# A proposal also has to clear the sample size its effect requires (Fisher z,
+# alpha=0.05, power=0.8): n >= (1.96+0.84)^2 / r^2. Otherwise 20 rows "confirm"
+# an effect that needs 349 -- a false-positive factory.
+Z_SUM = 1.959964 + 0.841621
+
+
+def required_n(r: float) -> int:
+    r = abs(float(r or 0.0))
+    if r <= 1e-6:
+        return 10 ** 9
+    return int(__import__("math").ceil((Z_SUM / r) ** 2))
 
 
 def _path(store, name):
@@ -77,7 +91,9 @@ def values(store) -> Dict[str, float]:
     return out
 
 
-def log_turn(store, theta: Dict[str, float], grade: Optional[float], state=None) -> bool:
+def log_turn(store, theta: Dict[str, float], grade: Optional[float], state=None,
+             kl: Optional[float] = None, expr: Optional[Dict[str, float]] = None,
+             rel: Optional[Dict[str, float]] = None) -> bool:
     """One observation: what theta was in force, and how the exchange scored."""
     if grade is None:
         return False
@@ -86,6 +102,11 @@ def log_turn(store, theta: Dict[str, float], grade: Optional[float], state=None)
                "theta": {k: round(float(v), 4) for k, v in (theta or {}).items()
                          if k in BOUNDS},
                "grade": round(float(grade), 4),
+               "kl": (round(float(kl), 5) if isinstance(kl, (int, float)) else None),
+               "expr": ({k: round(float(v), 3) for k, v in (expr or {}).items()
+                         if isinstance(v, (int, float))} if expr else {}),
+               "rel": ({k: round(float(v), 4) for k, v in (rel or {}).items()
+                        if isinstance(v, (int, float))} if rel else {}),
                "state": {k: round(float(state.get(k) or 0.0), 4)
                          for k in ("valence", "stress", "action")
                          if isinstance((state or {}).get(k), (int, float))}}
@@ -175,13 +196,19 @@ def iterate(store, min_rows: int = MIN_ROWS) -> Dict[str, object]:
             continue
         lo, hi = BOUNDS[key]
         cand = dict(cur)
-        move = STEP * (1.0 if c > 0 else -1.0)
-        cand[key] = round(min(hi, max(lo, cur[key] * (1.0 + move))), 4)
+        # Step by a share of the *range*, not of the current value: a knob that
+        # lives at 0.06 cannot move meaningfully with 5% of itself (0.003).
+        span = float(hi) - float(lo)
+        move = STEP * span * (1.0 if c > 0 else -1.0)
+        cand[key] = round(min(hi, max(lo, cur[key] + move)), 4)
         if cand[key] == cur[key]:
             continue
         gain_val = score(cand, val) - incumb_val
         if gain_val <= MIN_VAL_GAIN:
             continue
+        need = required_n(c)
+        if len(rows) < need:
+            continue          # the effect is real-looking but the data cannot tell
         if best is None or gain_val > best["gain_val"]:
             best = {"key": key, "cand": cand, "gain_val": round(gain_val, 4),
                     "gain_train": round(score(cand, train) - incumb_train, 4)}

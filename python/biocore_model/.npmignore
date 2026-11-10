@@ -1,0 +1,5 @@
+# 编译缓存与测试不进包（根目录的 .npmignore 在 files 白名单下无效，必须放子目录）
+__pycache__/
+*.pyc
+*.pyo
+tests/

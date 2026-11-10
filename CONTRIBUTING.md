@@ -2,6 +2,18 @@
 
 面向发布这个包的人。用户文档见 [README](README.md)，实现说明见 [docs/README-DETAIL.md](docs/README-DETAIL.md)。
 
+## 打包白名单（会直接影响发出去的东西）
+
+```
+根目录 .npmignore 在 package.json 的 files 白名单下完全无效（实测：三种写法都拦不住）
+有效做法：在每个被包含的子目录里放 .npmignore
+  lib/py/.npmignore
+  python/<每个包>/.npmignore   内容：__pycache__/ *.pyc tests/
+```
+
+发版前必查：`npm pack --dry-run` 里不得出现 `__pycache__`、`*.pyc`、`tests/`、`CHANGELOG.md`。
+0.5.17 之前每版都带了 275 个 .pyc、238 个测试文件，包体积 3.1MB；修完 1.1MB。
+
 ## 发版前
 
 ```powershell
