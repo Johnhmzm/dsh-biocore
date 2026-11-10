@@ -7932,6 +7932,22 @@ def dispatch(action, payload=None):
                         _mbj.teach(store, session_id,
                                    str(data.get("user_text") or "")[:120],
                                    _grade.get("reward"))
+                        # record (theta, grade) and every 20 observations try a
+                        # parameter step, accepted only on held-out turns
+                        try:
+                            from biocore_runtime import theta as _th
+                            _cur = _th.values(store)
+                            _mbj.refresh_theta(store)
+                            _th.log_turn(store, _cur, _grade.get("reward"),
+                                         body_state(store, session_id))
+                            if len(_th.read_log(store)) % 20 == 0:
+                                _moved = _th.iterate(store)
+                                if _moved.get("accepted"):
+                                    _mbj.refresh_theta(store)
+                                    data["theta"] = {"version": _moved.get("version"),
+                                                     "knob": _moved.get("knob")}
+                        except Exception:
+                            pass
                         _mbj.micro_evolve(store, session_id,
                                           body_state(store, session_id))
                         data["exchange_grade"] = _grade

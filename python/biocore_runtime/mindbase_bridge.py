@@ -143,7 +143,7 @@ class DialogueBody:
                 nv = float(self.noise.network.last_noise)
                 for name in ("energy", "social", "safety", "curiosity"):
                     cur = float(self.mind.drives.values.get(name, 0.5))
-                    val = cur + BODY_NOISE_AMP * nv * 0.5
+                    val = cur + eff("noise_amp", BODY_NOISE_AMP) * nv * 0.5
                     self.mind.drives.values[name] = max(0.0, min(1.0, val))
             except Exception:
                 pass
@@ -189,7 +189,8 @@ class DialogueBody:
                 self.mind.inject_affect(float(d.get("valence") or 0.0),
                                         float(d.get("arousal") or 0.5),
                                         float(d.get("dominance") or 0.0),
-                                        intensity=PUSH_GAIN, blend=PUSH_GAIN)
+                                        intensity=eff("push_gain", PUSH_GAIN),
+                                        blend=eff("push_gain", PUSH_GAIN))
             except Exception:
                 pass
         else:
@@ -287,6 +288,28 @@ ANCHOR_LEARN = float(_os.environ.get("BIOCORE_ANCHOR_LEARN") or 0.25)
 # how much one idle recollection moves the baseline (small: only volume counts)
 REPLAY_LEARN = float(_os.environ.get("BIOCORE_REPLAY_LEARN") or 0.06)
 ANCHOR_RELAX = float(_os.environ.get("BIOCORE_ANCHOR_RELAX") or 0.02)
+
+# Values accepted by the parameter loop override the constants above. The loop
+# only accepts a change that also improves held-out turns, so this is the seam
+# where "learned" reaches the body.
+_THETA_OVERRIDE = {}
+
+
+def refresh_theta(store):
+    try:
+        from biocore_runtime import theta as _th
+        _THETA_OVERRIDE.clear()
+        _THETA_OVERRIDE.update(_th.values(store))
+    except Exception:
+        pass
+    return dict(_THETA_OVERRIDE)
+
+
+def eff(key, default):
+    try:
+        return float(_THETA_OVERRIDE.get(key, default))
+    except Exception:
+        return float(default)
 
 
 def _body_path(store, session_id):
@@ -877,8 +900,8 @@ def idle_activity(store, session_id, now=None, seed=1, rng=None):
             # a replayed memory keeps colouring her afterwards: volume is what
             # turns a single recollection into a baseline shift
             body.anchor["valence"] = round(
-                body.anchor["valence"] * (1 - REPLAY_LEARN)
-                + val * REPLAY_LEARN, 4)
+                body.anchor["valence"] * (1 - eff("replay_learn", REPLAY_LEARN))
+                + val * eff("replay_learn", REPLAY_LEARN), 4)
             events.append({"kind": "replay", "text": text[:40], "valence": val})
 
     state = body.state()
