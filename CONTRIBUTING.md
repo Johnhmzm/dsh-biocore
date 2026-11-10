@@ -1,99 +1,54 @@
 # 发版与验证
 
-面向发布这个包的人。用户文档见 [README](README.md)，实现说明见 [docs/README-DETAIL.md](docs/README-DETAIL.md)。
+面向维护者。用户文档见 [README](README.md)，能力说明见 [docs/](docs/)。
 
-## 发版前置：确认身体开关是开的
-
-身体层由 `core_config.json` 的 `switches.body` 决定，默认关。关着的时候：
-
-```
-状态行      只有核心层那一行，没有「｜身上…」
-KL / 日志   不产生
-通道        八个评价输出不生效
-看起来      一切正常 —— 所以最容易被漏掉
-```
-
-检查方法：跑一轮后看 `prompt_block` 第一行是否含「σ」与「身上」，且 `turn_end` 是否回 `state_kl`。
-2026-11-10 就是这样漏掉的：功能全写完，配置没开，生产里一直是黑的。
-
-## 打包白名单（会直接影响发出去的东西）
-
-```
-根目录 .npmignore 在 package.json 的 files 白名单下完全无效（实测：三种写法都拦不住）
-有效做法：在每个被包含的子目录里放 .npmignore
-  lib/py/.npmignore
-  python/<每个包>/.npmignore   内容：__pycache__/ *.pyc tests/
-```
-
-发版前必查：`npm pack --dry-run` 里不得出现 `__pycache__`、`*.pyc`、`tests/`、`CHANGELOG.md`。
-0.5.17 之前每版都带了 275 个 .pyc、238 个测试文件，包体积 3.1MB；修完 1.1MB。
-
-## 发版前
+## 发布前检查
 
 ```powershell
+# 1 核心测试必须全绿
+pytest tests -q
+
+# 2 密钥 / 截图 / 数据目录 / 超大文件
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts\check_release_hygiene.ps1
+
+# 3 包里不能有缓存与测试文件
+npm pack --dry-run
 ```
 
-检查密钥、截图（白名单外一律拦下）、数据目录、超大文件；退出码 0 才允许发布。
+第 3 步要确认：条目里没有 `__pycache__`、`*.pyc`、`tests/`、`CHANGELOG`、`CONTRIBUTING`。
+打包白名单由 `package.json` 的 `files` 决定；目录内的额外排除写在各自目录的 `.npmignore` 里。
 
-## 验证顺序
+## 冒烟
+
+在测试实例上确认三件事，缺一不可：
 
 ```
-pytest tests            核心全量（701 项），先绿
-node test/hook-wiring.mjs  宿主接线
-npm run selftest        package 自检
-GET /api/biocore/stats  确认插件已被 profile 加载
+插件加载    GET /api/biocore/stats 返回 200
+状态行      首行含数值、读法、以及「相对你平常」
+整轮闭合    一轮对话后 turn_end 返回评分与 state_kl
 ```
 
-## 推送后
+只看接口 200 不够——要真的发一条消息，确认回复生成与数据落盘。
 
-用远端 SHA 与本地比对，不要相信 `git push` 的输出——被拒绝时它同样会打印带 `->` 的行：
+## 发布
 
 ```powershell
-$l = (git rev-parse HEAD).Substring(0,7)
-$r = (((git ls-remote --heads origin main) -split "\s+")[0])
-$r.StartsWith($l)   # 必须是 True
+npm publish --access public
+npm dist-tag add dsh-biocore@<version> latest
+npm view dsh-biocore version    # 确认 latest 指向新版本
 ```
 
-## 安装后确认
+标签更新可能滞后，必要时手动 add 一次。
+
+## 安装后
 
 ```
-启动日志出现 __bioWorker started   插件已加载
-/api/biocore/stats 返回 200       路由已注册
-真实对话的状态行出现数值与读法      核心已生效
+1  解包后确认 package.json 的 version 与发布版本一致
+2  lib/ 与 python/ 与仓库逐字节一致（可对比 SHA256）
+3  重启实例后重跑一次冒烟
 ```
 
-## 发版前置：必须先在 3081 冒烟
+## 仓库与发布包的区别
 
-**没有在 3081 上跑过的一律不发。** 这一步能抓住三类问题：插件没被加载、包没装上、装上了但代码没生效。
-
-```powershell
-# 1) 起一个独立实例（不要动 3080，那是正在用的界面）
-cd C:\Users\Administrator\Desktop\deepseek
-$a = '/c start "" /b dsh --profile web --port 3081 --no-open'
-Start-Process cmd.exe -ArgumentList $a -WindowStyle Hidden -RedirectStandardOutput .\3081.log -RedirectStandardError .\3081.err
-Start-Sleep -Seconds 20
-
-# 2) 从日志里取 token（形如 http://127.0.0.1:3081/?token=...）
-Get-Content .\3081.log -Tail 3
-
-# 3) 确认插件加载（两个都要 200）
-$t = '<token>'
-Invoke-WebRequest "http://127.0.0.1:3081/?token=$t" -UseBasicParsing -SessionVariable s | Out-Null
-Invoke-WebRequest "http://127.0.0.1:3081/api/biocore/stats" -WebSession $s | Select-Object StatusCode
-Invoke-WebRequest "http://127.0.0.1:3081/api/biocore/state" -WebSession $s | Select-Object StatusCode
-
-# 4) 跑一轮真实对话，确认状态行出现数值与读法
-# 5) 关掉实例
-```
-
-判定标准：
-
-| 现象 | 结论 |
-| --- | --- |
-| 启动日志无 `__bioWorker started` | 插件未加载，检查 bundles |
-| `/api/biocore/*` 404 | 同上 |
-| 状态行只有文字没有数值 | 装的是旧包，检查 profile 里的版本号 |
-| 状态行有数值但没「读法」 | 包是旧的，或进程未重启 |
-
-任何一条不过，先修再发——**不要在 3080 上试，那是用户正在用的界面**。
+发布包只包含运行所需：`lib`、`python`、`ui`、`cordis.patch.yml`、`README.md`、`docs/`。
+开发记录、问题排查笔记、基准脚本的说明不放进来或放在仓库根目录以外。
