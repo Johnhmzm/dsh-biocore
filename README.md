@@ -121,4 +121,3 @@ dsh --profile web --port 3080 --public-url https://your.host:3080/ --trusted-hos
 | [人设](docs/PERSONA.md) | 角色卡怎么编译成数值、作用范围 |
 | [不对话的时候](docs/IDLE.md) | 无人时她在做什么：回想、走神、基线漂移 |
 | [涌现](docs/EMERGENCE.md) | 为什么「会变」能成立，以及怎么判定 |
-| [实现说明](docs/README-DETAIL.md) | 一轮怎么走、代码结构、配置位置、测试 |
