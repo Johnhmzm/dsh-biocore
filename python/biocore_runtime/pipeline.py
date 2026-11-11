@@ -130,6 +130,9 @@ except Exception:  # pragma: no cover
 HYBRID_RETRIEVAL = str(os.environ.get("BIOCORE_HYBRID") or "0").strip().lower() in ("1", "true", "on", "yes")
 # 记忆业务键（M0001）是否进提示词。默认关：改行格式要先做对照再开。
 MEMORY_CODES = str(os.environ.get("BIOCORE_MEMORY_CODES") or "0").strip().lower() in ("1", "true", "on", "yes")
+# 提示词前缀稳定性：稳定内容放前面，变化的数值放后面，能让上游的缓存命中更多。
+# 默认关：顺序会改变模型读到的优先级，必须先量。
+STABLE_PREFIX = str(os.environ.get("BIOCORE_STABLE_PREFIX") or "0").strip().lower() in ("1", "true", "on", "yes")
 RRF_K = 60
 
 RETRIEVE_TEMP = float(os.environ.get("BIOCORE_RETRIEVE_TEMP") or 0.0)
@@ -3769,7 +3772,12 @@ def _sentence_recall_block(store, session_id, query, entries, events, payload=No
         for score, row in scored:
             when = _day_str(float(row.get("ts") or 0.0)) if row.get("ts") else ""
             body_text = str(row.get("text") or "").strip()
-            line = "- %s%s" % (body_text, ("（%s）" % when) if when else "")
+            _tag = ""
+            if MEMORY_CODES:
+                _c = str(row.get("code") or "").strip()
+                if _c:
+                    _tag = "[%s] " % _c
+            line = "- %s%s%s" % (_tag, body_text, ("（%s）" % when) if when else "")
             if used_s + len(line) + 1 > limit_s:
                 skipped.append(str(row.get("id") or ""))
                 continue
@@ -4248,6 +4256,19 @@ def _event_layer_block(session_id, store, query, budget, rerank_config=None,
         # compaction marks a row archived: out of the block, still on disk
         rows = [r for r in rows if not r.get("archived")]
         rows.sort(key=lambda r: float(r.get("ts") or 0.0))
+        if MEMORY_CODES:
+            # 事件里的行是建事件时的快照，code 要按 id 从条目表补
+            try:
+                _codes = {str(e.get("id") or ""): str(e.get("code") or "")
+                          for e in (load_memory(store, session_id).get("entries") or [])
+                          if isinstance(e, dict)}
+                for _r in rows:
+                    if not _r.get("code"):
+                        _c = _codes.get(str(_r.get("id") or ""), "")
+                        if _c:
+                            _r["code"] = _c
+            except Exception:
+                pass
         EVENT_CAP_STATS["rows"] += len(rows)
         if os.environ.get("BIOCORE_DEBUG_EV"):
             print("DBG-EV ev=%d-%d rows=%d" % (start, end, len(rows)), file=sys.stderr)
@@ -4272,7 +4293,12 @@ def _event_layer_block(session_id, store, query, budget, rerank_config=None,
                 except Exception:
                     pass
             who = "用户" if str(row.get("role")) == "user" else "助手"
-            lines.append("- [%s %s] %s" % (_day(row.get("ts")), who, body))
+            _tag = ""
+            if MEMORY_CODES:
+                _c = str(row.get("code") or "").strip()
+                if _c:
+                    _tag = "[%s] " % _c
+            lines.append("- %s[%s %s] %s" % (_tag, _day(row.get("ts")), who, body))
     if not lines:
         return None
     state_lines = []
@@ -4892,6 +4918,28 @@ def gate_reply(reply_text, flags=None):
 
 
 # ---------------------------------------------------------------- prompt block
+_LAST_BLOCK = {}
+
+
+def _note_prefix(session_id, text):
+    """记下同一会话相邻两次提示词块的公共前缀长度（只看不判）。"""
+    prev = _LAST_BLOCK.get(session_id)
+    _LAST_BLOCK[session_id] = text
+    if not prev:
+        return
+    n = 0
+    for a, b in zip(prev, text):
+        if a != b:
+            break
+        n += 1
+    PREFIX_STATS["last"] = n
+    PREFIX_STATS["seen"] = PREFIX_STATS.get("seen", 0) + 1
+    PREFIX_STATS["total"] = PREFIX_STATS.get("total", 0) + n
+
+
+PREFIX_STATS = {}
+
+
 def _state_block(state, budget):
     state = state if isinstance(state, dict) else {}
     core = state.get("core") if isinstance(state.get("core"), dict) else {}
@@ -5018,7 +5066,15 @@ def prompt_block(payload):
     switches = normalize_switches(data.get("switches"))
     state_text = _state_block(state, budget)
     constraints = _constraints_block(state, switches, data)
-    text = (state_text + "\n" + constraints).strip()
+    if STABLE_PREFIX:
+        # 约束（规则为主，变化慢）在前，状态（每轮都变）在后
+        text = (constraints + "\n" + state_text).strip()
+    else:
+        text = (state_text + "\n" + constraints).strip()
+    try:
+        _note_prefix(session_id, text)
+    except Exception:
+        pass
     if _lifecycle is not None:
         try:
             repair = _lifecycle.repair_lines(data.get("store"))
