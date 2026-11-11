@@ -91,12 +91,6 @@ dsh plugin --profile web add dsh-biocore
 重启后启动日志出现 `__bioWorker started` 即加载成功；`/api/biocore/stats` 返回 `200` 为正常
 （`available:false, reason:no_session` 表示还没进会话）。
 
-对外访问需放行域名：
-
-```bash
-dsh --profile web --port 3080 --public-url https://your.host:3080/ --trusted-host your.host:3080
-```
-
 ---
 
 ## 五、还没做到
