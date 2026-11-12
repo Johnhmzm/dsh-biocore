@@ -31,6 +31,16 @@ CREATE TABLE IF NOT EXISTS entries (
   vector BLOB, hits INTEGER DEFAULT 1, importance REAL DEFAULT 0.2,
   deleted INTEGER DEFAULT 0, raw TEXT
 );
+CREATE TABLE IF NOT EXISTS units (
+  -- 命题单元：一条消息按标点合并成 ~70 字的自足片段，各自一个向量。
+  -- 检索用单元（粒度细、匹配准），交付仍用 entries 原文（不失帧）。
+  id TEXT PRIMARY KEY,
+  entry_id TEXT NOT NULL,
+  ord INTEGER,
+  text TEXT NOT NULL CHECK(length(text) > 0),
+  vector BLOB
+);
+CREATE INDEX IF NOT EXISTS idx_units_entry ON units(entry_id);
 CREATE TABLE IF NOT EXISTS events (
   id TEXT PRIMARY KEY, start INTEGER, end INTEGER, overview TEXT,
   text TEXT, closed_ts REAL, payload TEXT, centroid BLOB
@@ -337,6 +347,128 @@ def update_entry_vectors(root, session_id, vectors):
             written += cur.rowcount or 0
         conn.commit()
         return written
+    finally:
+        conn.close()
+
+
+def unit_ids_with_vectors(root, session_id):
+    """{entry_id: set(unit_index)} already stored — lets a writer skip re-embedding."""
+    root = Path(root)
+    conn = connect(root, session_id)
+    try:
+        out = {}
+        try:
+            rows = conn.execute(
+                'SELECT entry_id, ord FROM units WHERE vector IS NOT NULL').fetchall()
+        except Exception:
+            return {}
+        for entry_id, ordv in rows:
+            out.setdefault(str(entry_id), set()).add(int(ordv or 0))
+        return out
+    finally:
+        conn.close()
+
+
+def save_units(root, session_id, entry_units):
+    """Store propositions for an entry: {entry_id: [(ord, text, vector), ...]}.
+
+    Rewriting the same entry replaces its units wholesale so a re-summarised
+    message never leaves stale fragments behind.
+    """
+    if not entry_units:
+        return 0
+    root = Path(root)
+    conn = connect(root, session_id)
+    written = 0
+    try:
+        for entry_id, units in entry_units.items():
+            entry_id = str(entry_id or "")
+            if not entry_id or not units:
+                continue
+            conn.execute('DELETE FROM units WHERE entry_id=?', (entry_id,))
+            for idx, text, vector in units:
+                blob = pack_vector(vector)
+                if not blob or not str(text or "").strip():
+                    continue
+                conn.execute(
+                    'INSERT OR REPLACE INTO units (id, entry_id, ord, text, vector)'
+                    ' VALUES (?,?,?,?,?)',
+                    ("%s#%d" % (entry_id, int(idx)), entry_id, int(idx),
+                     str(text), blob))
+                written += 1
+        conn.commit()
+        return written
+    finally:
+        conn.close()
+
+
+def load_units(root, session_id):
+    """{entry_id: [(ord, text, vector), ...]} — every stored proposition."""
+    root = Path(root)
+    conn = connect(root, session_id)
+    try:
+        out = {}
+        try:
+            rows = conn.execute(
+                'SELECT entry_id, ord, text, vector FROM units ORDER BY entry_id, ord'
+            ).fetchall()
+        except Exception:
+            return {}
+        for entry_id, ordv, text, blob in rows:
+            vector = unpack_vector(blob)
+            if not vector:
+                continue
+            out.setdefault(str(entry_id), []).append(
+                (int(ordv or 0), str(text or ""), vector))
+        return out
+    finally:
+        conn.close()
+
+
+def load_units_for(root, session_id, entry_ids):
+    """{entry_id: [(ord, text, vector)]} for the named entries only.
+
+    Recall scores a bounded candidate list, so reading the whole unit table
+    would make every turn cost grow with the size of the history. The index
+    on units(entry_id) keeps this proportional to the candidate count.
+    """
+    ids = [str(x) for x in (entry_ids or []) if str(x or "")]
+    if not ids:
+        return {}
+    root = Path(root)
+    conn = connect(root, session_id)
+    try:
+        out = {}
+        try:
+            for start in range(0, len(ids), 400):
+                chunk = ids[start:start + 400]
+                marks = ",".join("?" * len(chunk))
+                rows = conn.execute(
+                    "SELECT entry_id, ord, text, vector FROM units"
+                    " WHERE entry_id IN (%s) ORDER BY entry_id, ord" % marks,
+                    chunk).fetchall()
+                for entry_id, ordv, text, blob in rows:
+                    vector = unpack_vector(blob)
+                    if not vector:
+                        continue
+                    out.setdefault(str(entry_id), []).append(
+                        (int(ordv or 0), str(text or ""), vector))
+        except Exception:
+            return {}
+        return out
+    finally:
+        conn.close()
+
+
+def count_units(root, session_id):
+    root = Path(root)
+    conn = connect(root, session_id)
+    try:
+        try:
+            row = conn.execute('SELECT COUNT(*) FROM units').fetchone()
+        except Exception:
+            return 0
+        return int(row[0] or 0)
     finally:
         conn.close()
 

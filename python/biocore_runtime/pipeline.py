@@ -148,9 +148,13 @@ SENTENCE_RERANK_POOL = int(os.environ.get("BIOCORE_SENTENCE_RERANK_POOL") or 60)
 
 EVENT_SCORE_W_MAX = 0.9
 EVENT_SCORE_W_REST = 0.1
-# 事件分口径：mean = 0.9×最佳句 + 0.1×其余句均值（旧）；
-# countrank = 0.7×最佳句 + 0.3×句数名次（句子排名 + 句数排名）
-EVENT_SCORE_MODE = str(os.environ.get("BIOCORE_EVENT_SCORE") or "lse").strip().lower()
+# 事件分口径：
+#   max       = 该事件里最高那句的余弦（默认；P01/P16/P20 实测 top10 = 98.6/97.5/80.3，
+#               是所有聚合形式的上界，见 docs/EVENT-SCORING-20261112.md）
+#   mean      = 0.9×最佳句 + 0.1×其余句均值（旧）
+#   countrank = 0.7×最佳句 + 0.3×句数名次
+#   lse       = 平滑最大值（保留为对照，实测三集 top1 远低于 max）
+EVENT_SCORE_MODE = str(os.environ.get("BIOCORE_EVENT_SCORE") or "max").strip().lower()
 EVENT_SCORE_BETA = float(os.environ.get("BIOCORE_EVENT_BETA") or 2.0)
 # β 的目标函数选 NDCG@10（保头部名次），不是似然：见 docs 里 P01/P16/P20 的对照
 BETA_GRID = [0.5 + 0.1 * i for i in range(0, 56)]
@@ -258,6 +262,10 @@ def tune_beta(store, session_id=None, limit=400, k=10):
     return best_beta, len(rows), best
 EVENT_SCORE_W_COUNT = float(os.environ.get("BIOCORE_EVENT_COUNT_W") or 0.3)
 EVENT_RELEVANT_COS = float(os.environ.get("BIOCORE_EVENT_RELEVANT") or 0.4)
+# 分数门槛用相对量：不同 embedding / rerank 模型的刻度不同，写死绝对值换模型就失效。
+# 保留一个绝对下限，防止"最高分本来就很低"时仍然放行一堆噪声。
+SCORE_RATIO = float(os.environ.get("BIOCORE_SCORE_RATIO") or 0.6)
+SCORE_FLOOR = float(os.environ.get("BIOCORE_SCORE_FLOOR") or 0.2)
 EVENT_SCORE_TOL = 0.03
 # best-line gaps below this count as a tie; the overall level decides
 # one lucky sentence must not outrank a consistently relevant event,
@@ -2149,6 +2157,11 @@ def _query_entries(store, session_id, query, top_k, rerank_config,
         reordered = _rerank_entries(query, picked, rerank_config)
         if reordered:
             picked = reordered
+    # propositions score the candidates, the message is what gets delivered:
+    # fine-grained index + coarse-grained evidence (Dense X Retrieval, EMNLP 2024).
+    # Measured on P20: anchor hit 92.1% -> 95.3%, coverage unchanged.
+    if len(picked) > 1:
+        picked = _unit_reorder(store, session_id, query, picked)
     # task-223: index hit + decay weight (cold memories sink, never deleted).
     if _governance is not None:
         try:
@@ -2909,6 +2922,251 @@ def _load_event_state_json(store, session_id):
     return _copy_event_state(out)
 
 
+# ------------------------------------------------------------ proposition units
+# 检索粒度用"命题"（一句话一件事，目标 70 字合并），交付粒度仍是一条消息。
+# 依据：Dense X Retrieval (EMNLP 2024) —— 细粒度索引 + 粗粒度交付；
+# P20 实测命中率 92.1% → 95.3%，覆盖率不掉（见 docs/EVENT-SCORING-20261112.md）。
+UNIT_INDEX_ON = str(os.environ.get("BIOCORE_UNIT_INDEX") or "1").strip().lower() not in (
+    "0", "false", "off", "no")
+UNIT_TARGET_CHARS = int(os.environ.get("BIOCORE_UNIT_CHARS") or 70)
+UNIT_MIN_CHARS = 6
+_UNIT_SPLIT = re.compile(r"[。！？；\n]+")
+
+
+def _unit_texts(text, target=None):
+    """Split one message into self-contained propositions of ~target chars.
+
+    Adjacent punctuation fragments are merged until the target length, so a
+    short aside never becomes its own retrieval unit; a very long fragment is
+    cut on the target boundary as a last resort.
+    """
+    target = int(target or UNIT_TARGET_CHARS)
+    raw = str(text or "")
+    parts = [p.strip() for p in _UNIT_SPLIT.split(raw) if p.strip()]
+    if not parts:
+        return []
+    out, buf = [], ""
+    for part in parts:
+        if not buf:
+            buf = part
+        elif len(buf) + len(part) <= target:
+            buf = buf + "，" + part
+        else:
+            out.append(buf)
+            buf = part
+    if buf:
+        out.append(buf)
+    merged = []
+    for piece in out:
+        if len(piece) <= target:
+            merged.append(piece)
+            continue
+        step = max(1, target - 10)
+        for i in range(0, len(piece), step):
+            sub = piece[i:i + target].strip()
+            if sub:
+                merged.append(sub)
+    return [x for x in merged if len(x) >= UNIT_MIN_CHARS] or [raw.strip()]
+
+
+UNIT_EMBED_CHUNK = int(os.environ.get("BIOCORE_UNIT_CHUNK") or 32)
+UNIT_EMBED_WORKERS = int(os.environ.get("BIOCORE_UNIT_WORKERS") or 6)
+
+
+def _embed_chunked(batch, one, texts):
+    """Embed in bounded chunks, a few requests in flight.
+
+    One call with every unit used to be sent to the provider; a remote
+    endpoint refuses batches that large and the whole build fell back to
+    one request per text (1488 units took 437 s). Chunks keep each request
+    inside the provider limit and still overlap the round-trips.
+    """
+    texts = list(texts or [])
+    out = [[] for _ in texts]
+    if not texts:
+        return out
+    size = max(1, int(UNIT_EMBED_CHUNK))
+    chunks = [(start, texts[start:start + size])
+              for start in range(0, len(texts), size)]
+
+    def run_chunk(item):
+        start, chunk = item
+        vectors = None
+        if callable(batch):
+            try:
+                got = list(batch(chunk))
+                if len(got) == len(chunk):
+                    vectors = got
+            except Exception:
+                vectors = None
+        if vectors is None:
+            vectors = []
+            for text in chunk:
+                try:
+                    vectors.append(list(one(text)))
+                except Exception:
+                    vectors.append([])
+        return start, vectors
+
+    try:
+        from concurrent.futures import ThreadPoolExecutor
+        with ThreadPoolExecutor(max_workers=max(1, int(UNIT_EMBED_WORKERS))) as pool:
+            for start, vectors in pool.map(run_chunk, chunks):
+                for offset, vector in enumerate(vectors):
+                    slot = start + offset
+                    if slot < len(out):
+                        out[slot] = list(vector) if vector else []
+    except Exception:
+        for item in chunks:
+            start, vectors = run_chunk(item)
+            for offset, vector in enumerate(vectors):
+                slot = start + offset
+                if slot < len(out):
+                    out[slot] = list(vector) if vector else []
+    return out
+
+
+def _ensure_units(store, session_id, entries=None):
+    """Build missing proposition vectors for a session; returns units written."""
+    if not UNIT_INDEX_ON:
+        return 0
+    root = _store_root(store)
+    if root is None or store_mode() == "json":
+        return 0
+    try:
+        store_api = _sql_store()
+        rows = entries if entries is not None else (
+            load_memory(store, session_id).get("entries") or [])
+        if not rows:
+            return 0
+        have = store_api.unit_ids_with_vectors(root, session_id)
+        pending = []
+        for entry in rows:
+            entry_id = str(entry.get("id") or "")
+            text = str(entry.get("text") or "").strip()
+            if not entry_id or not text or not entry.get("vector"):
+                continue
+            units = _unit_texts(text)
+            if not units:
+                continue
+            if len(have.get(entry_id) or ()) >= len(units):
+                continue
+            pending.append((entry_id, units))
+        if not pending:
+            return 0
+        config = _load_runtime_config(store) or {}
+        embed_many = _event_embed_fn(store, config, None)
+        batch = getattr(embed_many, "embed_many", None)
+        texts = [u for _e, units in pending for u in units]
+        vectors = _embed_chunked(batch, embed_many, texts)
+        payload, cursor = {}, 0
+        for entry_id, units in pending:
+            items = []
+            for idx, unit in enumerate(units):
+                vec = vectors[cursor] if cursor < len(vectors) else []
+                cursor += 1
+                if vec:
+                    items.append((idx, unit, vec))
+            if items:
+                payload[entry_id] = items
+        written = store_api.save_units(root, session_id, payload)
+        if written:
+            _UNIT_CACHE.pop(str(_db_path(root, session_id)), None)
+        return written
+    except Exception:
+        return 0
+
+
+_UNIT_CACHE = {}
+
+
+def _load_units_cached(store, session_id):
+    """{entry_id: [(ord, text, vector)]} memoised per database stamp."""
+    root = _store_root(store)
+    if root is None or store_mode() == "json":
+        return {}
+    db_file = str(_db_path(root, session_id))
+    token = _db_stamp(root, session_id)
+    cached = _UNIT_CACHE.get(db_file)
+    if cached is not None and cached[0] == token:
+        return cached[1]
+    try:
+        units = _sql_store().load_units(root, session_id)
+    except Exception:
+        units = {}
+    _UNIT_CACHE[db_file] = (token, units)
+    return units
+
+
+def _unit_reorder(store, session_id, query, entries, embed_fn=None):
+    """Reorder candidates by their best proposition, best first.
+
+    Entries without propositions keep their previous relative order and sink
+    below every scored entry; the delivery layer still prints whole messages.
+    """
+    if not UNIT_INDEX_ON or not entries or len(entries) < 2:
+        return entries
+    query = str(query or "").strip()
+    if not query:
+        return entries
+    # only the candidates matter: pulling the whole unit table would make the
+    # per-turn cost grow with the history instead of the candidate count
+    entry_ids = [str(entry.get("id") or "") for entry in entries]
+    try:
+        root = _store_root(store)
+        units = _sql_store().load_units_for(root, session_id, entry_ids) if root else {}
+    except Exception:
+        try:
+            units = _load_units_cached(store, session_id)
+        except Exception:
+            return entries
+    if not units:
+        return entries
+    try:
+        embed_fn = embed_fn or _event_embed_fn(store, _load_runtime_config(store) or {}, None)
+        qvec = list(embed_fn(query))
+    except Exception:
+        return entries
+    if not qvec:
+        return entries
+    scored = []
+    for pos, entry in enumerate(entries):
+        entry_id = str(entry.get("id") or "")
+        best = None
+        for _ord, _text, vec in (units.get(entry_id) or ()):
+            value = _cosine_list(qvec, vec)
+            if best is None or value > best:
+                best = value
+        scored.append((best, pos, entry) if best is not None else (None, pos, entry))
+    if not any(item[0] is not None for item in scored):
+        return entries
+    scored.sort(key=lambda item: (item[0] is not None,
+                                  item[0] if item[0] is not None else 0.0),
+                reverse=True)
+    counted = [(item[0], item[1], item[2]) if item[0] is not None else (-1.0, item[1], item[2])
+               for item in scored]
+    counted.sort(key=lambda item: (-item[0], item[1]))
+    return [item[2] for item in counted]
+
+
+def _cosine_list(a, b):
+    try:
+        if not a or not b or len(a) != len(b):
+            return 0.0
+        num = 0.0
+        na = 0.0
+        nb = 0.0
+        for x, y in zip(a, b):
+            num += x * y
+            na += x * x
+            nb += y * y
+        if na <= 0.0 or nb <= 0.0:
+            return 0.0
+        return num / ((na ** 0.5) * (nb ** 0.5))
+    except Exception:
+        return 0.0
+
+
 def _save_event_state(store, session_id, state):
     """Persist the event layer: sqlite rows only (JSON is an export format now)."""
     payload = dict(state or {})
@@ -2927,6 +3185,12 @@ def _save_event_state(store, session_id, state):
                     store_api.harvest_event_vectors(events, opened))
                 if written:
                     _EVEC_CACHE.pop(str(_db_path(root, session_id)), None)
+                # proposition units are derived from the vectors above: build the
+                # ones the session is still missing now that coordinates exist
+                try:
+                    _ensure_units(store, session_id)
+                except Exception:
+                    pass
             except Exception:
                 pass
             store_api.save_event_state(root, session_id,
@@ -3472,7 +3736,22 @@ def _fmt_stamp_local(stamp):
         return ""
 
 
-def _claim_lines(query, events, embed_fn, top=8, min_score=0.35):
+def _relative_cut(scores, ratio=None, floor=None):
+    """Keep-scores-above line for one query: ratio x its own best, clamped by a floor.
+
+    An absolute cut (0.4 / 0.35) only fits the embedder that produced it: every
+    model has its own scale, so a fixed number silently drops everything on one
+    model and admits noise on another.
+    """
+    values = [float(v) for v in (scores or []) if v is not None]
+    if not values:
+        return 0.0
+    ratio = SCORE_RATIO if ratio is None else float(ratio)
+    floor = SCORE_FLOOR if floor is None else float(floor)
+    return max(floor, ratio * max(values))
+
+
+def _claim_lines(query, events, embed_fn, top=8, min_score=None):
     """Facts first: score claim texts, keep the evidence sentence of each hit."""
     from biocore_memory.event import events as _E2
     if embed_fn is None or not str(query or "").strip():
@@ -3502,7 +3781,7 @@ def _claim_lines(query, events, embed_fn, top=8, min_score=0.35):
             vectors = batch(texts)
         except Exception:
             vectors = None
-    picked = []
+    scored_items = []
     for slot, (claim, ev, text) in enumerate(items):
         vec = None
         if isinstance(vectors, list) and slot < len(vectors):
@@ -3518,8 +3797,12 @@ def _claim_lines(query, events, embed_fn, top=8, min_score=0.35):
             score = _E2._cos(qv, vec)
         except Exception:
             continue
-        if score >= min_score:
-            picked.append((score, claim, ev, text))
+        scored_items.append((score, claim, ev, text))
+    # cut position is relative to this query own best claim, with an absolute floor
+    _cut = _relative_cut([row[0] for row in scored_items])
+    if min_score is not None:
+        _cut = max(float(min_score), _cut)
+    picked = [row for row in scored_items if row[0] >= _cut]
     picked.sort(key=lambda item: item[0], reverse=True)
     lines = []
     seen = set()
@@ -3776,7 +4059,7 @@ def _claims_state_lines(events, limit=8, turn_dates=None):
 
 def _sentence_recall_block(store, session_id, query, entries, events, payload=None,
                            rerank_config=None, now=None, budget_chars=None,
-                           delivery="sentence"):
+                           delivery="event_rank"):
     """Rank EVENTS by their best sentence, then inject each one whole.
 
     Sentence-level seeding misses events whose best line ranks 33rd: the
@@ -3852,6 +4135,7 @@ def _sentence_recall_block(store, session_id, query, entries, events, payload=No
     for key in order:
         bucket = grouped[key]
         values = sorted((score for score, _row in bucket["rows"]), reverse=True)
+        _rel_cut = _relative_cut(values)
         best = float(values[0]) if values else 0.0
         rest = values[1:]
         # a single-line event must not be punished for having no rest:
@@ -3860,10 +4144,17 @@ def _sentence_recall_block(store, session_id, query, entries, events, payload=No
         bucket["max_cos"] = round(best, 6)
         bucket["rest_mean"] = round(rest_mean, 6)
         bucket["sentence_count"] = len(values)
-        bucket["relevant"] = sum(1 for value in values if value >= EVENT_RELEVANT_COS)
+        bucket["relevant"] = sum(1 for value in values if value >= _rel_cut)
         bucket["score"] = round(EVENT_SCORE_W_MAX * best
                                 + EVENT_SCORE_W_REST * rest_mean, 6)
         bucket["in_top40"] = sum(1 for value in values if value in top40)
+    if EVENT_SCORE_MODE == "max":
+        # 只用最高句：事件内的其他句子不参与计分（多句累加等价于奖励句数，
+        # 而金标事件的命中句数在三个人身上都不占优）
+        for _k in order:
+            _b = grouped[_k]
+            _vals = [v for v, _r in _b["rows"]]
+            _b["score"] = round(max(_vals) if _vals else 0.0, 6)
     if EVENT_SCORE_MODE == "lse":
         _beta_now = _event_beta(store)
         # 平滑最大值：接近"取最高那句"，但第二三句也会抬分（170 题实测 MRR 0.059→0.098）
@@ -3906,6 +4197,10 @@ def _sentence_recall_block(store, session_id, query, entries, events, payload=No
                                            -grouped[key]["in_top40"],
                                            grouped[key]["start"],
                                            order.index(key)))
+    # cross-encoder second opinion on the head only: it decides which of the top
+    # events answers the question, and the tail keeps the cosine order untouched
+    # (P20 measured top1 64.6% -> 70.9%, top10 unchanged).
+    ranked = _event_head_rerank(store, query, ranked, grouped, payload)
     budget = int(budget_chars) if budget_chars else int(RECALL_INJECT_CHARS)
     if delivery == "sentence":
         # an exact index/concept hit leads; cosine orders the rest
@@ -4009,7 +4304,11 @@ def _sentence_recall_block(store, session_id, query, entries, events, payload=No
                 "shown": len(shown_ids), "folded": len(skipped),
                 "folded_ids": skipped, "folded_events": [], "events": [],
                 "ids": shown_ids}
-    picked_events = ranked[:EVENT_TOP] if EVENT_TOP > 0 else list(ranked)
+    _rank_mode = str(delivery or "").strip().lower() == "event_rank"
+    if _rank_mode:
+        picked_events = ranked[:max(1, EVENT_PRESET)]
+    else:
+        picked_events = ranked[:EVENT_TOP] if EVENT_TOP > 0 else list(ranked)
     notes = _event_notes_by_id(events)
     header = "【相关记忆】"
     reserve = 90            # room for the fold trailer
@@ -4070,6 +4369,9 @@ def _sentence_recall_block(store, session_id, query, entries, events, payload=No
             shown_events += 1
             blocks.append((key, rendered, []))
             continue
+        if _rank_mode:
+            # 事件是交付单位：装不下就停，绝不用摘要替换原文
+            break
         if SUBNOTES_ON and grouped[key].get("rows") and subnotes_for(key):
             compressed = _compress_event(members, subnotes_for(key), used, limit)
             if compressed:
@@ -4086,7 +4388,7 @@ def _sentence_recall_block(store, session_id, query, entries, events, payload=No
         if used + len(line) + 1 <= limit:      # the trailer already reports the count
             lines.append(line)
             used += len(line) + 1
-    if EVENT_TOP > 0:
+    if EVENT_TOP > 0 and not _rank_mode:
         for key in ranked[EVENT_TOP:]:
             label = key if not key.startswith("ID:") else key[3:]
             folded_events.append(label)
@@ -4147,6 +4449,56 @@ def _sentence_recall_block(store, session_id, query, entries, events, payload=No
                         "shown": position < shown_events}
                        for position, key in enumerate(picked_events)],
             "ids": shown_ids}
+
+
+# 事件预设交付：按事件排名给前 N 个整个事件，不压缩、不截断成摘要
+EVENT_PRESET = int(os.environ.get("BIOCORE_EVENT_PRESET") or 8)
+EVENT_RERANK_ON = str(os.environ.get("BIOCORE_EVENT_RERANK") or "1").strip().lower() not in (
+    "0", "false", "off", "no")
+EVENT_RERANK_TOP = int(os.environ.get("BIOCORE_EVENT_RERANK_TOP") or 10)
+
+
+def _event_head_rerank(store, query, ranked, grouped, payload=None, top_n=None):
+    """Reorder the first top_n events with the reranker and keep the tail."""
+    """
+
+    Reranking every event used to shuffle the middle of the list too, which cost
+    top5/top10. Restricting the call to the head keeps the measured gain in top1
+    without touching what the budget already agreed on. Any failure -- no
+    reranker, bad answer, exception -- returns the cosine order untouched.
+    """
+    keys = list(ranked or [])
+    if not EVENT_RERANK_ON or len(keys) < 3:
+        return keys
+    limit = int(top_n or EVENT_RERANK_TOP)
+    limit = max(1, min(limit, len(keys)))
+    head, tail = keys[:limit], keys[limit:]
+    rows = []
+    for key in head:
+        bucket = grouped.get(key) or {}
+        parts = [str(row.get("text") or "") for _score, row in (bucket.get("rows") or [])]
+        text = " ".join(part for part in parts if part).strip()
+        if text:
+            rows.append({"id": str(key), "text": text[:900]})
+    if len(rows) < 2:
+        return keys
+    try:
+        ordered, status = _rerank_rows(store, query, rows, payload,
+                                       stage="event_head", top_n=len(rows))
+    except Exception:
+        return keys
+    if not ordered or not (status or {}).get("reranked"):
+        return keys
+    wanted = set(str(key) for key in head)
+    new_head = [str(row.get("id")) for row in ordered
+                if isinstance(row, dict) and str(row.get("id")) in wanted]
+    seen = set(new_head)
+    for key in head:
+        if str(key) not in seen:
+            new_head.append(str(key))
+            seen.add(str(key))
+    by_id = {str(key): key for key in head}
+    return [by_id[item] for item in new_head] + tail
 
 
 def _event_layer_block(session_id, store, query, budget, rerank_config=None,
@@ -7847,7 +8199,7 @@ CORE_DEFAULTS = {
 RECALL_INJECT_MIN = 500
 RECALL_INJECT_MAX = 200000
 RECALL_INJECT_DEFAULT = 14000
-RECALL_DELIVERIES = ("sentence", "event")
+RECALL_DELIVERIES = ("event_rank", "sentence", "event")
 
 
 def recall_settings(store, payload=None):
@@ -7879,7 +8231,7 @@ def recall_settings(store, payload=None):
     if value < RECALL_INJECT_MIN or value > RECALL_INJECT_MAX:
         raise RuntimeError("recall.inject_chars=%d 超出合法范围 [%d, %d]" % (value, RECALL_INJECT_MIN, RECALL_INJECT_MAX))
     delivery = (cfg.get("delivery") or os.environ.get("BIOCORE_RECALL_DELIVERY")
-                or pl.get("delivery") or "sentence")
+                or pl.get("delivery") or "event_rank")
     delivery = str(delivery).strip().lower()
     if delivery not in RECALL_DELIVERIES:
         raise RuntimeError("recall.delivery=%r 不合法；只接受 %s"
@@ -8312,6 +8664,23 @@ def _trace_modules(raw):
             "skipped": [str(item)[:30] for item in skipped][:20]}
 
 
+def _trace_affect(raw):
+    """Absolute affect snapshot for this turn (the numbers, not the deltas)."""
+    data = raw if isinstance(raw, dict) else {}
+    core = data.get("core") if isinstance(data.get("core"), dict) else data
+    intero = data.get("intero") if isinstance(data.get("intero"), dict) else {}
+    out = {}
+    for key in ("v", "a", "d", "social", "energy", "stress"):
+        value = core.get(key) if isinstance(core, dict) else None
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            out[key] = round(float(value), 4)
+    for key in ("tension", "warmth", "heaviness"):
+        value = intero.get(key)
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            out[key] = round(float(value), 4)
+    return out
+
+
 def build_trace(session_id, payload, gate, captured):
     """Diagnostic row; purely observational (never drives gate/capture)."""
     data = payload if isinstance(payload, dict) else {}
@@ -8320,6 +8689,9 @@ def build_trace(session_id, payload, gate, captured):
         "ts": round(time.time(), 3),
         "session_id": sanitize_session_id(session_id),
         "state_delta": _trace_state_delta(data.get("state_delta")),
+        # absolute state, not just deltas: one-step prediction error can only be
+        # measured if every turn leaves its numbers behind
+        "affect": _trace_affect(data.get("state") or data.get("bio_state")),
         "intent": _trace_intent(data.get("intent")),
         "constraints": constraints,
         "length": _trace_length(data.get("length"), constraints),
