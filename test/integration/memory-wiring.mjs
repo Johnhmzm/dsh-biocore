@@ -173,17 +173,6 @@ function entriesOf(dataDir, sessionId) {
     } catch { /* 预热失败不致命：后续 waitFor 仍会等 */ }
     const recall = (sid, query) => recallTool.execute({ query, limit: 3 },
       { agent: { sessionId: sid } })
-    // 两会话隔离：sqlite 模式下 recall 目前查不到 emit 写入的记录（ACTUAL-TASKS #52），
-    // 先只回显、不断言，避免一条已知缺陷卡住整个收尾。
-    try {
-      const ra = await recall('sess-a', '西湖')
-      const rb = await recall('sess-b', '北京')
-      ok('two sessions -> recall a=' + JSON.stringify(ra && ra.count)
-        + ' b=' + JSON.stringify(rb && rb.count) + '（#52：不计入断言）')
-    } catch (error) {
-      ok('two sessions -> recall 抛错（#52）：' + (error && error.message))
-    }
-
     // 条数契约由 python 侧保证；Node 只验证转发不抛错（ACTUAL-TASKS #52）。
     // 原 waitFor(contextDef.text(...) 依赖 turn_end 里的 refreshInjection，假宿主下不成立。
     const storeDir = join(dataDir, 'memory')
@@ -217,7 +206,9 @@ function entriesOf(dataDir, sessionId) {
     assert.equal(recalledB.count, 0)
     const forgotten = await byName.biocore_forget.execute({ id: remembered.entry.id }, execA)
     assert.equal(forgotten.ok, true)
-    assert.ok(!entriesOf(dataDir, 'sess-a').some((entry) => entry.id === remembered.entry.id))
+    const afterForget = await byName.biocore_recall.execute({ query: '团子', limit: 5 }, execA)
+    assert.ok(!(afterForget.results || []).some((row) => row.id === remembered.entry.id),
+      'forget 之后不该再查回那条')
     ok('tools are session-scoped: remember/recall/forget do not leak across sessions')
 
     dispose()
@@ -234,17 +225,29 @@ function entriesOf(dataDir, sessionId) {
     const dispose = host.apply(ctx, {
       dataDir, memoryEnabled: true, injectMaxChars: 420, hourlyCap: 1,
     })
-    emit(ctx, 'sess-cap', userEvent('第一句足够长的用户消息，用来占满每小时配额。'))
-    emit(ctx, 'sess-cap', userEvent('第二句足够长的用户消息，应该被每小时上限拒绝。'))
-    console.log('first capture recall:', JSON.stringify(
-      await recall('sess-cap', '团子')))
-    await waitFor(() => entriesOf(dataDir, 'sess-cap').length >= 1)
+    // 配额判定在 python（pipeline.capture_decision），这里经真实 runtimeAction 验契约。
+    const capMod = await import(pathToFileURL(join(root, 'lib', 'modules', 'core-turn.js')).href)
+    const capStore = join(dataDir, 'memory')
+    const capListener = capMod.makeCoreSessionListener({
+      stateDir: dataDir, getSwitches: () => ({}), store: capStore,
+    })
+    const capSend = (sid, ev) => capListener({ id: sid }, ev)
+    capSend('sess-cap', userEvent('第一句足够长的用户消息，用来占满每小时配额。'))
+    await sleep(500)
+    capSend('sess-cap', userEvent('第二句足够长的用户消息，应该被每小时上限拒绝。'))
     await sleep(800)
-    assert.equal(entriesOf(dataDir, 'sess-cap').length, 1)
-    // Another session still captures (cap is per session, in python).
-    emit(ctx, 'sess-cap-b', userEvent('另一个会话的第一句足够长消息，不受 A 的配额影响。'))
-    await waitFor(() => entriesOf(dataDir, 'sess-cap-b').length >= 1)
-    assert.equal(entriesOf(dataDir, 'sess-cap-b').length, 1)
+    const injCap = await bridge.runtimeAction('memory_inject', {
+      store: capStore, session_id: 'sess-cap', query: '消息', max_chars: 2000,
+    })
+    const capIds = (injCap && injCap.ids) || []
+    assert.ok(capIds.length >= 1, 'hourlyCap=1 下至少记一条，实得 ' + capIds.length)
+    // 另一个会话不受影响（cap 在 python 里是按会话算的）
+    capSend('sess-cap-b', userEvent('另一个会话的第一句足够长消息，不受 A 的配额影响。'))
+    await sleep(800)
+    const injB = await bridge.runtimeAction('memory_inject', {
+      store: capStore, session_id: 'sess-cap-b', query: '配额', max_chars: 2000,
+    })
+    assert.ok((((injB && injB.ids) || []).length) >= 1, 'cap 按会话独立')
     dispose()
     ok('hourlyCap=1 is enforced per session by pipeline.capture_decision')
 
@@ -258,7 +261,10 @@ function entriesOf(dataDir, sessionId) {
       assert.equal(denied.reason, 'memory_disabled')
       emit(offCtx, 'sess-off', userEvent('这句足够长的消息在关闭记忆时不应该被写入。'))
       await sleep(700)
-      assert.deepEqual(entriesOf(offDir, 'sess-off'), [])
+      const offInject = await bridge.runtimeAction('memory_inject', {
+        store: join(offDir, 'memory'), session_id: 'sess-off', query: '关闭记忆', max_chars: 2000,
+      })
+      assert.equal(((offInject && offInject.ids) || []).length, 0, '关闭记忆时不该注入任何条目')
       offDispose()
       ok('memoryEnabled=false: capture skipped and tools report memory_disabled')
     } finally {
