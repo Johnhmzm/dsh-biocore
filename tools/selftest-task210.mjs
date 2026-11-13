@@ -293,8 +293,9 @@ try {
   await settle()
   assert.equal(calls.length, 1)
   assert.equal(calls[0].action, 'turn_start')
+  // payload 2026-11 增补：capture（#53 关记忆要真的不记）、memoryEnabled、body_state（每轮生理状态）
   assert.deepEqual(Object.keys(calls[0].payload).sort(),
-    ['session_id', 'store', 'switches', 'user_text'])
+    ['body_state', 'capture', 'memoryEnabled', 'session_id', 'store', 'switches', 'user_text'])
   assert.equal(calls[0].payload.user_text, '今天有点累')
   assert.equal(injectMod.promptTextFor('s212', 'turn'), '【本轮状态】核心\n- 长度：短')
 
