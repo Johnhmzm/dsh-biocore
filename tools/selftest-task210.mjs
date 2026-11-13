@@ -386,7 +386,7 @@ try {
       runAction: async (action, payload) => {
         stateCalls.push({ action, payload })
         // state.js 的 buildStateBody 读 core.core.* / core.memory.count / core.relationship.*，
-        // 桩必须给外层 core（2026-11 结构），否则 memory_count 取不到。
+        // 桩给外层 core（2026-11 结构）：/state 纯转发，形状由核心决定。
         return { ok: true, state: { core: { v: 0.1, intero: {}, now: 1762300000 },
           memory: { count: 3 },
           relationship: { closeness: 0.7, trust: 0.6, conflict: 0.1 } } }
@@ -396,8 +396,9 @@ try {
   assert.equal(stateCalls.length, 1)
   assert.equal(stateCalls[0].action, 'state')
   assert.equal(stateCalls[0].payload.session_id, 's212')
-  assert.equal(stateBody.memory_count, 3)
-  assert.equal(stateBody.relationship_metrics.closeness, 0.7)
+  // task-223：/state 是纯转发，形状由核心决定（lib/index.js:953-965）
+  assert.equal(stateBody.memory.count, 3, 'memory.count 原样转发')
+  assert.equal(stateBody.relationship.closeness, 0.7, 'relationship.closeness 原样转发')
   ok('task-212: panel /state calls runtimeAction("state") and merges memory/relationship')
 } finally {
   rmSync(task212Dir, { recursive: true, force: true })
