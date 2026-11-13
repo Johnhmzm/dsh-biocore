@@ -367,16 +367,7 @@
           <button id="modelSave" class="primary-button" type="button">保存设置</button>
           <button id="modelTest" class="ghost-button" type="button">测试 Embedding</button>
           <button id="rerankTest" class="ghost-button" type="button">测试 Rerank</button>
-        </div>
-      </section>
-
-      <section class="card" data-card-id="memory-settings" data-card-label="记忆设置">
-        <header class="card-head">
-          <i class="sq" aria-hidden="true"></i>
-          <b>MEMORY</b><span class="zh">/ 记忆设置</span>
-          <span class="r" id="msStatus">读取中</span>
-        </header>
-        <p class="group-title">总结模型</p>
+<p class="group-title">总结模型</p>
         <div class="field-grid">
           <label class="field field-wide"><span>Base URL</span>
             <input id="msSumBase" type="url" autocomplete="off" placeholder="https://api.deepseek.com">
@@ -396,45 +387,19 @@
         </div>
         <p class="hint ms-result" id="msSumResult">尚未测试</p>
 
-        <p class="group-title">向量模型</p>
-        <div class="field-grid">
-          <label class="field field-wide"><span>Base URL</span>
-            <input id="msEmbBase" type="url" autocomplete="off">
-          </label>
-          <label class="field"><span>模型</span>
-            <input id="msEmbModel" type="text" autocomplete="off">
-          </label>
-          <label class="field field-wide"><span>密钥</span>
-            <span class="ms-key-row">
-              <input id="msEmbKey" type="password" readonly autocomplete="new-password">
-              <button class="ghost-button ms-key-edit" data-ms-target="embedding" type="button">修改</button>
-            </span>
-          </label>
-        </div>
-        <div class="card-actions">
-          <button class="ghost-button ms-test" data-ms-target="embedding" type="button">测试</button>
-        </div>
-        <p class="hint ms-result" id="msEmbResult">尚未测试</p>
+        
 
-        <p class="group-title">重排模型</p>
-        <div class="field-grid">
-          <label class="field field-wide"><span>Base URL</span>
-            <input id="msRrBase" type="url" autocomplete="off">
-          </label>
-          <label class="field"><span>模型</span>
-            <input id="msRrModel" type="text" autocomplete="off">
-          </label>
-          <label class="field field-wide"><span>密钥</span>
-            <span class="ms-key-row">
-              <input id="msRrKey" type="password" readonly autocomplete="new-password">
-              <button class="ghost-button ms-key-edit" data-ms-target="rerank" type="button">修改</button>
-            </span>
-          </label>
+        
         </div>
-        <div class="card-actions">
-          <button class="ghost-button ms-test" data-ms-target="rerank" type="button">测试</button>
-        </div>
-        <p class="hint ms-result" id="msRrResult">尚未测试</p>
+      </section>
+
+      <section class="card" data-card-id="memory-settings" data-card-label="记忆设置">
+        <header class="card-head">
+          <i class="sq" aria-hidden="true"></i>
+          <b>MEMORY</b><span class="zh">/ 记忆设置</span>
+          <span class="r" id="msStatus">读取中</span>
+        </header>
+        
 
         <p class="group-title">开关</p>
         <label class="switch-row">

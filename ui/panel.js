@@ -1980,7 +1980,8 @@
     if (button) button.disabled = true
     setText('msHint', '保存中…')
     var jobs = []
-    var targets = ['summarizer', 'embedding', 'rerank']
+    // 记忆设置卡只写总结模型；向量与重排由「模型与接口」卡负责（一个参数一个入口）
+    var targets = ['summarizer']
     for (var i = 0; i < targets.length; i += 1) {
       var name = targets[i]
       var patch = payload[name]
