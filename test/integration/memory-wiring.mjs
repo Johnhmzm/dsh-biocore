@@ -11,7 +11,8 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 
-const root = fileURLToPath(new URL('..', import.meta.url))
+// 这个文件在 test/integration/：仓库根要再上一层（移动后从 '..' 改成 '../..'）
+const root = fileURLToPath(new URL('../..', import.meta.url))
 const host = await import(pathToFileURL(join(root, 'lib', 'index.js')).href)
 const captureMod = await import(pathToFileURL(join(root, 'lib', 'modules', 'memory-capture.js')).href)
 const injectMod = await import(pathToFileURL(join(root, 'lib', 'modules', 'memory-inject.js')).href)
@@ -154,6 +155,12 @@ function entriesOf(dataDir, sessionId) {
     // 工具对象是 { name, description, parameters, execute(args, exec) }，
     // 会话 id 取 exec.agent.sessionId，返回值扁平、条数在 count。
     const recallTool = ctx.tools.find((t) => t.name === 'biocore_recall')
+    // 就绪等待：首批事件在 bridge/worker 就绪前会被丢掉（#52 证据：a=0 b=1）。
+    // 先打一次工具调用把 bridge 拉起来，再发事件。
+    try {
+      await recallTool.execute({ query: 'warmup', limit: 1 },
+        { agent: { sessionId: 'warmup' } })
+    } catch { /* 预热失败不致命：后续 waitFor 仍会等 */ }
     const recall = (sid, query) => recallTool.execute({ query, limit: 3 },
       { agent: { sessionId: sid } })
     // 两会话隔离：sqlite 模式下 recall 目前查不到 emit 写入的记录（ACTUAL-TASKS #52），
