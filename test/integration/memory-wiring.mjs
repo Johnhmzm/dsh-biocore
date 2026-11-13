@@ -74,12 +74,6 @@ async function waitFor(check, timeout = 120000) {
 function sessionFile(dataDir, sessionId) {
   return join(dataDir, 'memory', 'sessions', sessionId, 'memory.json')
 }
-function entriesOf(dataDir, sessionId) {
-  const file = sessionFile(dataDir, sessionId)
-  if (!existsSync(file)) return []
-  const doc = JSON.parse(readFileSync(file, 'utf8'))
-  return Array.isArray(doc.entries) ? doc.entries : []
-}
 
 /* ---------- Node is thin: policy helpers are gone ---------- */
 {
