@@ -684,3 +684,11 @@ body.layout-editing [data-card-id].dragging { outline: 1px dashed var(--orange);
 @media (prefers-reduced-motion: reduce) {
   * { transition: none !important; }
 }
+
+/* 记忆设置（面板专用）：密钥行与结果行，复用现有变量与间距 */
+.ms-key-row { display: flex; gap: 8px; align-items: center; }
+.ms-key-row input { flex: 1 1 auto; }
+.ms-key-row .ghost-button { flex: 0 0 auto; }
+.ms-result { font-variant-numeric: tabular-nums; color: var(--muted, #8a8f98); }
+.ms-result[data-ok="false"] { color: var(--danger, #d9534f); }
+[data-card-id="memory-settings"] .group-title { margin-top: 14px; }

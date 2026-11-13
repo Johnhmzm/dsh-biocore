@@ -1304,18 +1304,36 @@
   function fillRecall(recall) {
     var chars = $('recallChars')
     var delivery = $('recallDelivery')
+    var events = $('recallEvents')
     if (!chars || !delivery) return
     var source = recall && typeof recall === 'object' ? recall : {}
     if (Number.isFinite(Number(source.inject_chars))) chars.value = String(source.inject_chars)
     delivery.value = source.delivery === 'event' ? 'event' : 'sentence'
+    if (events) {
+      var preset = Number(source.event_preset)
+      events.value = String(Number.isInteger(preset) ? clampEventPreset(preset) : 8)
+    }
+  }
+
+  /** 事件预算：1–20，整数；越界夹紧，非整数给 null 让调用方拒绝。 */
+  function clampEventPreset(value) {
+    return Math.max(1, Math.min(20, Math.round(value)))
   }
 
   function recallValues() {
     var chars = $('recallChars')
     var delivery = $('recallDelivery')
+    var events = $('recallEvents')
+    var preset = 8
+    if (events && String(events.value).trim() !== '') {
+      preset = Number(events.value)
+      if (!Number.isInteger(preset)) return null
+      preset = clampEventPreset(preset)
+    }
     return {
       inject_chars: chars ? Number(chars.value) : 14000,
       delivery: delivery && delivery.value === 'event' ? 'event' : 'sentence',
+      event_preset: preset,
     }
   }
 
@@ -1350,6 +1368,10 @@
     if (!button) return
     button.addEventListener('click', function () {
       var values = recallValues()
+      if (!values) {
+        setText('recallStatus', '事件预算必须是 1–20 的整数')
+        return
+      }
       setText('recallStatus', '保存中')
       button.disabled = true
       fetch('/api/biocore/settings', {
@@ -1361,7 +1383,7 @@
         .then(function (body) {
           if (body && body.ok === true) {
             fillRecall(body.recall)
-            setText('recallStatus', '已保存')
+            setText('recallStatus', '已保存，已生效')
             return
           }
           var detail = (body && (body.detail || body.reason)) || 'no_response'
@@ -1370,6 +1392,17 @@
         .catch(function () { setText('recallStatus', '未保存：连不上宿主') })
         .then(function () { button.disabled = false })
     })
+    var events = $('recallEvents')
+    if (events) {
+      events.addEventListener('change', function () {
+        var preset = Number(events.value)
+        if (!Number.isInteger(preset)) {
+          setText('recallStatus', '事件预算必须是 1–20 的整数')
+          return
+        }
+        events.value = String(clampEventPreset(preset))
+      })
+    }
   }
 
   function bindModelActions() {
@@ -1415,7 +1448,7 @@
         .then(function (response) { return response.ok ? response.json() : null })
         .then(function (body) {
           if (body && body.ok === true) {
-            setModelStatus(body.restart_required === false ? '已保存' : '已保存，重启后生效')
+            setModelStatus('已保存')
             return
           }
           saveModelDraft(values)
@@ -1792,6 +1825,229 @@
 
   /* ------------------------------------------------------------------ boot --- */
 
+
+  /* --- 记忆设置（新增）：只调 /api/biocore/action，白名单内三个动作 ------------- */
+
+  var MS_TARGETS = {
+    summarizer: { base: 'msSumBase', model: 'msSumModel', key: 'msSumKey', result: 'msSumResult' },
+    embedding: { base: 'msEmbBase', model: 'msEmbModel', key: 'msEmbKey', result: 'msEmbResult' },
+    rerank: { base: 'msRrBase', model: 'msRrModel', key: 'msRrKey', result: 'msRrResult' },
+  };
+
+  function msAction(action, payload) {
+    return fetch('/api/biocore/action', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', accept: 'application/json' },
+      body: JSON.stringify({ action: action, payload: payload || {} }),
+    }).then(function (response) {
+      return response.json().catch(function () { return null }).then(function (body) {
+        return { status: response.status, body: body }
+      })
+    })
+  }
+
+  function msSetResult(id, text, ok) {
+    var node = $(id)
+    if (!node) return
+    node.textContent = text
+    node.setAttribute('data-ok', ok === false ? 'false' : 'true')
+  }
+
+  function msEditKey(target) {
+    var map = MS_TARGETS[target]
+    if (!map) return
+    var field = $(map.key)
+    if (!field) return
+    if (field.readOnly) {
+      field.readOnly = false
+      field.value = ''
+      field.placeholder = '输入新密钥后点保存'
+      field.focus()
+      return
+    }
+    field.readOnly = true
+    field.value = field.getAttribute('data-masked') || ''
+    field.placeholder = ''
+  }
+
+  function msFillModel(target, block) {
+    var map = MS_TARGETS[target]
+    if (!map || !block) return
+    var base = $(map.base); if (base) base.value = block.base_url || ''
+    var model = $(map.model); if (model) model.value = block.model || ''
+    var key = $(map.key)
+    if (key) {
+      var masked = block.key || ''
+      key.value = masked
+      key.readOnly = true
+      key.setAttribute('data-masked', masked)
+      key.placeholder = block.has_key ? '' : '未配置'
+    }
+  }
+
+  function msFillSettings(settings) {
+    var s = settings || {}
+    var pairs = [['msTiered', 'tiered_delivery_on'], ['msPortraitOn', 'portrait_on'],
+                 ['msConsolidateOn', 'consolidate_on']]
+    for (var i = 0; i < pairs.length; i += 1) {
+      var node = $(pairs[i][0])
+      if (node) node.checked = Number(s[pairs[i][1]] || 0) === 1
+    }
+    var shape = $('msDetailShape')
+    if (shape) shape.checked = s.detail_shape === true
+    var preset = $('msEventPreset'); if (preset && s.event_preset != null) preset.value = String(s.event_preset)
+    var win = $('msWindow'); if (win && s.window != null) win.value = String(s.window)
+    var top = $('msPortraitTop'); if (top && s.portrait_top != null) top.value = String(s.portrait_top)
+  }
+
+  function msFillStatus(status) {
+    var st = status || {}
+    var repair = st.repair || {}
+    var rate = typeof repair.hit_rate === 'number' ? Math.round(repair.hit_rate * 1000) / 10 + '%' : '—'
+    setText('msRepair', rate + (repair.arm_count ? '（' + repair.shown_count + '/' + repair.arm_count + '）' : ''))
+    var con = st.consolidate || {}
+    setText('msConsolidate', con.status
+      ? con.status + (con.code ? '/' + con.code : '') + (con.members ? ' · ' + con.members + ' 行' : '')
+      : '—')
+    setText('msPortrait', String((st.portrait || {}).items != null ? (st.portrait || {}).items : '—'))
+    var log = st.access_log || {}
+    setText('msAccessToday', String(log.today != null ? log.today : '—'))
+  }
+
+  function loadMemorySettings() {
+    setText('msStatus', '读取中')
+    msAction('settings_get', {}).then(function (out) {
+      var body = out.body || {}
+      if (!body.ok) {
+        setText('msStatus', '读取失败 ' + (body.reason || body.code || out.status))
+        return
+      }
+      msFillModel('summarizer', (body.models || {}).summarizer)
+      msFillModel('embedding', (body.models || {}).embedding)
+      msFillModel('rerank', (body.models || {}).rerank)
+      msFillSettings(body.settings)
+      msFillStatus(body.status)
+      setText('msStatus', '已载入')
+    }).catch(function () { setText('msStatus', '读取失败 连不上宿主') })
+  }
+
+  function msCollect() {
+    function num(id, fallback) {
+      var node = $(id)
+      if (!node) return fallback
+      var value = Number(node.value)
+      return Number.isFinite(value) ? value : fallback
+    }
+    return {
+      summarizer: {
+        base_url: ($('msSumBase') || {}).value || '',
+        model: ($('msSumModel') || {}).value || '',
+        key: ($('msSumKey') || {}).readOnly ? undefined : ($('msSumKey') || {}).value,
+      },
+      embedding: {
+        base_url: ($('msEmbBase') || {}).value || '',
+        model: ($('msEmbModel') || {}).value || '',
+        key: ($('msEmbKey') || {}).readOnly ? undefined : ($('msEmbKey') || {}).value,
+      },
+      rerank: {
+        base_url: ($('msRrBase') || {}).value || '',
+        model: ($('msRrModel') || {}).value || '',
+        key: ($('msRrKey') || {}).readOnly ? undefined : ($('msRrKey') || {}).value,
+      },
+      settings: {
+        tiered_delivery_on: ($('msTiered') || {}).checked ? 1 : 0,
+        portrait_on: ($('msPortraitOn') || {}).checked ? 1 : 0,
+        consolidate_on: ($('msConsolidateOn') || {}).checked ? 1 : 0,
+        detail_shape: !!($('msDetailShape') || {}).checked,
+        event_preset: num('msEventPreset', 8),
+        window: num('msWindow', 1),
+        portrait_top: num('msPortraitTop', 8),
+      },
+    }
+  }
+
+  function msSave() {
+    var button = $('msSave')
+    var payload = msCollect()
+    if (button) button.disabled = true
+    setText('msHint', '保存中…')
+    var jobs = []
+    var targets = ['summarizer', 'embedding', 'rerank']
+    for (var i = 0; i < targets.length; i += 1) {
+      var name = targets[i]
+      var patch = payload[name]
+      var body = { base_url: patch.base_url, model: patch.model }
+      if (typeof patch.key === 'string' && patch.key !== '') body.key = patch.key
+      jobs.push(msAction('settings_set', { target: name, patch: { model: body } }))
+    }
+    jobs.push(msAction('settings_set', { patch: { settings: payload.settings } }))
+    Promise.all(jobs).then(function (results) {
+      var warned = []
+      var failed = []
+      for (var k = 0; k < results.length; k += 1) {
+        var body = (results[k] || {}).body || {}
+        if (body.ok !== true) failed.push(body.reason || body.code || ('http ' + (results[k] || {}).status))
+        var w = body.warned || []
+        for (var m = 0; m < w.length; m += 1) if (warned.indexOf(w[m]) < 0) warned.push(w[m])
+      }
+      if (failed.length) {
+        setText('msHint', '保存失败：' + failed.join('；'))
+        return
+      }
+      setText('msHint', warned.length ? ('已保存；' + warned.join('；')) : '已保存，立即生效')
+      loadMemorySettings()
+    }).catch(function () {
+      setText('msHint', '保存失败 连不上宿主')
+    }).then(function () { if (button) button.disabled = false })
+  }
+
+  function msTest(target) {
+    var map = MS_TARGETS[target]
+    var buttons = document.querySelectorAll('.ms-test')
+    for (var i = 0; i < buttons.length; i += 1) {
+      if (buttons[i].getAttribute('data-ms-target') === target) {
+        buttons[i].disabled = true
+        buttons[i].textContent = '测试中…'
+      }
+    }
+    msAction('test_connection', { target: target, detail_shape: true }).then(function (out) {
+      var body = out.body || {}
+      var line = target + ' · ok=' + (body.ok === true) + ' · ' + (body.ms != null ? body.ms + 'ms' : '—')
+        + ' · ' + (body.code || ('http ' + out.status))
+      msSetResult(map ? map.result : '', line, body.ok === true)
+    }).catch(function () {
+      msSetResult(map ? map.result : '', target + ' · ok=false · 连不上宿主', false)
+    }).then(function () {
+      for (var j = 0; j < buttons.length; j += 1) {
+        if (buttons[j].getAttribute('data-ms-target') === target) {
+          buttons[j].disabled = false
+          buttons[j].textContent = '测试'
+        }
+      }
+    })
+  }
+
+  function bindMemorySettings() {
+    var edits = document.querySelectorAll('.ms-key-edit')
+    for (var i = 0; i < edits.length; i += 1) {
+      edits[i].addEventListener('click', function (event) {
+        var target = event.currentTarget.getAttribute('data-ms-target')
+        msEditKey(target)
+      })
+    }
+    var tests = document.querySelectorAll('.ms-test')
+    for (var j = 0; j < tests.length; j += 1) {
+      tests[j].addEventListener('click', function (event) {
+        msTest(event.currentTarget.getAttribute('data-ms-target'))
+      })
+    }
+    var save = $('msSave')
+    if (save) save.addEventListener('click', msSave)
+    var reload = $('msReload')
+    if (reload) reload.addEventListener('click', loadMemorySettings)
+    loadMemorySettings()
+  }
+
   function boot() {
     watchTheme()
     renderVersions()
@@ -1807,6 +2063,7 @@
     loadPersona()
     bindModelActions()
   bindRecallActions()
+    bindMemorySettings()
     bindExpression()
     loadModelSettings()
     buildSwitches()
