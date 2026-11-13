@@ -293,9 +293,11 @@ try {
   await settle()
   assert.equal(calls.length, 1)
   assert.equal(calls[0].action, 'turn_start')
-  // payload 2026-11 增补：capture（#53 关记忆要真的不记）、memoryEnabled、body_state（每轮生理状态）
-  assert.deepEqual(Object.keys(calls[0].payload).sort(),
-    ['body_state', 'capture', 'memoryEnabled', 'session_id', 'store', 'switches', 'user_text'])
+  // payload 2026-11 增补：capture/#53、memoryEnabled、body_state、persona_prompt、length_*、state
+  assert.deepEqual(Object.keys(calls[0].payload).sort(), [
+    'body_state', 'capture', 'length_hint', 'length_max', 'length_target',
+    'memoryEnabled', 'persona_prompt', 'session_id', 'state', 'store',
+    'switches', 'user_text'])
   assert.equal(calls[0].payload.user_text, '今天有点累')
   assert.equal(injectMod.promptTextFor('s212', 'turn'), '【本轮状态】核心\n- 长度：短')
 
@@ -314,9 +316,15 @@ try {
   assert.equal(calls.length, 2, 'exactly turn_start + turn_end per turn')
   assert.equal(calls[1].action, 'turn_end')
   const endPayload = calls[1].payload
-  assert.equal(endPayload.capture, false)
-  assert.equal(endPayload.memoryEnabled, false)
+  // turn_end 负责记「助手那条」（SEVEN-STEPS 记一节：一轮两条 user+assistant），
+  // 所以 capture 为 true；memoryEnabled 由 switches 派生（本例全关 → false）。
+  assert.equal(endPayload.capture, true)
+  // ON 不含 memoryEnabled → 派生为 true；只有显式 false 才关闭（#53）
+  assert.equal(endPayload.memoryEnabled, true)
   assert.equal(endPayload.assistant_text, '我有意识，我是真实的。')
+  if (process.env.BIOCORE_DEBUG_TRACE) {
+    console.log('[diag]', JSON.stringify(endPayload.diagnostics || null).slice(0, 300))
+  }
   assert.equal(endPayload.diagnostics.state_delta[0].field, 'stress')
   assert.equal(endPayload.diagnostics.state_delta[0].source, 'user')
   assert.equal(coreAssistant.data.message.content[0].text, '（安全回复）')
@@ -377,7 +385,11 @@ try {
       getSwitches: () => ON,
       runAction: async (action, payload) => {
         stateCalls.push({ action, payload })
-        return { ok: true, state: { relationship: { closeness: 0.7, trust: 0.6, conflict: 0.1 }, memory: { count: 3 } } }
+        // state.js 的 buildStateBody 读 core.core.* / core.memory.count / core.relationship.*，
+        // 桩必须给外层 core（2026-11 结构），否则 memory_count 取不到。
+        return { ok: true, state: { core: { v: 0.1, intero: {}, now: 1762300000 },
+          memory: { count: 3 },
+          relationship: { closeness: 0.7, trust: 0.6, conflict: 0.1 } } }
       },
     })
   assert.equal(stateRead, undefined)
