@@ -287,11 +287,10 @@ try {
   assert.equal(typeof disposeApply, 'function')
   assert.ok(wired.some((row) => row[0] === 'on' && row[1] === 'session/event'))
   assert.ok(wired.some((row) => row[0] === 'on' && row[1] === 'system-prompt/assemble'))
-  const wiredContexts = wired.filter((row) => row[0] === 'context')
-  assert.ok(wiredContexts.some((row) => row[1] === 'biocore-expression-boot' && row[2] === -200))
-  assert.ok(wiredContexts.some((row) => row[1] === 'biocore-expression-turn' && row[2] === -190))
+  // 表达式上下文由 expression-inject.registerExpressionInjections 自己注册（见本文件前半段），
+  // host.apply 只负责 session/event 与 turn 监听（2026-11 拆分后）。
   disposeApply()
-  ok('host.apply: registers session/event + assemble waterfall + -200/-190 contexts')
+  ok('host.apply: registers session/event + assemble waterfall')
 
   /* ---------- optional: real biocore_runtime/pipeline.py integration ---------- */
   if (existsSync(runtimeClient.pipelinePath())) {
