@@ -629,6 +629,18 @@ body.layout-editing [data-card-id].dragging { outline: 1px dashed var(--orange);
   .brand { display: none; }
   .ttl { font-size: 12px; letter-spacing: .12em; }
   .ttl em { display: none; }
+
+/* 溯源卡片（trace 视图用；沿用现有变量，不加动画） */
+.trace-card {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px 12px;
+  border: 1px solid var(--line, #2a2a2a);
+  border-radius: 8px;
+}
+.trace-card .trace-title { font-weight: 600; }
+.trace-card .trace-body { font-size: 12px; line-height: 1.5; opacity: 0.85; }
   #topBuild { display: none; }
   #topClock { display: none; }
   .top-right { gap: 8px; min-width: 0; overflow: hidden; }
