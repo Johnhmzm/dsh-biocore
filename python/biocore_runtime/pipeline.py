@@ -4534,7 +4534,8 @@ def _sentence_recall_block(store, session_id, query, entries, events, payload=No
                 pool, _clean_qv,
                 preset=int(event_preset(store, payload)),
                 floor=float(_recall_param('relevant_floor', store, payload)),
-                now=now)
+                now=now,
+                text_mode=_recall_param('event_text_mode', store, payload))
             if _clean is not None:
                 logger.info('[delivery] clean mode=%s picked=%s shown=%s chars=%s',
                             _clean.get('mode'), _clean.get('picked'),
@@ -4668,6 +4669,7 @@ _RECALL_PARAM_CONST = {
     'pool': SENTENCE_RERANK_POOL, 'seed_k': SENTENCE_SEED_K,
     'relevant_floor': 0.20,
     'event_delivery_clean_on': 0,
+    'event_text_mode': 'raw',
 }
 
 

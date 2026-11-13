@@ -42,6 +42,8 @@ SPECS = {
     'relevant_floor': (0.20, 0.0, 1.0),
     # 干净的事件交付路径（新模块）开关；缺省关，旧路径继续生效
     'event_delivery_clean_on': (0, 0, 1),
+    # 交付用原文还是总结：raw（缺省）/ summary / auto（按时间分档）
+    'event_text_mode': ('raw', ('raw', 'summary', 'auto')),
     # 长：事件结算后顺手落一条画像（内容由总结层给，记忆侧只落盘），缺省关
     'portrait_on': (0, 0, 1),
 }
@@ -70,6 +72,7 @@ ENV_NAMES = {
     'portrait_on': 'BIOCORE_PORTRAIT_ON',
     'relevant_floor': 'BIOCORE_RELEVANT_FLOOR',
     'event_delivery_clean_on': 'BIOCORE_EVENT_DELIVERY_CLEAN',
+    'event_text_mode': 'BIOCORE_EVENT_TEXT_MODE',
 }
 
 
@@ -100,7 +103,22 @@ def _warn_once(key, fmt, *args):
 
 def resolve(name, payload=None, env=None):
     """一个参数的生效值：config > env > 默认，全部夹紧。"""
-    default, low, high = SPECS[name]
+    spec = SPECS[name]
+    if len(spec) == 2 and isinstance(spec[1], (tuple, list, set)):
+        # 字符串白名单型参数（例如 event_text_mode）：非法值回缺省并 warn，绝不进 _clamp
+        default, allowed = spec[0], tuple(spec[1])
+        data_s = payload if isinstance(payload, dict) else {}
+        recall_s = data_s.get('recall') if isinstance(data_s.get('recall'), dict) else {}
+        raw_s = recall_s.get(name)
+        if raw_s in (None, ''):
+            raw_s = (os.environ if env is None else env).get(ENV_NAMES[name])
+        value_s = str(raw_s if raw_s not in (None, '') else default).strip().lower()
+        if value_s not in allowed:
+            _warn_once((name, value_s), '[recall] %s=%r 不在 %s 里，回退 %s',
+                       name, value_s, '/'.join(allowed), allowed[0])
+            return allowed[0]
+        return value_s
+    default, low, high = spec
     data = payload if isinstance(payload, dict) else {}
     recall = data.get('recall') if isinstance(data.get('recall'), dict) else {}
     if name in recall:

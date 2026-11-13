@@ -38,6 +38,8 @@ SETTINGS_SPEC = {
     # 事件交付的相关性门槛（0..1）与干净交付路径开关（0/1）
     'relevant_floor': ('float', 0.0, 1.0),
     'event_delivery_clean_on': ('int', 0, 1),
+    # 交付用原文还是总结：raw / summary / auto（字符串白名单）
+    'event_text_mode': ('str', ('raw', 'summary', 'auto')),
 }
 
 # 设置名 -> recall 段里的键（detail_shape 是面板自己的开关，不进 recall）
@@ -50,6 +52,7 @@ RECALL_KEYS = {
     'portrait_top': 'recall.portrait_top',
     'relevant_floor': 'recall.relevant_floor',
     'event_delivery_clean_on': 'recall.event_delivery_clean_on',
+    'event_text_mode': 'recall.event_text_mode',
 }
 
 
@@ -253,6 +256,14 @@ def _apply_settings_patch(doc, patch, warned):
         spec = SETTINGS_SPEC[name]
         if spec[0] == 'bool':
             doc[name] = bool(value)
+            continue
+        if spec[0] == 'str':
+            allowed = tuple(spec[1])
+            text = str(value if value is not None else '').strip().lower()
+            if text not in allowed:
+                warned.append('%s=%r 不在 %s 里，已忽略' % (name, value, '/'.join(allowed)))
+                continue
+            recall[name] = text
             continue
         if spec[0] == 'float':
             number, warn = _clamp_float(name, value, spec[1], spec[2])

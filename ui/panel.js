@@ -1902,6 +1902,7 @@
     var floor = $('msRelevantFloor'); if (floor && s.relevant_floor != null) floor.value = String(s.relevant_floor)
     var clean = $('msEventDeliveryClean')
     if (clean) clean.checked = Number(s.event_delivery_clean_on || 0) === 1
+    var mode = $('msEventTextMode'); if (mode) mode.value = s.event_text_mode || 'raw'
   }
 
   function msFillStatus(status) {
@@ -1968,6 +1969,7 @@
         portrait_top: num('msPortraitTop', 8),
         relevant_floor: num('msRelevantFloor', 0.2),
         event_delivery_clean_on: ($('msEventDeliveryClean') || {}).checked ? 1 : 0,
+        event_text_mode: (($('msEventTextMode') || {}).value) || 'raw',
       },
     }
   }
