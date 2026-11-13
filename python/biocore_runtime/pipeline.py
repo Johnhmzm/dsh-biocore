@@ -4520,6 +4520,30 @@ def _sentence_recall_block(store, session_id, query, entries, events, payload=No
     # 否则明明有向量和原文，注入块却只剩下一个空壳。
     if str(delivery or "").strip().lower() == "event_rank" and not events:
         delivery = "sentence"
+    # 干净事件交付（开关默认关）：整件事全部原文 + 相关性门槛；只读、不写库。
+    _clean_flag = int(_recall_param('event_delivery_clean_on', store, payload) or 0)
+    if _clean_flag == 1:
+        try:
+            from biocore_memory.recall import event_delivery as _ED
+            _clean_qv = None
+            for _cand in (qvecs or []):
+                if _cand:
+                    _clean_qv = list(_cand)
+                    break
+            _clean = _ED.deliver_events(
+                pool, _clean_qv,
+                preset=int(event_preset(store, payload)),
+                floor=float(_recall_param('relevant_floor', store, payload)),
+                now=now)
+            if _clean is not None:
+                logger.info('[delivery] clean mode=%s picked=%s shown=%s chars=%s',
+                            _clean.get('mode'), _clean.get('picked'),
+                            _clean.get('shown'), _clean.get('chars'))
+                return _clean
+        except Exception as _ce:
+            logger.warning('[delivery] clean path failed, fallback to legacy: %s', str(_ce)[:120])
+    _rank_mode = str(delivery or "").strip().lower() == "event_rank"
+    _preset_now = max(1, event_preset(store, payload))
     if delivery == "sentence":
         # an exact index/concept hit leads; cosine orders the rest
         # 仅降级路径使用，事件模式不经过
@@ -4606,8 +4630,6 @@ def _sentence_recall_block(store, session_id, query, entries, events, payload=No
             logger.warning("[atomic] 句子块超预算（%d > %d），整块回退",
                            budget + int(_flat.get("over_by") or 0), budget)
         return _flat
-    _rank_mode = str(delivery or "").strip().lower() == "event_rank"
-    _preset_now = max(1, event_preset(store, payload))
     if _rank_mode:
         picked_events = ranked[:_preset_now]
     else:
