@@ -148,9 +148,19 @@ function entriesOf(dataDir, sessionId) {
     const contextDef = ctx.contexts.find((item) => item.name === 'biocore-memory')
     assert.ok(contextDef)
 
-    emit(ctx, 'sess-a', userEvent('我叫小林，今天在杭州西湖边出差，晚上想去湖滨走走。'))
-    emit(ctx, 'sess-a', assistantEvent('西湖边散步不错，湖滨晚上风大，记得加件外套。'))
-    emit(ctx, 'sess-b', userEvent('我在北京出差，今天去了故宫和景山公园，人很多。'))
+    // 宿主真实路径是 core-turn 的 turn listener（turn_start/turn_end 都带 capture:true），
+    // 而 registerMemoryCapture 那条 listener 实测未被宿主派发（ACTUAL-TASKS #52）。
+    const turnMod = await import(pathToFileURL(join(root, 'lib', 'modules', 'core-turn.js')).href)
+    const turnListener = turnMod.makeCoreSessionListener({
+      stateDir: dataDir, getSwitches: () => ({}), store: join(dataDir, 'memory'),
+    })
+    const send = (sid, event) => turnListener({ id: sid }, event)
+    send('sess-a', userEvent('我叫小林，今天在杭州西湖边出差，晚上想去湖滨走走。'))
+    await sleep(400)
+    send('sess-a', assistantEvent('西湖边散步不错，湖滨晚上风大，记得加件外套。'))
+    await sleep(400)
+    send('sess-b', userEvent('我在北京出差，今天去了故宫和景山公园，人很多。'))
+    await sleep(1200)
     // 断言“记忆能被查回来”，不再依赖某种存储布局（sqlite 下没有 memory.json）。
     // 工具对象是 { name, description, parameters, execute(args, exec) }，
     // 会话 id 取 exec.agent.sessionId，返回值扁平、条数在 count。
