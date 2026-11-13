@@ -35,6 +35,9 @@ SETTINGS_SPEC = {
     'event_preset': ('int', 1, 20),
     'window': ('int', 0, 2),
     'portrait_top': ('int', 1, 50),
+    # 事件交付的相关性门槛（0..1）与干净交付路径开关（0/1）
+    'relevant_floor': ('float', 0.0, 1.0),
+    'event_delivery_clean_on': ('int', 0, 1),
 }
 
 # 设置名 -> recall 段里的键（detail_shape 是面板自己的开关，不进 recall）
@@ -45,6 +48,8 @@ RECALL_KEYS = {
     'event_preset': 'recall.event_preset',
     'window': 'recall.window',
     'portrait_top': 'recall.portrait_top',
+    'relevant_floor': 'recall.relevant_floor',
+    'event_delivery_clean_on': 'recall.event_delivery_clean_on',
 }
 
 
@@ -227,6 +232,18 @@ def _apply_model_patch(doc, target, patch, warned):
     return doc
 
 
+def _clamp_float(name, value, low, high):
+    try:
+        number = float(value)
+    except Exception:
+        return None, '%s=%r 不是数字，未写入' % (name, value)
+    if number < low:
+        return low, '%s=%s 低于下限，夹到 %s' % (name, number, low)
+    if number > high:
+        return high, '%s=%s 高于上限，夹到 %s' % (name, number, high)
+    return number, ''
+
+
 def _apply_settings_patch(doc, patch, warned):
     recall = doc.get('recall') if isinstance(doc.get('recall'), dict) else {}
     for name, value in (patch or {}).items():
@@ -237,7 +254,10 @@ def _apply_settings_patch(doc, patch, warned):
         if spec[0] == 'bool':
             doc[name] = bool(value)
             continue
-        number, warn = _clamp_int(name, value, spec[1], spec[2])
+        if spec[0] == 'float':
+            number, warn = _clamp_float(name, value, spec[1], spec[2])
+        else:
+            number, warn = _clamp_int(name, value, spec[1], spec[2])
         if warn:
             warned.append(warn)
         if number is not None:
