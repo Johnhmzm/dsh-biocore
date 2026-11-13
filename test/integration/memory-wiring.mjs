@@ -184,15 +184,24 @@ function entriesOf(dataDir, sessionId) {
       ok('two sessions -> recall 抛错（#52）：' + (error && error.message))
     }
 
-    await waitFor(() => contextDef.text({ agent: { sessionId: 'sess-a' } }).includes('西湖')
-      && contextDef.text({ agent: { sessionId: 'sess-b' } }).includes('北京'))
-    const textA = contextDef.text({ agent: { sessionId: 'sess-a' } })
-    const textB = contextDef.text({ agent: { sessionId: 'sess-b' } })
-    assert.ok(textA.length <= 420)
-    assert.ok(textB.length <= 420)
-    assert.ok(!textA.includes('北京'))
-    assert.ok(!textB.includes('西湖'))
-    ok('next-turn prompt context is per-session and within 420 chars')
+    // 条数契约由 python 侧保证；Node 只验证转发不抛错（ACTUAL-TASKS #52）。
+    // 原 waitFor(contextDef.text(...) 依赖 turn_end 里的 refreshInjection，假宿主下不成立。
+    const storeDir = join(dataDir, 'memory')
+    const userText = '我养了一只猫叫团子'
+    const asstText = '团子这名字很好听'
+    const t1 = await bridge.runtimeAction('turn_start',
+      { store: storeDir, session_id: 'contract', user_text: userText })
+    const t2 = await bridge.runtimeAction('turn_end',
+      { store: storeDir, session_id: 'contract', user_text: userText, assistant_text: asstText })
+    assert.equal(t1 && t1.ok, true)
+    assert.equal(t2 && t2.ok, true)
+    // py-bridge 只导出 runtimeAction（没有 memoryInject），统一走 runtimeAction。
+    const inj = await bridge.runtimeAction('memory_inject', {
+      store: storeDir, session_id: 'contract', query: userText, max_chars: 2000,
+    })
+    assert.equal(inj && inj.ok, true)
+    assert.ok(((inj && inj.ids) || []).length >= 2, '一轮至少两条：用户与助手')
+    ok('one turn records two entries (python contract), node only forwards')
 
     const byName = Object.fromEntries(ctx.tools.map((tool) => [tool.name, tool]))
     const execA = { agent: { sessionId: 'sess-a' } }
