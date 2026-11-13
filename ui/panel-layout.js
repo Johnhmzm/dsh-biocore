@@ -47,6 +47,7 @@
 
     { id: 'persona', tab: 'settings', label: '人设', col: 0 },
     { id: 'model', tab: 'settings', label: '模型与接口', col: 0 },
+    { id: 'memory-settings', tab: 'settings', label: '记忆设置', col: 0 },
     { id: 'recall', tab: 'settings', label: '召回注入', col: 0 },
     { id: 'switches', tab: 'settings', label: '开关', col: 0 },
     { id: 'expression', tab: 'settings', label: '表达', col: 0 },
