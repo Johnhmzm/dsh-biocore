@@ -112,7 +112,9 @@ try {
   assert.ok(injectCalls.some((call) => call.phase === 'boot'))
   const turnCall = injectCalls.find((call) => call.phase === 'turn')
   assert.ok(turnCall, 'turn inject call')
-  assert.deepEqual(Object.keys(turnCall).sort(), ['phase', 'session_id', 'state', 'switches', 'user_text'])
+  // payload 在 2026-11 增加了 body_state（每轮生理状态，供 python 侧读）；断言随之更新。
+  assert.deepEqual(Object.keys(turnCall).sort(),
+    ['body_state', 'phase', 'session_id', 'state', 'switches', 'user_text'])
   assert.equal(turnCall.session_id, 's1')
   assert.equal(turnCall.user_text, '今天有点累')
   assert.equal(turnCall.switches.safety_enabled, true)
