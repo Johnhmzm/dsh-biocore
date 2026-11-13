@@ -302,8 +302,23 @@ def _summarizer_config(store):
                                     or "https://api.deepseek.com/v1"),
                     "model": str(block["model"]).strip(),
                     "key": str(block.get("key") or block.get("api_key") or "").strip()}
-    raise RuntimeError("summarizer config missing: core_config.json has no summarizer block "
-                       "(the event layer cannot close events without it)")
+    # 找不到就返回 None：核心仓支持"无摘要器也能只写结构"（_has_summarizer 那套），
+    # 这里 raise 会把整次 capture 打死（一条都记不进去）。限流 warn 一次。
+    _warn_no_summarizer_once()
+    return None
+
+
+_NO_SUMMARIZER_WARNED = {"done": False}
+
+
+def _warn_no_summarizer_once():
+    if _NO_SUMMARIZER_WARNED["done"]:
+        return
+    _NO_SUMMARIZER_WARNED["done"] = True
+    try:
+        print("[bridge] no summarizer block; capture works, events stay unclosed", file=sys.stderr)
+    except Exception:
+        pass
 
 
 def _llm_summarizer(prompt):
@@ -313,8 +328,8 @@ def _llm_summarizer(prompt):
     event layer buffers forever and no event ever exists (the production path had
     exactly that hole). This uses the host's own model over HTTPS.
     """
-    cfg = _summarizer_config(_SUMMARIZER_STORE[0])
-    key = cfg["key"] or _deepseek_key()
+    cfg = _summarizer_config(_SUMMARIZER_STORE[0]) or {}
+    key = cfg.get("key") or _deepseek_key()
     if not key:
         raise RuntimeError("summarizer config has no key and DEEPSEEK_API_KEY is unset")
     import urllib.request
@@ -347,10 +362,10 @@ def _memory_capture(argv):
     config = dict(config) if isinstance(config, dict) else {}
     _SUMMARIZER_STORE[0] = str(store or "")
     if not config.get("event_summarizer"):
-        # the host never supplied one; without it no event is ever generated.
-        # _llm_summarizer raises when core_config.json has no summarizer block.
-        _summarizer_config(store)
-        config["event_summarizer"] = _llm_summarizer
+        # 有配置才装摘耍器；没有就留 None —— 核心仓会只写结构（事件不闭合），
+        # 记一条总比一条都记不进去好。
+        if _summarizer_config(store):
+            config["event_summarizer"] = _llm_summarizer
     result = _pipeline().capture(session_id, role, text, store, config)
     decision = result.get("decision") if isinstance(result, dict) else {}
     decision = decision if isinstance(decision, dict) else {}
@@ -423,8 +438,8 @@ def _runtime_action(argv):
             raise RuntimeError("capture payload has no logical timestamp (now); "
                                "BIOCORE_STRICT_TS forbids falling back to the wall clock")
         if not payload.get("event_summarizer"):
-            _summarizer_config(store)
-            payload["event_summarizer"] = _llm_summarizer
+            if _summarizer_config(store):
+                payload["event_summarizer"] = _llm_summarizer
     return _emit(_pipeline().dispatch(action, payload))
 
 
