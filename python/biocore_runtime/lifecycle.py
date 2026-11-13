@@ -196,11 +196,17 @@ def arm_repair(store, reason="", now=None):
     doc = _read(root / REPAIR_FILE)
     if stamp < _num(doc.get("cooldown_until")):
         return False
+    # 计数与本次武装无关，跨武装累计：否则"修补行到底有没有用"永远无从判断
+    # （ACTUAL-TASKS 14）。arm_count 记"应该出现几次"，shown_count 记"真出现了几次"。
     doc = {"schema": SCHEMA, "armed": True, "reason": str(reason or "")[:40],
            "armed_at": round(stamp, 3),
            "expires_at": round(stamp + REPAIR_TTL_S, 3),
            "used_at": 0.0,
-           "cooldown_until": round(stamp + REPAIR_TTL_S + REPAIR_COOLDOWN_S, 3)}
+           "cooldown_until": round(stamp + REPAIR_TTL_S + REPAIR_COOLDOWN_S, 3),
+           "arm_count": int(_num(doc.get("arm_count"))) + 1,
+           "shown_count": int(_num(doc.get("shown_count"))),
+           "lines_shown": int(_num(doc.get("lines_shown"))),
+           "last_shown_at": _num(doc.get("last_shown_at"))}
     return _write(root / REPAIR_FILE, doc)
 
 
@@ -219,9 +225,39 @@ def repair_lines(store, now=None):
         return []
     doc["used_at"] = round(stamp, 3)
     doc["armed"] = False
+    lines = ["先修复关系：承认刚才越界或语气不对，不辩解。",
+             "降低对抗：句子短、语气软，先问对方现在的感受。"]
+    # 出现即计数：出现几行、几次，命中率 = shown_count / arm_count
+    doc["shown_count"] = int(_num(doc.get("shown_count"))) + 1
+    doc["lines_shown"] = int(_num(doc.get("lines_shown"))) + len(lines)
+    doc["last_shown_at"] = round(stamp, 3)
+    doc["arm_count"] = int(_num(doc.get("arm_count")))
     _write(root / REPAIR_FILE, doc)
-    return ["先修复关系：承认刚才越界或语气不对，不辩解。",
-            "降低对抗：句子短、语气软，先问对方现在的感受。"]
+    return lines
+
+
+def _hit_rate(shown, armed):
+    """命中率：武装了几次里，真出现几次。没有武装过就报 0.0，不报 null。"""
+    armed = int(armed or 0)
+    if armed <= 0:
+        return 0.0
+    return round(min(1.0, int(shown or 0) / float(armed)), 3)
+
+
+def repair_stats(store):
+    """checkup 用的修补行计数：出现几行、出现几次、命中率。
+
+    这些是痕迹（repair.json 里的累计量），不是记忆内容；读它不产生写。
+    """
+    doc = _read((_root(store) or Path(".")) / REPAIR_FILE)
+    armed = int(_num(doc.get("arm_count")))
+    shown = int(_num(doc.get("shown_count")))
+    return {"arm_count": armed,
+            "shown_count": shown,
+            "lines_shown": int(_num(doc.get("lines_shown"))),
+            "hit_rate": _hit_rate(shown, armed),
+            "last_shown_at": _num(doc.get("last_shown_at")),
+            "armed": bool(doc.get("armed"))}
 
 
 def repair_state(store):
@@ -230,4 +266,9 @@ def repair_state(store):
             "reason": str(doc.get("reason") or ""),
             "armed_at": _num(doc.get("armed_at")),
             "used_at": _num(doc.get("used_at")),
-            "cooldown_until": _num(doc.get("cooldown_until"))}
+            "cooldown_until": _num(doc.get("cooldown_until")),
+            "arm_count": int(_num(doc.get("arm_count"))),
+            "shown_count": int(_num(doc.get("shown_count"))),
+            "lines_shown": int(_num(doc.get("lines_shown"))),
+            "hit_rate": _hit_rate(_num(doc.get("shown_count")),
+                                 _num(doc.get("arm_count")))}

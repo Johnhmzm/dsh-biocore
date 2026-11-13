@@ -204,12 +204,20 @@ def cmd_checkup(args):
     if old:
         actions.append({"action": "eviction_snapshot",
                         "why": "entries older than 90d", "count": len(old)})
+    # 续：修补行到底有没有用。只看痕迹（repair.json 的累计量），不读正文。
+    repair_report = {}
+    try:
+        from biocore_runtime import lifecycle as _lifecycle
+        repair_report = _lifecycle.repair_stats(args.store)
+    except Exception as exc:      # 统计失败不该让体检失败
+        repair_report = {"error": type(exc).__name__}
     report = {"ok": not actions, "command": "checkup",
               "store": str(Path(args.store).resolve() / "memory.json"),
               "entries": len(entries),
               "index": {k: len(v) for k, v in index.items()},
               "recent": [{"id": e.get("id"), "ts": e.get("ts"),
                           "hits": e.get("hits")} for e in recent],
+              "repair_lines": repair_report,
               "top_actions": actions[:5]}
     return _emit(report, 1 if actions else 0)
 

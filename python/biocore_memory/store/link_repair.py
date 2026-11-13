@@ -54,6 +54,43 @@ def repair(entries, events) -> Dict[str, int]:
     return report
 
 
+def project_links(entries, events):
+    """只读投影：按事件成员快照补齐缺失的 event_id（和缺失的 turn）。
+
+    与 repair() 的区别只有一条：不就地改、不写库。交付路径（dispatch 只读）
+    只能用它——老库的行没有 event_id 时，按事件交付会退化成"一行一个事件"，
+    并列显示也就挂不上事件；这里补上，交付完就丢。
+
+    Returns: (rows, counts)；rows 是浅拷贝后的新列表，入参一行不动。
+    """
+    report = {'event_id': 0, 'turn': 0, 'total': 0}
+    if not isinstance(entries, list):
+        return [], report
+    by_entry = _index_events(events)
+    rows = []
+    for index, row in enumerate(entries, 1):
+        if not isinstance(row, dict):
+            rows.append(row)
+            continue
+        report['total'] += 1
+        copy = dict(row)
+        try:
+            turn = int(copy.get('turn') or 0)
+        except Exception:
+            turn = 0
+        if turn <= 0:
+            copy['turn'] = index
+            report['turn'] += 1
+        # 只补空，不覆盖：交付期不判定"谁的号更权威"（那是 repair() 的写路径职责），
+        # 有值就有值，错了也不在这里改。
+        eid = by_entry.get(str(copy.get('id') or ''))
+        if eid and not str(copy.get('event_id') or ''):
+            copy['event_id'] = eid
+            report['event_id'] += 1
+        rows.append(copy)
+    return rows, report
+
+
 def broken_counts(entries, events) -> Dict[str, int]:
     """修复前先量一下：多少条缺轮次、多少条缺事件、多少条对不上事件。"""
     if not isinstance(entries, list):

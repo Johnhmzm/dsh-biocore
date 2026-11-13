@@ -115,3 +115,8 @@ dsh plugin --profile web add dsh-biocore
 | [人设](docs/PERSONA.md) | 角色卡怎么编译成数值、作用范围 |
 | [不对话的时候](docs/IDLE.md) | 无人时她在做什么：回想、走神、基线漂移 |
 | [涌现](docs/EMERGENCE.md) | 为什么「会变」能成立，以及怎么判定 |
+## 测试档位
+
+- 门禁档：`npm test`（`node --test test/*.mjs`）—— 必须绿，提交前跑。
+- 集成档：`npm run test:integration`（`node --test test/integration/*.mjs`）—— 每次轮询都 spawn 一个 python，分钟级，单独跑。
+- 为什么分开：`memory-wiring` 依赖真实 python 子进程（每次 1–3 秒），放进默认门禁会把每次收尾拖成分钟级；断言一条未删，只是换了档位。

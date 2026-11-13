@@ -182,6 +182,8 @@ class MemoryEngine:
         self._audit = None
         self._rate_limiters = {}
         self._cooc = {}
+        # claim-bound entity names, memoised on the store's (size, last id)
+        self._vocab_memo = {"stamp": None, "names": []}
         self._last_graph_edge_count = 0
         self._last_slots_msg = ""
         self._last_slots_ts = 0.0
@@ -680,6 +682,29 @@ class MemoryEngine:
         except Exception:
             self._cooc = {}
 
+    def _claim_vocabulary(self):
+        """Names the store knows from its claims: the entity channel's dictionary.
+
+        Chinese questions cannot produce an entity from the Latin regex, so the
+        query side has to be matched against the names the write path already
+        bound. One scan per distinct (size, last id) is enough: the list only
+        changes when a row is written.
+        """
+        try:
+            entries = [e for e in self.store.entries if isinstance(e, dict)]
+        except Exception:
+            return []
+        stamp = (len(entries), str((entries[-1].get("id") if entries else "") or ""))
+        if self._vocab_memo.get("stamp") == stamp:
+            return self._vocab_memo.get("names") or []
+        try:
+            from .index import claim_entities as _ce
+            names = _ce.vocabulary(entries)
+        except Exception:
+            names = []
+        self._vocab_memo = {"stamp": stamp, "names": names}
+        return names
+
     def _apply_entity_boost(self, rows, query):
         if not self._flag("entity_boost"):
             return rows
@@ -693,7 +718,8 @@ class MemoryEngine:
         if not isinstance(self._cooc, dict) or not self._cooc:
             return rows
         try:
-            query_entities = cue_entities(str(query or "")).get("entities") or []
+            query_entities = cue_entities(
+                str(query or ""), vocabulary=self._claim_vocabulary()).get("entities") or []
         except Exception:
             query_entities = []
         if not query_entities:
@@ -1440,10 +1466,15 @@ class MemoryEngine:
             self._last_spatial_select = None
         depth = self._recall_depth()
         fetch = int(budget) if depth <= 5 else max(int(budget), depth)
+        _vocab = self._claim_vocabulary()
+        _cue_scorer = cue_score
+        if _vocab:
+            _cue_scorer = (lambda q, e, _names=_vocab:
+                           cue_score(q, e, vocabulary=_names))
         rows = recall_entries(pool, query, budget=fetch, vector=vector,
                               embedder=self.embedder,
                               three_channel=self.three_channel,
-                              now=float(self.now()), cue_scorer=cue_score,
+                              now=float(self.now()), cue_scorer=_cue_scorer,
                               cap=fetch)
         self._last_recall_stage = {"pool": len(rows), "depth": depth,
                                    "after_activation": len(rows),

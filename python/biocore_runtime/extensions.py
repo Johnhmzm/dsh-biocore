@@ -86,8 +86,40 @@ def _tokens(text):
     return out
 
 
+import logging as _logging
+
+logger = _logging.getLogger(__name__)
+
+# 实体扩展是取路径上的可选增强：条目太多时直接跳过（打 warn），
+# 不在一次 dispatch 里做 O(N^2) 的图谱构建。
+EXPAND_MAX_ENTRIES = 400
+
+_GRAPH_CACHE = {}
+_GRAPH_CACHE_MAX = 4
+
+
+def _entries_fingerprint(entries):
+    """条目集合的指纹：只看 (id, text) 与顺序，够用来判断“图谱还能不能复用”。"""
+    import hashlib as _hashlib
+    digest = _hashlib.sha1()
+    for entry in entries or []:
+        if not isinstance(entry, dict):
+            continue
+        digest.update(str(entry.get("id") or "").encode("utf-8", "ignore"))
+        digest.update(b"\x00")
+        digest.update(str(entry.get("text") or "").encode("utf-8", "ignore"))
+        digest.update(b"\x01")
+    return digest.hexdigest()
+
+
 def _entity_graph(entries):
     """Tiny in-memory graph: every concept token is a node, co-occurrence an edge."""
+    # 图谱只由条目内容决定：同一批条目重复构建没有意义，而且 upsert_edge 在
+    # 1295 条 × 8×8 组合下会把一次 dispatch 拖到 90 秒以上（实体扩展本应只读）。
+    key = _entries_fingerprint(entries)
+    cached = _GRAPH_CACHE.get(key)
+    if cached is not None:
+        return cached
     graph = _graph.empty_graph()
     names = {}
     for entry in entries or []:
@@ -113,6 +145,9 @@ def _entity_graph(entries):
             graph = updated[0] if isinstance(updated, tuple) else updated
         except Exception:
             pass
+    if len(_GRAPH_CACHE) >= _GRAPH_CACHE_MAX:
+        _GRAPH_CACHE.clear()
+    _GRAPH_CACHE[key] = (graph, names)
     return graph, names
 
 
@@ -147,6 +182,11 @@ def expand_recall(store, entries, query, picked_ids, now=None):
     """Add graph neighbours / dual-score rows; never raises."""
     stamp = float(now or time.time())
     picked_ids = [str(item) for item in (picked_ids or [])]
+    if len(entries or []) > EXPAND_MAX_ENTRIES:
+        # 结构未修好前，宁可跳过扩展（打 warn），也不要在取路径上做 O(N^2) 构建
+        logger.warning("[expand] entity_graph build skipped: %d entries > %d",
+                       len(entries), EXPAND_MAX_ENTRIES)
+        return []
     hits, graph_stats = graph_hits(entries, query, exclude=picked_ids)
     extra = []
     for entry in hits[:3]:

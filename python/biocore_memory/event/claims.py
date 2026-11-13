@@ -472,22 +472,29 @@ def render_claims(table, limit=8, turn_dates=None):
         current = [row for row in dicts if row.get("status") != "superseded"]
         retired = [row for row in dicts if row.get("status") == "superseded"]
         parts = []
-        # The current value is labelled first: a line that only says
-        # "superseded" leaves the reader with two candidates and no way to
-        # pick one, which is how "八月十八 -> 八月十六" became "无法确定".
-        if current:
-            row = current[-1]
-            weak = float(row.get("confidence") or 1.0) < 0.5
-            parts.append("【当前】%s%s%s"
-                         % (row.get("value"),
-                            _when(row.get("turn"), turn_dates),
+        # 语义是"同一件事又多了一次说法"，不是"后一条否定前一条"：
+        # 旧值不作废、不删、不标错，两条都带日期并列，新的在前。
+        # 都显示出来，让读者自己看出"说法变了"，我们不下判断。
+        newer = current[-1] if current else (retired[-1] if retired else None)
+        older = None
+        if newer is not None:
+            candidates = [row for row in retired if row is not newer]
+            if candidates:
+                older = candidates[-1]
+            # 同一取值只是日期不同：只显示较新那条（同一事实不必重复占位）
+            if older is not None and value_key(older.get("value")) == value_key(newer.get("value")):
+                older = None
+        if newer is not None:
+            weak = float(newer.get("confidence") or 1.0) < 0.5
+            parts.append("【%s】%s%s"
+                         % (newer.get("value"),
+                            _when(newer.get("turn"), turn_dates),
                             "，可信度低" if weak else ""))
-        # At most one retired value: the newest one. Two candidates are a
-        # question, three are noise.
-        for row in retired[-1:]:
-            parts.append("【已作废，仅供参考】%s%s"
-                         % (row.get("value"),
-                            _when(row.get("turn"), turn_dates)))
+        # 至多再列一条更早的说法：两条是"变了"，三条是噪声。
+        if older is not None:
+            parts.append("【%s】%s"
+                         % (older.get("value"),
+                            _when(older.get("turn"), turn_dates)))
         for value, turn in [row for row in rows if not isinstance(row, dict)]:
             parts.append("%s%s" % (value, _when(turn, turn_dates)))
         shown = "，".join(parts)

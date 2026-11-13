@@ -1,3 +1,5 @@
+// 这些测试等的是 <store>/sessions/<sid>/memory.json：把存储模式钉成 json（缺省已是 sqlite）
+process.env.BIOCORE_STORE = 'json'
 /** task-204 self-test: Node only transports; Python owns all policy.
  *
  * Asserts the frozen contract:

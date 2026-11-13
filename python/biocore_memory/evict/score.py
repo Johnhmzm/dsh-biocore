@@ -13,10 +13,13 @@ def eviction_score(entry, now=0.0, position=0.5, redundancy=0.0):
     pos = clamp01(position, 0.5)
     red = clamp01(redundancy, 0.0)
     conf = clamp01(e.get("memory_confidence"), 0.5)
-    try:
-        age = max(0.0, float(now or 0.0) - float(e.get("last_recall", e.get("ts", 0.0)) or 0.0))
-    except Exception:
-        age = 0.0
+    last = 0.0
+    for key in ("last_recall", "last_access", "last_used", "ts"):
+        try:
+            last = max(last, float(e.get(key) or 0.0))
+        except Exception:
+            continue
+    age = max(0.0, float(now or 0.0) - last)
     stale = min(1.0, age / 86400.0 / 30.0) if now else 0.0
     return round(EVICT_W_SALIENCE * salience + EVICT_W_POSITION * pos
                  + EVICT_W_REDUNDANCY * red

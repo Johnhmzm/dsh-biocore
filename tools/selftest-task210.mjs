@@ -1,3 +1,5 @@
+// 这些测试等的是 <store>/sessions/<sid>/memory.json：把存储模式钉成 json（缺省已是 sqlite）
+process.env.BIOCORE_STORE = 'json'
 /** task-210 self-test: DSH-only trace endpoint + panel fold.
  *
  * Python owns the file writer; this test feeds a temp <store>/traces/<sid>.jsonl

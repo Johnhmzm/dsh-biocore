@@ -80,6 +80,8 @@ EVENT_CAP_MODE = os.environ.get("BIOCORE_EVENT_CAP_MODE") or "flat"
 #          the guard row below already keeps the best-matching turn)
 #   min3 = at least 3, so a dense-note event still shows its best turn
 EVENT_CAP_STATS = {"events": 0, "skipped": 0, "rows": 0}
+# 交付期补链的 warn 账本：(session, event_id 数, turn 数) —— 同一组合只报一次
+_LINK_PROJECTION_WARNED = set()
 ADAPTIVE_WINDOW = int(os.environ.get("BIOCORE_ADAPTIVE_WINDOW") or 200)
 # [engineering] the drift threshold is learned from the *recent* distribution:
 # scanning the whole session on every recall grew with the store and never
@@ -97,16 +99,18 @@ EVENT_SIM_OVERRIDE = os.environ.get("BIOCORE_EVENT_SIM_CLOSE")
 EVENT_SIM_MIN = float(os.environ.get("BIOCORE_EVENT_SIM_MIN") or 0.25)
 EVENT_SIM_MAX = float(os.environ.get("BIOCORE_EVENT_SIM_MAX") or 0.75)
 # below EVENT_SIM_CLOSE a turn starts a new event
+# 以下四个是「缺省兜底」，不是权威：运行期值走 _recall_param(name, store, payload)
+# （config.recall > env > 本常量），见 ACTUAL-TASKS 30。
 EVENT_MAX_TURNS = int(os.environ.get("BIOCORE_EVENT_MAX_TURNS") or 12)
 # 0 = no hard cap; else split at N turns (a long event that never closes drags
 # its tail into every later query, so this is a ceiling, not a target)
 EVENT_MIN_TURNS = int(os.environ.get("BIOCORE_EVENT_MIN_TURNS") or 3)
 # a single line is never an event on its own
-EVENT_CLOSE_CHARS = int(os.environ.get("BIOCORE_EVENT_CLOSE_CHARS") or 2000)
+EVENT_CLOSE_CHARS = int(os.environ.get("BIOCORE_EVENT_CLOSE_CHARS") or 2000)  # 兜底：_recall_param('close_chars')
 # the primary signal: turns are a bad proxy for information (8 x "嗯" is 20
 # characters; 3 long descriptions are 2000), so an event closes when the text it
 # holds reaches this size -- roughly 3-5 sentences
-EVENT_MAX_CHARS = int(os.environ.get("BIOCORE_EVENT_MAX_CHARS") or 900)  # safety net
+EVENT_MAX_CHARS = int(os.environ.get("BIOCORE_EVENT_MAX_CHARS") or 900)  # safety net；兜底：_recall_param('max_chars')
 EVENT_GAP_S = float(os.environ.get("BIOCORE_EVENT_GAP_S") or 86400.0)
 # a day of silence also splits an event
 RECALL_COARSE_N = int(os.environ.get("BIOCORE_RECALL_COARSE_N") or 40)
@@ -144,7 +148,7 @@ RETRIEVE_TAIL = float(os.environ.get("BIOCORE_RETRIEVE_TAIL") or 0.15)
 BODY_SWITCH_KEY = "body"
 BODY_ON = str(os.environ.get("BIOCORE_BODY") or "0").strip().lower() in ("1", "true", "on", "yes")
 SENTENCE_RERANK_ON = str(os.environ.get("BIOCORE_SENTENCE_RERANK") or "1").strip().lower() not in ("0", "false", "off", "no")
-SENTENCE_RERANK_POOL = int(os.environ.get("BIOCORE_SENTENCE_RERANK_POOL") or 60)
+SENTENCE_RERANK_POOL = int(os.environ.get("BIOCORE_SENTENCE_RERANK_POOL") or 60)  # 兜底：_recall_param('pool')
 
 EVENT_SCORE_W_MAX = 0.9
 EVENT_SCORE_W_REST = 0.1
@@ -262,6 +266,8 @@ def tune_beta(store, session_id=None, limit=400, k=10):
     return best_beta, len(rows), best
 EVENT_SCORE_W_COUNT = float(os.environ.get("BIOCORE_EVENT_COUNT_W") or 0.3)
 EVENT_RELEVANT_COS = float(os.environ.get("BIOCORE_EVENT_RELEVANT") or 0.4)
+# 该参数目前没有消费点（全仓 grep 只有本行与等值性测试）：出口 _recall_param('relevant_cos')
+# 已备好，但加门禁会改变 events_shown，属于行为改动，待单独量化后再接。
 # 分数门槛用相对量：不同 embedding / rerank 模型的刻度不同，写死绝对值换模型就失效。
 # 保留一个绝对下限，防止"最高分本来就很低"时仍然放行一堆噪声。
 SCORE_RATIO = float(os.environ.get("BIOCORE_SCORE_RATIO") or 0.6)
@@ -270,7 +276,7 @@ EVENT_SCORE_TOL = 0.03
 # best-line gaps below this count as a tie; the overall level decides
 # one lucky sentence must not outrank a consistently relevant event,
 # so the score mixes the best line with the top-3 mean
-SENTENCE_SEED_K = int(os.environ.get("BIOCORE_SENTENCE_SEED_K") or 40)
+SENTENCE_SEED_K = int(os.environ.get("BIOCORE_SENTENCE_SEED_K") or 40)  # 兜底：_recall_param('seed_k')，暂无消费点
 # seed sentences are the point; their events are expanded to full text
 # below, and expanded rows never pass the rerank top-K cut
 EXPAND_EVENTS = str(os.environ.get("BIOCORE_EXPAND_EVENTS", "1")).strip().lower() not in ("0", "off", "false", "no")
@@ -419,6 +425,46 @@ except Exception:  # pragma: no cover
     except Exception:
         _point_expand = None
 
+try:  # event maintenance decisions: pure (threshold, close, bisect)
+    from biocore_memory.recall import eventmaint as _eventmaint
+except Exception:  # pragma: no cover
+    try:
+        from .biocore_memory.recall import eventmaint as _eventmaint
+    except Exception:
+        _eventmaint = None
+
+try:  # delivery plan: pure (stage order only, no store, no env)
+    from biocore_memory.recall import orchestration as _recall_plan
+except Exception:  # pragma: no cover
+    try:
+        from .biocore_memory.recall import orchestration as _recall_plan
+    except Exception:
+        _recall_plan = None
+
+try:  # event packing: pure (fold short events, stable ids)
+    from biocore_memory.recall import eventpack as _eventpack
+except Exception:  # pragma: no cover
+    try:
+        from .biocore_memory.recall import eventpack as _eventpack
+    except Exception:
+        _eventpack = None
+
+try:  # scoring and ranking: pure (no store, no env, no file)
+    from biocore_memory.recall import scoring as _recall_scoring
+except Exception:  # pragma: no cover
+    try:
+        from .biocore_memory.recall import scoring as _recall_scoring
+    except Exception:
+        _recall_scoring = None
+
+try:  # delivery rendering (block text, ids): pure, no selection, no model
+    from biocore_memory.recall import delivery as _recall_delivery
+except Exception:  # pragma: no cover
+    try:
+        from .biocore_memory.recall import delivery as _recall_delivery
+    except Exception:
+        _recall_delivery = None
+
 try:  # segment recall (Zacks 2007 / TextTiling): the retrieval unit is the event
     from biocore_memory.recall import segments as _segments
 except Exception:  # pragma: no cover
@@ -434,6 +480,14 @@ except Exception:  # pragma: no cover
         from .biocore_memory.event import segment as _segment
     except Exception:
         _segment = None
+
+try:  # 上下文总结: the first link of the recall chain (summary -> proposition -> sentence)
+    from biocore_memory.recall import context_seed as _context_seed
+except Exception:  # pragma: no cover
+    try:
+        from .biocore_memory.recall import context_seed as _context_seed
+    except Exception:
+        _context_seed = None
 
 try:  # usage feedback + axis-weight learning (spatial_feedback / spatial_learn)
     from biocore_memory import space_learning as _learning
@@ -950,6 +1004,41 @@ def _db_stamp(root, session_id):
             pass
 
 
+def _doc_token(root, session_id):
+    """缓存的便宜 token：(data_version, 主库 mtime, -wal mtime, 行数, 最大 rowid)。
+
+    以前每次 load 都 _serialize_entries(全部 entries) 算指纹，n=1295 时 693 ms，
+    占整次 load 的八成。这里换成常数级：一次 PRAGMA + 一次聚合查询 + 两个 stat。
+    五个分量各挡一类变化——
+      data_version：别的连接提交（含改内容）；
+      mtime / -wal mtime：WAL 模式下正文提交不一定动主库时间；
+      行数：追加与删除；
+      最大 rowid：追加（写回同一条不会变，靠前面几项）。
+    """
+    path = _db_path(root, session_id)
+    conn = None
+    try:
+        conn = _sql_store().connect(root, session_id)
+        data_version = int(conn.execute("PRAGMA data_version").fetchone()[0])
+        row = conn.execute("SELECT COUNT(1), COALESCE(MAX(rowid), 0) FROM entries").fetchone()
+        rows, max_rowid = int(row[0] or 0), int(row[1] or 0)
+    except Exception:
+        return None
+    finally:
+        try:
+            if conn is not None:
+                conn.close()
+        except Exception:
+            pass
+    stamps = []
+    for candidate in (path, path.with_name(path.name + "-wal")):
+        try:
+            stamps.append(candidate.stat().st_mtime_ns)
+        except Exception:
+            stamps.append(0)
+    return (data_version, stamps[0], stamps[1], rows, max_rowid)
+
+
 def _file_stamp(path):
     try:
         info = Path(path).stat()
@@ -968,6 +1057,10 @@ def _copy_doc(doc):
         # every returned row carries a vector list: [] means "this row has none",
         # a missing key or None reads as "we never looked" and silently turned
         # sentence recall into "first N in order"
+        # 仅供召回期内存副本使用；任何写回路径都不得使用本函数的输出——
+        # 写回请用 sql_store.update_trace_fields（纯 SQL 定点改）。
+        # 现场：2026-11-13 交付路径用本函数的输出整页写回，vector: null 被写成 []，
+        # 于是“有没有向量”的判断翻转，补齐逻辑可能永久跳过该条。
         copy["vector"] = list(copy.get("vector") or [])
         rows.append(copy)
     out["entries"] = rows
@@ -1023,7 +1116,7 @@ def load_memory(store, session_id):
         doc.setdefault("session_id", session_id)
         return doc
     path = _db_path(root, session_id)
-    token = _db_stamp(root, session_id)
+    token = _doc_token(root, session_id)
     cached = _MEM_DOC_CACHE.get(str(path))
     if cached is not None and token is not None and cached[0] == token:
         return _copy_doc(cached[2])
@@ -1046,7 +1139,8 @@ def load_memory(store, session_id):
                 pass
     doc = store_api.read_doc(root, session_id, with_vectors=True)
     doc["session_id"] = str(doc.get("session_id") or session_id)
-    _remember_doc(path, doc, _serialize_entries(doc["entries"]), token)
+    # 读路径不再序列化整份文档：serialized 留空，写路径缺基线时自己回读一次。
+    _remember_doc(path, doc, {}, token)
     return _copy_doc(doc)
 
 
@@ -1069,7 +1163,7 @@ def save_memory(store, session_id, doc):
                    if isinstance(row, dict)]
         serialized = _serialize_entries(entries)
         cached = _MEM_DOC_CACHE.get(str(path))
-        previous = cached[3] if cached is not None else None
+        previous = cached[3] if cached is not None and cached[3] else None
         if previous is None:
             previous = {row_id: raw for row_id, raw in
                         store_api.read_entry_rows(root, session_id)}
@@ -1078,7 +1172,7 @@ def save_memory(store, session_id, doc):
                    != serialized.get(str(row.get("id") or ""))]
         deleted = [row_id for row_id in previous if row_id not in serialized]
         store_api.write_doc(root, session_id, doc, changed=changed, deleted=deleted)
-        _remember_doc(path, doc, serialized, _db_stamp(root, session_id))
+        _remember_doc(path, doc, serialized, _doc_token(root, session_id))
         return True
     except Exception:
         return False
@@ -1152,6 +1246,42 @@ def _visible(entries):
     return [entry for entry in (entries or [])
             if isinstance(entry, dict) and not entry.get("deleted")
             and not entry.get("archived")]
+
+
+def _scoped_load(store, session_id, scope=None):
+    """一次请求内只读一遍库：给了 scope 就复用，否则照旧每次读。"""
+    if scope is None:
+        return load_memory(store, session_id)
+    return scope.load(("doc", str(_store_root(store)), str(session_id)),
+                      lambda: load_memory(store, session_id))
+
+
+def _visible_for_recall(store, session_id, entries, now=None):
+    """回忆期筛选：很久没被用过的不取出来（总则第 3 条，只读）。
+
+    只看得到证据的：日志最新 at 与老数据时间列取较大者；两者都没有的保留
+    （读路径上错杀不可见，宁可取到一条旧记忆）。库一行不动。
+    """
+    try:
+        from biocore_memory.evict import policy as _policy
+        from biocore_memory.store import access_log as _access_log
+        # 缺省关：这条筛选会真的改变"取到什么"，默认 90 天会把老库一次筛空。
+        if not int(_recall_param('forget_filter_on', store) or 0):
+            return list(entries or [])
+        root = _store_root(store)
+        if root is None:
+            return list(entries or [])
+        latest = _access_log.latest_by_entry(_db_path(root, session_id), session_id)
+        kept, dropped = _policy.forget_filter(entries, latest,
+                                              now=float(now if now is not None
+                                                        else time.time()))
+        if dropped:
+            logger.info("[forget] 本轮筛掉 %d 条久未使用的记忆（只读）", len(dropped))
+        return kept
+    except Exception as exc:
+        logger.warning("[forget] 筛选跳过（%s: %s）", type(exc).__name__,
+                       str(exc)[:100])
+        return list(entries or [])
 
 
 def _compact(entry):
@@ -1235,6 +1365,8 @@ def capture_decision(session_id, role, text, state):
 
 
 _SUMMARIZER_CACHE = {}
+# 401/403 说明这份 key 根本不能用：记下来，之后直接失败，不再等网络
+_SUMMARIZER_DEAD = {}
 
 
 def summarizer_from_config(store, payload=None):
@@ -1283,6 +1415,9 @@ def summarizer_from_config(store, payload=None):
     def _summarise(prompt):
         """One chat-completions call; returns the assistant text."""
         import urllib.request
+        if _SUMMARIZER_DEAD.get(cache_key):
+            # an unauthorized key never starts working by being asked again
+            raise RuntimeError("summarizer disabled: %s" % _SUMMARIZER_DEAD[cache_key])
         url = base_url.rstrip("/") + "/chat/completions"
         request_payload = {"model": model, "temperature": 0,
                            "thinking": dict(thinking_payload),
@@ -1306,6 +1441,11 @@ def summarizer_from_config(store, payload=None):
                     body = response.read()
             except Exception as exc:      # timeout / connection reset
                 last_error = exc
+                _code = getattr(exc, "code", None)
+                if _code in (401, 403):
+                    # 无效凭据：重试只会再等一次超时，直接判死并停止后续调用
+                    _SUMMARIZER_DEAD[cache_key] = "unauthorized (%s)" % _code
+                    raise
                 if attempt == 0:
                     time.sleep(1.0)
                     continue
@@ -2085,43 +2225,123 @@ def _rerank_entries(query, entries, rerank_config):
     return ordered or None
 
 
-def _mark_access(store, session_id, ids, now=None):
-    """记一次「被取用」：淘汰层要的 last_used 与 hits 靠它。
+def _mark_access(store, session_id, ids, now=None, query_fp=''):
+    """记一次「被取用」：**只追加一行使用日志**，不改记忆本体。
+
+    淘汰层要的"最后一次被用"由 access_log 的最新 at 与老数据的时间列取较大者得到。
 
     没有这两样，淘汰分只能靠重要度一项，76 6 条全会被判成"该归档"。
     """
     if not ids:
         return 0
     stamp = float(now if now is not None else time.time())
-    want = {str(i) for i in ids if i}
+    want = []
+    for item in ids or []:
+        text = str(item or "")
+        if text and text not in want:
+            want.append(text)
+    if not want:
+        return 0
+    # 总则第 2 条：痕迹不进记忆本体。只向 access_log 追加行，entries 一个字节都不动。
     try:
-        doc = load_memory(store, session_id)
-        changed = []
-        for row in doc.get("entries") or []:
-            if not isinstance(row, dict):
-                continue
-            if str(row.get("id") or "") in want:
-                row["hits"] = int(row.get("hits") or 0) + 1
-                row["last_used"] = round(stamp, 3)
-                changed.append(row)
-        if changed:
-            _api = _sql_store()
-            _api.write_doc(_store_root(store), session_id, doc,
-                           changed=changed, deleted=[])
-        return len(changed)
+        from biocore_memory.store import access_log as _access_log
+        root = _store_root(store)
+        if root is None:
+            return 0
+        written = _access_log.append(_db_path(root, session_id), session_id, want,
+                                     at=stamp, query_fp=query_fp)
+        return int(written or 0)
     except Exception as exc:
-        logger.warning("[access] 记录失败：%s", str(exc)[:100])
+        # 写失败不影响交付：一行 warn，交付照旧
+        logger.warning("[access] 痕迹追加失败（%s 条）：%s: %s",
+                       len(want), type(exc).__name__, str(exc)[:80])
+        return 0
+
+
+def _access_ids_for_block(store, session_id, ids, scope=None):
+    """把交付块的 id 换成记忆条目的 id。
+
+    事件层返回的是 event_id（见 _event_layer_block 的 "ids"），而淘汰层的老化
+    按记忆条目算——两者不是同一套 id。句子/片段/query 路径本来就给条目 id，
+    所以这里先认条目 id，认不出的再按事件展开成成员条目，交付方不必各写一套。
+    """
+    want = []
+    for item in ids or []:
+        text = str(item or "")
+        if text and text not in want:
+            want.append(text)
+    if not want:
+        return []
+    rows = _scoped_load(store, session_id, scope).get("entries") or []
+    known = set()
+    for row in rows:
+        if isinstance(row, dict):
+            known.add(str(row.get("id") or ""))
+    out = [i for i in want if i in known]
+    rest = [i for i in want if i not in known]
+    if rest:
+        try:
+            wanted = set(rest)
+            state = _load_event_state(store, session_id)
+            for ev in state.get("events") or []:
+                if not isinstance(ev, dict) or str(ev.get("event_id") or "") not in wanted:
+                    continue
+                for item in ev.get("entries") or []:
+                    rid = str((item or {}).get("id") or "")
+                    if rid and rid in known and rid not in out:
+                        out.append(rid)
+        except Exception as exc:
+            logger.warning("[access] 事件→条目解析失败：%s", str(exc)[:100])
+    return out
+
+
+def _mark_block_access(store, session_id, block, now=None, query='', scope=None):
+    """写回「这一块真的交付了」：hits+1、last_used=now。
+
+    淘汰层的年龄项只读 last_used（biocore_memory.evict.policy._age_seconds）。
+    此前只有句子分支在返回前调 _mark_access，event_rank 等交付路径直接 return，
+    last_used 恒为 0，于是每条记忆都从创建时间开始变老——读得再勤也会过期。
+    交付点统一写一次，不在各分支重复记，避免同一次交付被计两次。
+    """
+    try:
+        # 只写回真正的命中行：窗口带进来的邻居只是“陪着发出去”，
+        # 记成被用到会让 last_used 虚高，忘的年龄判定跟着失真。
+        source = block.get("hits")
+        if not isinstance(source, (list, tuple)) or not source:
+            source = (block or {}).get("ids") or []
+        raw = [str(i) for i in source if i]
+    except Exception:
+        return 0
+    if not raw:
+        return 0
+    try:
+        ids = _access_ids_for_block(store, session_id, raw, scope=scope)
+    except Exception as exc:
+        logger.warning("[access] 交付 id 解析失败：%s", str(exc)[:100])
+        return 0
+    if not ids:
+        return 0
+    try:
+        from biocore_memory.core.util import sha12
+        fp = sha12(str(query or '')) if str(query or '').strip() else ''
+        return _mark_access(store, session_id, ids,
+                            now=float(now if now is not None else time.time()),
+                            query_fp=fp)
+    except Exception as exc:
+        logger.warning("[access] 交付写回失败：%s", str(exc)[:100])
         return 0
 
 
 def _query_entries(store, session_id, query, top_k, rerank_config,
-                   now=None, include_superseded=False):
+                   now=None, include_superseded=False, scope=None):
     """engine.recall(query) over the injected candidates; None means fallback.
 
     now anchors retrieval to the moment the question was asked (Howard &
     Kahana 2002); include_superseded=True is the historical question.
     """
-    entries = _visible(load_memory(store, session_id).get("entries"))
+    entries = _visible_for_recall(store, session_id,
+                                  _visible(_scoped_load(store, session_id, scope).get("entries")),
+                                  now=now)
     if not entries:
         return None
     if _versioning is not None:
@@ -2969,6 +3189,8 @@ def _unit_texts(text, target=None):
     return [x for x in merged if len(x) >= UNIT_MIN_CHARS] or [raw.strip()]
 
 
+# 保存路径上的建单元时间上限（秒）：桥接 90s 会杀 turn_end，这里必须留足余量
+UNIT_BUILD_SECONDS = float(os.environ.get("BIOCORE_UNIT_BUILD_SECONDS") or 8)
 UNIT_EMBED_CHUNK = int(os.environ.get("BIOCORE_UNIT_CHUNK") or 32)
 UNIT_EMBED_WORKERS = int(os.environ.get("BIOCORE_UNIT_WORKERS") or 6)
 
@@ -3026,8 +3248,13 @@ def _embed_chunked(batch, one, texts):
     return out
 
 
-def _ensure_units(store, session_id, entries=None):
-    """Build missing proposition vectors for a session; returns units written."""
+def _ensure_units(store, session_id, entries=None, budget_seconds=None):
+    """Build missing proposition vectors for a session; returns units written.
+
+    Runs on the save path, so it is time-capped: a slow embedder must never
+    push turn_end past the bridge timeout, and anything left over is picked up
+    on the next turn (the builder is incremental by design).
+    """
     if not UNIT_INDEX_ON:
         return 0
     root = _store_root(store)
@@ -3041,10 +3268,17 @@ def _ensure_units(store, session_id, entries=None):
             return 0
         have = store_api.unit_ids_with_vectors(root, session_id)
         pending = []
+        _deadline = None
+        if budget_seconds:
+            _deadline = time.time() + max(0.5, float(budget_seconds))
         for entry in rows:
+            if _deadline is not None and time.time() > _deadline:
+                break
             entry_id = str(entry.get("id") or "")
             text = str(entry.get("text") or "").strip()
-            if not entry_id or not text or not entry.get("vector"):
+            # a proposition needs the text only: the row vector lives in the
+            # entries table and is irrelevant to unit building
+            if not entry_id or not text:
                 continue
             units = _unit_texts(text)
             if not units:
@@ -3058,6 +3292,18 @@ def _ensure_units(store, session_id, entries=None):
         embed_many = _event_embed_fn(store, config, None)
         batch = getattr(embed_many, "embed_many", None)
         texts = [u for _e, units in pending for u in units]
+        if _deadline is not None:
+            # take whole entries only: a half-built entry would be rebuilt from
+            # scratch next turn, which wastes the embeddings already paid for
+            _cap = UNIT_EMBED_CHUNK * max(1, UNIT_EMBED_WORKERS)
+            _picked, _count = [], 0
+            for _item in pending:
+                if _picked and _count + len(_item[1]) > _cap:
+                    break
+                _picked.append(_item)
+                _count += len(_item[1])
+            pending = _picked
+            texts = [u for _e, units in pending for u in units]
         vectors = _embed_chunked(batch, embed_many, texts)
         payload, cursor = {}, 0
         for entry_id, units in pending:
@@ -3188,7 +3434,18 @@ def _save_event_state(store, session_id, state):
                 # proposition units are derived from the vectors above: build the
                 # ones the session is still missing now that coordinates exist
                 try:
-                    _ensure_units(store, session_id)
+                    # 8s ceiling: the bridge kills turn_end at 90s, and a slow
+                    # embedder must not take the whole turn down with it.
+                    # Pass the rows we already have: load_memory() can still be
+                    # serving the previous document, so the message captured a
+                    # second ago would never get its propositions built.
+                    _fresh = []
+                    for _ev in list(events) + list(opened):
+                        for _row in (_ev.get("entries") or []):
+                            if isinstance(_row, dict) and _row.get("id"):
+                                _fresh.append(_row)
+                    _ensure_units(store, session_id, entries=(_fresh or None),
+                                  budget_seconds=UNIT_BUILD_SECONDS)
                 except Exception:
                     pass
             except Exception:
@@ -3508,35 +3765,14 @@ def _event_layer_close(events, buf, summarizer, global_state, store=None,
 
 
 def _fold_event(dst, src):
-    """Fold src into dst: members, span, centroid, note and claims all follow."""
-    dst["entries"] = (dst.get("entries") or []) + (src.get("entries") or [])
-    dst["members"] = (dst.get("members") or []) + (src.get("members") or [])
-    dst["start"] = min(int(dst.get("start") or 0), int(src.get("start") or 0))
-    dst["end"] = max(int(dst.get("end") or 0), int(src.get("end") or 0))
-    dst["text"] = ((dst.get("text") or "") + "\n" + (src.get("text") or "")).strip()
-    dst["tokens"] = int(dst.get("tokens") or 0) + int(src.get("tokens") or 0)
-    dst["vector"] = _mean_vector([item.get("vector") for item in dst["entries"]])
-    note = str(src.get("overview") or "").strip()
-    if note and note not in str(dst.get("overview") or ""):
-        dst["overview"] = (str(dst.get("overview") or "") + "；" + note).strip("；")
-    dst["claims"] = (dst.get("claims") or []) + (src.get("claims") or [])
-    return dst
+    """Adapter: folding lives in biocore_memory.recall.eventpack (kept for callers)."""
+    return _eventpack.fold_event(dst, src, _mean_vector)
 
 
 def _merge_small_events(events, min_turns=2):
-    """A one-turn event joins its neighbour: no span shorter than min_turns."""
-    if len(events) < 2:
-        return list(events)
-    out = []
-    for ev in events:
-        if len(ev.get("members") or []) >= min_turns or not out:
-            out.append(dict(ev))
-            continue
-        _fold_event(out[-1], ev)
-    if len(out) > 1 and len(out[0].get("members") or []) < min_turns:
-        out[1] = _fold_event(out[0], out[1])
-        out.pop(0)
-    return out
+    """Adapter: merging lives in biocore_memory.recall.eventpack (kept for callers)."""
+    return _eventpack.merge_small_events(events, min_turns=min_turns,
+                                         mean_vector=_mean_vector)
 
 
 def _event_layer_close_adaptive(events, buf, summarizer, global_state, embed_fn=None,
@@ -3545,7 +3781,9 @@ def _event_layer_close_adaptive(events, buf, summarizer, global_state, embed_fn=
 
     The trial close is a real close (state included): when the note does not
     cover the span we drop the event and re-close the two halves, so the only
-    thing lost is the note we rejected.
+    thing lost is the note we rejected. The decision itself (keep / close whole /
+    bisect, and where) comes from biocore_memory.recall.eventmaint; this function
+    only performs it.
     """
     from biocore_memory.event import segment_adaptive as _SA
     if (embed_fn is None or depth >= 6 or len(buf) < 2 * _SA.MIN_TURNS):
@@ -3560,29 +3798,49 @@ def _event_layer_close_adaptive(events, buf, summarizer, global_state, embed_fn=
     except Exception:
         note_vec = None
     turns = [row.get("vector") for row in buf]
-    covered = _SA.coverage(note_vec, turns) if note_vec else 1.0
-    _span = int(ev.get("end") or 0) - int(ev.get("start") or 0) + 1
-    _chars = len(str(ev.get("text") or ""))
-    _too_big = ((EVENT_MAX_TURNS > 0 and _span > EVENT_MAX_TURNS)
-                or _chars > EVENT_MAX_CHARS)
-    if covered >= _SA.COVER_MIN and not _too_big:
+    plan = _eventmaint.plan_adaptation(
+        turns, note_vec,
+        span=int(ev.get("end") or 0) - int(ev.get("start") or 0) + 1,
+        chars=len(str(ev.get("text") or "")),
+        max_turns=_recall_param('max_turns', store),
+        max_chars=_recall_param('max_chars', store),
+        cover_min=_SA.COVER_MIN, min_turns=_SA.MIN_TURNS, depth=depth)
+    if plan["action"] == "keep":
         return
     events.pop()
-    cut = _SA.largest_jump(turns)
-    if cut <= 0 or cut >= len(buf):
+    if plan["action"] == "close_whole":
         _event_layer_close(events, buf, summarizer, global_state)
         return
+    cut = int(plan["cut"])
     for part in _SA.merge_singletons([buf[:cut], buf[cut:]]):
         _event_layer_close_adaptive(events, part, summarizer, global_state,
                                     embed_fn, depth + 1)
 
 
 def _mean_vector(vectors):
+    """逐元素均值。语义：跳过空向量，全空返回 []，维度取首个向量的长度。
+
+    以前是 Python 双层推导（每个维度一次 sum），在 1295 条会话上被调用两千多次，
+    profiler 里占掉八成时间（5700 万次 genexpr）。这里改成一次取齐后求和：
+    numpy 可用就一次 mean；不可用或维度不齐就退回**单层**循环累加。
+    """
     rows = [list(v) for v in (vectors or []) if isinstance(v, (list, tuple)) and v]
     if not rows:
         return []
     dim = len(rows[0])
-    return [sum(row[i] for row in rows if len(row) == dim) / len(rows) for i in range(dim)]
+    rows = [row for row in rows if len(row) == dim]
+    if not rows:
+        return []
+    try:
+        import numpy as _np
+        return _np.asarray(rows, dtype=_np.float64).mean(axis=0).tolist()
+    except Exception:
+        acc = [0.0] * dim
+        for row in rows:
+            for index in range(dim):
+                acc[index] += float(row[index])
+        count = float(len(rows))
+        return [value / count for value in acc]
 
 
 def _embedding_enabled(store, config, payload):
@@ -3864,79 +4122,41 @@ def _capacity_guard(store, session_id, entries):
 def _sim_threshold(series, log=True):
     """Closing threshold: explicit override > the session's own distribution.
 
-    The constant used to be the rule, and the adaptive helper in
-    segment_adaptive was dead code. Now the constant is only the clamp and the
-    fallback: a session whose adjacent turns are all similar gets a high bar, a
-    session that jumps around gets a low one.
+    The arithmetic lives in biocore_memory.recall.eventmaint; the provenance and
+    the log lines stay here, because the text differs per source and must not
+    change.
     """
-    if EVENT_SIM_OVERRIDE not in (None, ""):
-        try:
-            value = float(EVENT_SIM_OVERRIDE)
-        except Exception:
-            value = EVENT_SIM_CLOSE
-        if log:
-            logger.info("[segment] thr=%.3f source=override", value)
-        return max(0.0, min(1.0, value))
-    rows = [float(x) for x in (series or []) if isinstance(x, (int, float))]
-    if not rows:
-        if log:
-            logger.info("[segment] thr=%.3f source=default (no samples)", EVENT_SIM_CLOSE)
-        return EVENT_SIM_CLOSE
-    # mean - 1 sigma, not a low quantile: a low quantile sits *near* the body of
-    # a stable conversation, so a session where nothing changes gets a threshold
-    # it keeps tripping (fragments). mean - sigma sits below the body: only a
-    # real drop closes, and a split distribution puts it between the two peaks.
-    try:
-        mean = sum(rows) / float(len(rows))
-        var = sum((row - mean) ** 2 for row in rows) / float(len(rows))
-        value = mean - math.sqrt(var)
-    except Exception:
-        value = None
-    if value is None:
-        value = EVENT_SIM_CLOSE
-    value = max(EVENT_SIM_MIN, min(EVENT_SIM_MAX, float(value)))
+    info = _eventmaint.sim_threshold(
+        series, override=EVENT_SIM_OVERRIDE, default=EVENT_SIM_CLOSE,
+        lo=EVENT_SIM_MIN, hi=EVENT_SIM_MAX)
     if log:
-        ordered = sorted(rows)
-        def _q(p):
-            index = min(len(ordered) - 1, int(round((len(ordered) - 1) * p)))
-            return ordered[index]
-        logger.info("[segment] adaptive_thr=%.3f n=%d p20=%.3f p50=%.3f p80=%.3f",
-                    value, len(rows), _q(0.20), _q(0.50), _q(0.80))
-    return value
+        if info["source"] == "override":
+            logger.info("[segment] thr=%.3f source=override", info["value"])
+        elif info["source"] == "default":
+            logger.info("[segment] thr=%.3f source=default (no samples)",
+                        EVENT_SIM_CLOSE)
+        else:
+            logger.info("[segment] adaptive_thr=%.3f n=%d p20=%.3f p50=%.3f p80=%.3f",
+                        info["value"], info["n"], info["p20"], info["p50"], info["p80"])
+    return info["value"]
 
 
 def _event_should_close(buf, item, sim, gap, thr, close_chars=None,
-                       min_turns=None, max_turns=None):
-    """Why this turn should start a new event, or "" to keep accumulating.
+                       min_turns=None, max_turns=None, store=None, payload=None):
+    """Adapter: the close rule lives in biocore_memory.recall.eventmaint.
 
-    Order matters: a topic change or a long silence closes immediately; the
-    character budget closes once the event actually holds information; the
-    turn bounds are only a floor (a single line is not an event) and a
-    ceiling (a never-closing event poisons its tail).
+    close_chars / max_turns 每轮现读（recall.close_chars / recall.max_turns）：
+    切事件的边界属于「取」，改配置不该等重启。
     """
-    close_chars = EVENT_CLOSE_CHARS if close_chars is None else int(close_chars)
-    min_turns = EVENT_MIN_TURNS if min_turns is None else int(min_turns)
-    max_turns = EVENT_MAX_TURNS if max_turns is None else int(max_turns)
-    rows = list(buf or [])
-    if not rows:
-        return ""
-    # 1. a topic change or a long silence always closes: those are "must split"
-    if sim < thr:
-        return "topic"
-    if gap > EVENT_GAP_S:
-        return "gap"
-    turns = len(rows)
-    # the ceiling: an event that never closes drags its tail into every query
-    if max_turns > 0 and turns >= max_turns:
-        return "max_turns"
-    # the information budget, gated by the turn floor: fewer than MIN_TURNS
-    # turns is a fragment, however long the text happens to be
-    if close_chars > 0 and turns >= max(1, min_turns):
-        chars = sum(len(str(row.get("text") or "")) for row in rows)
-        chars += len(str((item or {}).get("text") or ""))
-        if chars >= close_chars:
-            return "chars"
-    return ""
+    return _eventmaint.should_close(
+        buf, item, sim, gap, thr,
+        close_chars=(int(close_chars) if close_chars is not None
+                     else _recall_param('close_chars', store, payload)),
+        min_turns=EVENT_MIN_TURNS if min_turns is None else int(min_turns),
+        max_turns=(int(max_turns) if max_turns is not None
+                   else _recall_param('max_turns', store, payload)),
+        gap_s=EVENT_GAP_S)
+
 
 def _day_str(ts):
     """YYYY-MM-DD for a timestamp; "" when unusable (never a relative phrase)."""
@@ -3967,6 +4187,14 @@ def _event_notes_by_id(events):
 
 MULTIQUERY_ON = str(os.environ.get("BIOCORE_MULTIQUERY", "1")).strip().lower() not in ("0", "off", "false", "no")
 SENTENCE_RECALL_ON = str(os.environ.get("BIOCORE_SENTENCE", "1")).strip().lower() not in ("0", "off", "false", "no")
+# 命中窗口：逐句模式带前后各 N 条。0=关，1/2 有效，非法回 1。
+# 兜底常量：运行期值走 _recall_param('window')（SPECS 区间 [0,2]，越界夹紧）
+try:
+    INJECT_WINDOW = int(os.environ.get("BIOCORE_INJECT_WINDOW") or 1)
+except Exception:
+    INJECT_WINDOW = 1
+if INJECT_WINDOW not in (0, 1, 2):
+    INJECT_WINDOW = 1
 RRF_ON = str(os.environ.get("BIOCORE_RRF", "1")).strip().lower() not in ("0", "off", "false", "no")
 RRF_K = 60
 SUBNOTES_ON = str(os.environ.get("BIOCORE_SUBNOTES", "1")).strip().lower() not in ("0", "off", "false", "no")
@@ -3977,6 +4205,63 @@ SUBNOTE_MIN_CHARS = int(os.environ.get("BIOCORE_SUBNOTE_MIN_CHARS") or 800)
 # subnotes are a packing device, not a retrieval unit: a long event can
 # still be delivered when its full text no longer fits the budget
 RRF_EVENT_TOP = int(os.environ.get("BIOCORE_RRF_EVENT_TOP") or 5)
+
+
+CONTEXT_SEED_ON = str(os.environ.get("BIOCORE_CONTEXT_SEED") or "1").strip().lower() not in (
+    "0", "off", "false", "no")
+# 2 = question + summary, 3 = also the bare topic bag. Measured on the fa31
+# library: route 3 lifts coverage and costs the head, route 2 keeps MRR higher
+# (see tools/bench_context_seed.py --seed-variant).
+try:
+    CONTEXT_SEED_ROUTES = max(1, min(3, int(os.environ.get("BIOCORE_CONTEXT_SEED_ROUTES") or 2)))
+except Exception:
+    CONTEXT_SEED_ROUTES = 2
+
+
+def _context_seed_on(store, payload=None):
+    """context_seed: payload > stored flags/config > env > default ON.
+
+    Only an EXPLICIT stored value counts: _effective_switches merges the
+    defaults in, so asking it would make the env override unreachable and the
+    switch could never be turned off from outside.
+    """
+    data = payload if isinstance(payload, dict) else {}
+    if isinstance(data.get("context_seed"), bool):
+        return bool(data["context_seed"])
+    try:
+        data_dir = _store_data_dir(store) if store else None
+        flags = _load_json(Path(data_dir) / "flags.json", {}) if data_dir else {}
+        if isinstance(flags.get("context_seed"), bool):
+            return bool(flags["context_seed"])
+    except Exception:
+        pass
+    try:
+        cfg = _load_runtime_config(store) if store else {}
+        for block in (cfg.get("switches"), cfg.get("recall")):
+            if isinstance(block, dict) and isinstance(block.get("context_seed"), bool):
+                return bool(block["context_seed"])
+    except Exception:
+        pass
+    return bool(CONTEXT_SEED_ON)
+
+
+def _context_seed_pieces(store, query, entries, payload=None):
+    """[question, summary, topic bag]: the retrieval seeds, question first."""
+    text = str(query or "").strip()
+    pieces = [text] if text else []
+    if not text or not _context_seed_on(store, payload) or _context_seed is None:
+        return pieces
+    try:
+        rows = entries
+        if not isinstance(rows, list):
+            rows = []
+        pieces = _context_seed.seed_queries(text, rows,
+                                             limit=CONTEXT_SEED_ROUTES) or pieces
+    except Exception as exc:
+        logger.warning("[context_seed] summary failed, question only: %s: %s",
+                       type(exc).__name__, str(exc)[:120])
+        return [text]
+    return pieces or [text]
 
 
 def _rewrite_queries(query, store=None, payload=None):
@@ -4057,6 +4342,70 @@ def _claims_state_lines(events, limit=8, turn_dates=None):
                        type(exc).__name__, str(exc)[:120])
         return []
 
+def _claim_entity_map(events):
+    """entry_id -> the claim names its event bound (write-time inheritance)."""
+    out = {}
+    try:
+        from biocore_memory.index import claim_entities as _ce
+    except Exception:
+        return out
+    for ev in events or []:
+        if not isinstance(ev, dict):
+            continue
+        names = _ce.claim_names(ev.get("claims"))
+        if not names:
+            continue
+        for row in ev.get("entries") or []:
+            if not isinstance(row, dict):
+                continue
+            entry_id = str(row.get("id") or "")
+            if entry_id:
+                out[entry_id] = names
+    return out
+
+
+def _inherit_claim_entities(store, session_id, events):
+    """Copy the claim subjects onto the rows they came from; no new storage.
+
+    The entity channel needs a name per row, and the row is written long before
+    the event that describes it exists. The names are attached here, once per
+    closed event, and only to rows that do not carry them yet -- the store's own
+    write path then diffs and persists just those rows.
+    """
+    mapping = _claim_entity_map(events)
+    if not mapping or store is None:
+        return 0
+    try:
+        doc = load_memory(store, session_id)
+    except Exception:
+        return 0
+    changed = 0
+    for entry in doc.get("entries") or []:
+        if not isinstance(entry, dict):
+            continue
+        names = mapping.get(str(entry.get("id") or ""))
+        if not names:
+            continue
+        raw = entry.get("entities")
+        existing = [str(x) for x in raw] if isinstance(raw, list) else []
+        merged = existing + [name for name in names if name not in existing]
+        if merged == existing:
+            continue
+        entry["entities"] = merged[:16]
+        cue = entry.get("cue_index")
+        if isinstance(cue, dict):
+            old = cue.get("entities")
+            old = [str(x) for x in old] if isinstance(old, list) else []
+            cue["entities"] = (old + [name for name in names if name not in old])[:8]
+        changed += 1
+    if changed:
+        try:
+            save_memory(store, session_id, doc)
+        except Exception:
+            return 0
+    return changed
+
+
 def _sentence_recall_block(store, session_id, query, entries, events, payload=None,
                            rerank_config=None, now=None, budget_chars=None,
                            delivery="event_rank"):
@@ -4076,11 +4425,20 @@ def _sentence_recall_block(store, session_id, query, entries, events, payload=No
             and str(row.get("text") or "").strip()]
     if not pool:
         return None
+    # 上下文总结 is the seed the chain was missing: the question alone has no
+    # content when it is a follow-up ("那后来呢"), and the summary of the recent
+    # rows is what carries it. Question first, so an off switch is the old path.
+    seeds = _context_seed_pieces(store, text, pool, payload)
     qvecs = []
     try:
         embed_fn = _event_embed_fn(store, _load_runtime_config(store), payload)
         if embed_fn is not None:
-            for piece in _rewrite_queries(text, store, payload):
+            vector_pieces = list(_rewrite_queries(text, store, payload))
+            if len(seeds) > 1:
+                # the rewriter needs a model; the summary does not, so both
+                # routes are embedded and the best cosine per row wins
+                vector_pieces += [piece for piece in seeds[1:] if piece not in vector_pieces]
+            for piece in vector_pieces:
                 try:
                     vector = embed_fn(piece)
                 except Exception:
@@ -4096,114 +4454,75 @@ def _sentence_recall_block(store, session_id, query, entries, events, payload=No
     _now_v = 0.0
     if isinstance(_state_now, dict):
         _now_v = _num(_state_now.get("v", _state_now.get("valence")), 0.0)
-    _mood_w = float(os.environ.get("BIOCORE_MOOD_WEIGHT") or 0.06)
-    scored = []
-    for row in pool:
-        if qvecs:
-            vector = row.get("vector") or []
-            value = max((_ch.cosine(qv, vector) for qv in qvecs), default=0.0)
-        else:
-            value = _ch.lexical_score(text, str(row.get("text") or ""))
-        _aff = row.get("affect")
-        if _mood_w and isinstance(_aff, dict):
-            try:
-                _env_v = float(_aff.get("v", _aff.get("valence")) or 0.0)
-                value = float(value) + _mood_w * (1.0 - abs(_env_v - _now_v) / 2.0)
-            except Exception:
-                pass
-        scored.append((float(value), row))
-    grouped = {}
-    order = []
-    for score, row in scored:
-        key = str(row.get("event_id") or "") or ("ID:" + str(row.get("id") or ""))
-        if key not in grouped:
-            grouped[key] = {"key": key, "rows": [], "best": -1.0, "best_id": "",
-                           "start": float(row.get("ts") or 0.0)}
-            order.append(key)
-        bucket = grouped[key]
-        bucket["rows"].append((score, row))
-        first = float(row.get("ts") or 0.0)
-        if first and (not bucket["start"] or first < bucket["start"]):
-            bucket["start"] = first
-        if score > bucket["best"]:
-            bucket["best"] = score
-            bucket["best_id"] = str(row.get("id") or "")
-    # score = 0.6 * best + 0.4 * mean(top3): a single lucky line cannot
-    # outrank an event that is consistently on-topic
-    global_scores = sorted((score for score, _row in scored), reverse=True)
-    top40 = set(global_scores[:40])
-    for key in order:
-        bucket = grouped[key]
-        values = sorted((score for score, _row in bucket["rows"]), reverse=True)
-        _rel_cut = _relative_cut(values)
-        best = float(values[0]) if values else 0.0
-        rest = values[1:]
-        # a single-line event must not be punished for having no rest:
-        # rest_mean falls back to its own maximum
-        rest_mean = sum(rest) / len(rest) if rest else best
-        bucket["max_cos"] = round(best, 6)
-        bucket["rest_mean"] = round(rest_mean, 6)
-        bucket["sentence_count"] = len(values)
-        bucket["relevant"] = sum(1 for value in values if value >= _rel_cut)
-        bucket["score"] = round(EVENT_SCORE_W_MAX * best
-                                + EVENT_SCORE_W_REST * rest_mean, 6)
-        bucket["in_top40"] = sum(1 for value in values if value in top40)
-    if EVENT_SCORE_MODE == "max":
-        # 只用最高句：事件内的其他句子不参与计分（多句累加等价于奖励句数，
-        # 而金标事件的命中句数在三个人身上都不占优）
-        for _k in order:
-            _b = grouped[_k]
-            _vals = [v for v, _r in _b["rows"]]
-            _b["score"] = round(max(_vals) if _vals else 0.0, 6)
-    if EVENT_SCORE_MODE == "lse":
-        _beta_now = _event_beta(store)
-        # 平滑最大值：接近"取最高那句"，但第二三句也会抬分（170 题实测 MRR 0.059→0.098）
-        for _k in order:
-            _b = grouped[_k]
-            _vals = [v for v, _r in _b["rows"]]
-            try:
-                _b["score"] = round((1.0 / _beta_now)
-                                    * math.log(sum(math.exp(_beta_now * v) for v in _vals)), 6)
-            except Exception:
-                _b["score"] = round(max(_vals) if _vals else 0.0, 6)
-    if EVENT_SCORE_MODE == "countrank":
-        # 句子排名 + 句数排名：句数按名次归一，避免长事件靠堆句子取胜
-        _by_count = sorted(order, key=lambda k: -grouped[k]["relevant"])
-        _rank_of = {}
-        _last_count, _rank = None, 0
-        for _i, _k in enumerate(_by_count, 1):
-            _c = grouped[_k]["relevant"]
-            if _c != _last_count:
-                _rank, _last_count = _i, _c
-            _rank_of[_k] = _rank
-        _n = max(1, len(order))
-        for _k in order:
-            _b = grouped[_k]
-            _norm = 1.0 - (_rank_of[_k] - 1) / float(_n - 1) if _n > 1 else 1.0
-            _b["count_rank"] = _rank_of[_k]
-            _b["count_norm"] = round(_norm, 6)
-            _b["score"] = round((1.0 - EVENT_SCORE_W_COUNT) * _b["max_cos"]
-                                + EVENT_SCORE_W_COUNT * _norm, 6)
+    # 情绪参与排序：缺省 0（关）。情绪数值现在是常数（评价通道未通），
+    # 让它默认参与等于用没标定的数改交付；确认要开时用 BIOCORE_MOOD_WEIGHT 显式给。
+    _mood_w = float(os.environ.get("BIOCORE_MOOD_WEIGHT") or 0.0)
+    scored = _recall_scoring.score_rows(
+        pool, qvecs, seeds, text, mood_weight=_mood_w, mood_now=_now_v)
+    # 事件是派生结构：交付时从 entries 内存现建（确定性切分），
+    # entries 表没有 event_id 列，所以按成员的 id 投影后再归组（只读，不写库）。
+    # 事件键用 "day-ordinal"（与已存事件同形），不引入新前缀，避免标签分裂。
+    _id2ev = {}
     try:
-        if EVENT_SCORE_MODE == "lse":
-            _snap = {str(k): [round(float(sv), 4) for sv, _r in grouped[k]["rows"]]
-                     for k in grouped}
+        from biocore_memory.event import events as _EV
+        _sorted_pool = sorted(entries or [], key=lambda r: float(r.get('ts') or 0.0))
+        _built = _EV.build_events(_sorted_pool, llm=None, flags={'event_layer': True},
+                                  merge_small=False)
+        for _i, _ev in enumerate(_built):
+            _turns = [t for t in (_ev.get('members') or []) if isinstance(t, int)
+                      and 0 <= t < len(_sorted_pool)]
+            if not _turns:
+                continue
+            _day = _day_str(float(_sorted_pool[_turns[0]].get('ts') or 0.0))
+            _eid = '%s-%d' % (_day, _i + 1)
+            for _t in _turns:
+                _id2ev[str(_sorted_pool[_t].get('id') or '')] = _eid
+        _event_layer_block._last_mem_events = len(_built)
+    except Exception:
+        _id2ev = {}
+    _unassigned = 0
+    if _id2ev:
+        for _value, _row in scored:
+            if _row.get('event_id'):
+                continue          # 行上已有事件归属（fixture / 写入路径给过）：不覆盖
+            _eid = _id2ev.get(str(_row.get('id') or ''))
+            if _eid:
+                _row['event_id'] = _eid
+            else:
+                _row['event_id'] = '__unassigned__'
+                _unassigned += 1
+    grouped, order = _recall_scoring.group_events(scored)
+    if _unassigned:
+        grouped.pop('__unassigned__', None)
+        order = [k for k in order if k != '__unassigned__']
+        _event_layer_block._last_unassigned = _unassigned
+    # 打分 / 分组 / 排序搬进 biocore_memory.recall.scoring（纯函数）：权重、模式、
+    # β 与相对门槛都从外面传进去，模块里不读环境、不写文件（lse 的快照交回这里落盘）。
+    _lse_snapshot = _recall_scoring.score_events(
+        grouped, order, scored, _relative_cut, mode=EVENT_SCORE_MODE,
+        w_max=EVENT_SCORE_W_MAX, w_rest=EVENT_SCORE_W_REST,
+        w_count=EVENT_SCORE_W_COUNT,
+        beta_fn=(lambda: _event_beta(store)))
+    if _lse_snapshot is not None:
+        try:
             _p = os.path.join(_store_data_dir(store), "last_event_scores.json")
             with open(_p, "w", encoding="utf-8") as _fh:
-                json.dump({"session_id": str(session_id), "scores": _snap}, _fh)
-    except Exception:
-        pass
-    ranked = sorted(order, key=lambda key: (-grouped[key]["score"],
-                                           -grouped[key]["in_top40"],
-                                           grouped[key]["start"],
-                                           order.index(key)))
+                json.dump({"session_id": str(session_id), "scores": _lse_snapshot}, _fh)
+        except Exception:
+            pass
+    ranked = _recall_scoring.rank_events(grouped, order)
     # cross-encoder second opinion on the head only: it decides which of the top
     # events answers the question, and the tail keeps the cosine order untouched
     # (P20 measured top1 64.6% -> 70.9%, top10 unchanged).
     ranked = _event_head_rerank(store, query, ranked, grouped, payload)
     budget = int(budget_chars) if budget_chars else int(RECALL_INJECT_CHARS)
+    # 老会话没有事件（events 表 0 行）时，事件交付无从下手：退回逐句，
+    # 否则明明有向量和原文，注入块却只剩下一个空壳。
+    if str(delivery or "").strip().lower() == "event_rank" and not events:
+        delivery = "sentence"
     if delivery == "sentence":
         # an exact index/concept hit leads; cosine orders the rest
+        # 仅降级路径使用，事件模式不经过
         try:
             _pinned = set(_governance.lookup(store, query)) if _governance else set()
         except Exception:
@@ -4217,8 +4536,10 @@ def _sentence_recall_block(store, session_id, query, entries, events, payload=No
         # Optional rerank over the head of the cosine ranking. The block used to
         # be cosine-only: rerank_config was accepted by this function and never
         # read, so a configured reranker never took part in sentence delivery.
+        # 仅降级路径使用，事件模式不经过
         if SENTENCE_RERANK_ON and len(scored) > 1:
-            _pool_n = max(1, min(SENTENCE_RERANK_POOL, len(scored)))
+            _pool_n = max(1, min(int(_recall_param('pool', store, payload)),
+                                len(scored)))
             _head_rows = [row for _value, row in scored[:_pool_n]]
             try:
                 # 候选池是 60 句，配置里 rerank_top_n 常是 20：不传就会只重排 20 条，
@@ -4233,6 +4554,7 @@ def _sentence_recall_block(store, session_id, query, entries, events, payload=No
                           + scored[_pool_n:])
         # flat sentence delivery: every sentence ranked, packed
         # until the budget is spent -- no event grouping, no event order
+        # 仅降级路径使用，事件模式不经过
         if HYBRID_RETRIEVAL and scored:
             try:
                 _rrf = _bm25_rrf_fuse(text, scored)
@@ -4240,10 +4562,7 @@ def _sentence_recall_block(store, session_id, query, entries, events, payload=No
                     scored = _rrf
             except Exception as _he:
                 logger.warning("[hybrid] fuse failed: %s", str(_he)[:120])
-        header_s = "【相关记忆】"
-        limit_s = max(50, budget - 90)
-        used_s = len(header_s)
-        out_lines, skipped, shown_ids = [], [], []
+        # 仅降级路径使用，事件模式不经过
         if RETRIEVE_TEMP > 0:
             # weighted sampling without replacement in O(n log n):
             # key_i = -ln(U_i) / w_i, take the smallest keys (Efraimidis-Spirakis).
@@ -4265,194 +4584,118 @@ def _sentence_recall_block(store, session_id, query, entries, events, payload=No
                     _keys.append((-_m.log(_u) / max(_w, 1e-12), _v, _row))
                 _keys.sort(key=lambda item: item[0])
                 scored = list(_head) + [(_v, _row) for _k, _v, _row in _keys]
+        # 本轮提问会被原样写成一条记忆，检索它自己时没有信息量、还占预算。
+        # 只丢“最新那一行且与本轮提问同文”，否则会把正文恰好等于提问的真实记忆误杀。
+        _query_norm = "".join(str(text or "").split()).rstrip("？?。.")
+        _newest_ts = max((float(row.get("ts") or 0.0) for _s, row in scored), default=0.0)
+        _flat_rows = []
         for score, row in scored:
-            when = _day_str(float(row.get("ts") or 0.0)) if row.get("ts") else ""
-            body_text = str(row.get("text") or "").strip()
-            _tag = ""
-            if MEMORY_CODES:
-                _c = str(row.get("code") or "").strip()
-                if _c:
-                    _tag = "[%s] " % _c
-            line = "- %s%s%s" % (_tag, body_text, ("（%s）" % when) if when else "")
-            if used_s + len(line) + 1 > limit_s:
-                skipped.append(str(row.get("id") or ""))
+            _row_norm = "".join(str(row.get("text") or "").split()).rstrip("？?。.")
+            if (_query_norm and _row_norm == _query_norm
+                    and float(row.get("ts") or 0.0) >= _newest_ts - 1e-6):
                 continue
-            out_lines.append(line)
-            shown_ids.append(str(row.get("id") or ""))
-            used_s += len(line) + 1
-        body_s = header_s + chr(10) + chr(10).join(out_lines)
-        if skipped:
-            body_s += chr(10) + "已折叠 %d 条" % len(skipped)
-        while len(body_s) > budget and shown_ids:
-            shown_ids.pop()
-            out_lines.pop()
-            skipped.append("trimmed")
-            body_s = header_s + chr(10) + chr(10).join(out_lines)
-            body_s += chr(10) + "已折叠 %d 条" % len(skipped)
-        if ATOMIC_BLOCKS and len(body_s) > budget:
-            # 原子门禁：宁可整块不注入，也不给半块
+            _flat_rows.append(row)
+        # 渲染搬进了 biocore_memory.recall.delivery：拼行、整行装不下就跳过、
+        # 永不截断；这里只保留选行与调用（转接层）。
+        _flat = _recall_delivery.render_flat(
+            _flat_rows, budget, _day_str, kept=len(scored),
+            memory_codes=MEMORY_CODES, atomic_blocks=ATOMIC_BLOCKS,
+            pool=pool,
+            window=int(_recall_param('window', store, payload)))
+        if _flat.get("atomic_rejected"):
             logger.warning("[atomic] 句子块超预算（%d > %d），整块回退",
-                           len(body_s), budget)
-            return {"text": "", "chars": 0, "mode": "sentence",
-                    "atomic_rejected": True, "reason": "over_budget",
-                    "over_by": len(body_s) - budget,
-                    "events_picked": 0, "events_shown": 0, "kept": len(scored),
-                    "shown": 0, "folded": 0, "folded_ids": [], "folded_events": [],
-                    "events": [], "ids": []}
-        return {"text": body_s, "chars": len(body_s), "mode": "sentence",
-                "events_picked": 0, "events_shown": 0, "kept": len(scored),
-                "shown": len(shown_ids), "folded": len(skipped),
-                "folded_ids": skipped, "folded_events": [], "events": [],
-                "ids": shown_ids}
+                           budget + int(_flat.get("over_by") or 0), budget)
+        return _flat
     _rank_mode = str(delivery or "").strip().lower() == "event_rank"
+    _preset_now = max(1, event_preset(store, payload))
     if _rank_mode:
-        picked_events = ranked[:max(1, EVENT_PRESET)]
+        picked_events = ranked[:_preset_now]
     else:
         picked_events = ranked[:EVENT_TOP] if EVENT_TOP > 0 else list(ranked)
-    notes = _event_notes_by_id(events)
-    header = "【相关记忆】"
-    reserve = 90            # room for the fold trailer
-    limit = max(100, budget - reserve)
-    subnotes_by_event = {}
-    for _ev in events or []:
-        _eid = str(_ev.get("event_id") or "")
-        if _eid and _ev.get("subnotes"):
-            subnotes_by_event[_eid] = _ev.get("subnotes") or []
+    # 渲染搬进了 biocore_memory.recall.delivery：整事件打包、按名次装、装不下就停、
+    # 不截断；这里只保留取前 N 件与调用（转接层）。
+    _events_block = _recall_delivery.render_events(
+        ranked, grouped, scored, events, picked_events, budget, _rank_mode,
+        _day_str, subnotes_on=SUBNOTES_ON, event_top=EVENT_TOP,
+        now=now, tiered=bool(int(_recall_param('tiered_delivery_on', store) or 0)),
+        window=int(_recall_param('window', store, payload)))
+    # 一次交付一行：mode / 本次生效的 preset / 取了几件 / 显示几件 / 字数。
+    # 面板与验收都靠这一行复现，别只留在返回值里（ACTUAL-TASKS 33）。
+    logger.info("[delivery] mode=%s preset=%d picked=%d shown=%d chars=%d",
+                _events_block.get("mode"), _preset_now,
+                int(_events_block.get("events_picked") or 0),
+                int(_events_block.get("events_shown") or 0),
+                int(_events_block.get("chars") or 0))
+    return _events_block
 
-    def subnotes_for(event_id):
-        return subnotes_by_event.get(str(event_id or ""), [])
 
-    def _line_of(row):
-        when = _day_str(float(row.get("ts") or 0.0)) if row.get("ts") else ""
-        body = str(row.get("text") or "").strip()
-        return "- %s%s" % (body, ("（%s）" % when) if when else "")
+# 事件预设的合法区间：唯一真源是 recall_params.SPECS['event_preset']，
+# 这里保留同名常量只为兼容旧调用点与等值性测试。
+EVENT_PRESET_MIN = 1
+EVENT_PRESET_MAX = 20
+EVENT_PRESET_DEFAULT = 8
 
-    def _compress_event(members, subs, used_now, limit_now):
-        """Delivery for a long event: the hit lines verbatim plus EVERY
-        subnote of the event. Returns None when even that does not fit."""
-        if not subs:
-            return None
-        by_score = sorted(members, key=lambda item: -float(item[0]))
-        hits = by_score[:3]
-        hit_ids = set(str(item[1].get("id") or "") for item in hits)
-        rendered = [_line_of(item[1]) for item in sorted(
-            hits, key=lambda item: float(item[1].get("ts") or 0.0))]
-        delta = sum(len(line) + 1 for line in rendered)
-        for group in subs:
-            note = str(group.get("note") or "").strip()
-            if not note:
-                continue
-            ids = [str(x) for x in (group.get("sentence_ids") or [])]
-            line = "  · %s（%d 句，id 见 meta）" % (note, len(ids))
-            rendered.append(line)
-            delta += len(line) + 1
-        if used_now + delta > limit_now:
-            return None
-        compressed_ids = [str(item[1].get("id") or "") for item in members
-                           if str(item[1].get("id") or "") not in hit_ids]
-        return {"lines": rendered, "used": delta, "compressed_ids": compressed_ids}
-    lines, folded, folded_events = [], [], []
-    used = len(header)
-    shown_events = 0
-    blocks = []                     # one entry per delivered event, for budget trimming
-    for key in picked_events:
-        members = sorted(grouped[key]["rows"], key=lambda item: float(item[1].get("ts") or 0.0))
-        rendered = []
-        for score, row in members:
-            when = _day_str(float(row.get("ts") or 0.0)) if row.get("ts") else ""
-            body_text = str(row.get("text") or "").strip()
-            rendered.append("- %s%s" % (body_text, ("（%s）" % when) if when else ""))
-        cost = sum(len(line) + 1 for line in rendered)
-        if used + cost <= limit:
-            lines.extend(rendered)
-            used += cost
-            shown_events += 1
-            blocks.append((key, rendered, []))
-            continue
-        if _rank_mode:
-            # 事件是交付单位：装不下就停，绝不用摘要替换原文
-            break
-        if SUBNOTES_ON and grouped[key].get("rows") and subnotes_for(key):
-            compressed = _compress_event(members, subnotes_for(key), used, limit)
-            if compressed:
-                lines.extend(compressed["lines"])
-                used += compressed["used"]
-                folded.extend(compressed["compressed_ids"])
-                shown_events += 1
-                blocks.append((key, compressed["lines"], compressed["compressed_ids"]))
-                continue
-        label = key if not key.startswith("ID:") else key[3:]
-        folded_events.append(label)
-        folded.extend(str(row.get("id") or "") for _s, row in members)
-        line = "- %s 共%d句，已折叠" % (label, len(members))
-        if used + len(line) + 1 <= limit:      # the trailer already reports the count
-            lines.append(line)
-            used += len(line) + 1
-    if EVENT_TOP > 0 and not _rank_mode:
-        for key in ranked[EVENT_TOP:]:
-            label = key if not key.startswith("ID:") else key[3:]
-            folded_events.append(label)
-            folded.extend(str(row.get("id") or "") for _s, row in grouped[key]["rows"])
-    def _trailer(rows):
-        out = []
-        if folded:
-            stamps = [float(row.get("ts") or 0.0) for _s, row in scored if row.get("ts")]
-            a = _day_str(min(stamps)) if stamps else ""
-            b = _day_str(max(stamps)) if stamps else ""
-            span = ("%s 至 %s" % (a, b)) if a and b and a != b else (a or "无时间")
-            out.append("另有 %d 条相关记忆（%s，相关度 %.2f-%.2f，id 见 meta）"
-                       % (len(folded), span,
-                          min([s for s, _r in scored] or [0.0]),
-                          max([s for s, _r in scored] or [0.0])))
-            out.append("已折叠 %d 条（%d 个事件）" % (len(folded), len(folded_events)))
-        return out
-    body = header + chr(10) + chr(10).join(lines + _trailer(lines))
-    # the caller budget is a ceiling, not a hint: while the body is over it,
-    # push the last delivered event back into the folded bucket and rebuild
-    while len(body) > budget and lines and not body.startswith(header + chr(10) + "已折叠") :
-        lines.pop()
-        body = header + chr(10) + chr(10).join(lines + _trailer(lines))
-    while len(body) > budget and blocks:
-        key, block_lines, compressed_ids = blocks.pop()
-        for line in block_lines:
-            if line in lines:
-                lines.remove(line)
-        folded.extend(compressed_ids)
-        members = grouped[key]["rows"]
-        folded.extend(str(row.get("id") or "") for _s, row in members
-                      if str(row.get("id") or "") not in set(folded))
-        label = key if not key.startswith("ID:") else key[3:]
-        folded_events.append(label)
-        shown_events -= 1
-        body = header + chr(10) + chr(10).join(lines + _trailer(lines))
-    if len(body) > budget:
-        # nothing left to give up: keep only the header and the trailer
-        body = header + chr(10) + chr(10).join(_trailer(lines))
-        body = body[:budget]
+# ── 召回参数的运行期出口 ────────────────────────────────────────────
+# ACTUAL-TASKS 30：这些值以前是 import 期常量，改配置必须重启才生效。
+# 现在唯一真源是 biocore_memory.config.recall_params（config > env > 常量缺省），
+# 下面这份表只在解析失败时兜底，并在 warn 里写明用了哪个常量。
+_RECALL_PARAM_CONST = {
+    'event_preset': EVENT_PRESET_DEFAULT, 'window': 1,
+    'relevant_cos': EVENT_RELEVANT_COS, 'close_chars': EVENT_CLOSE_CHARS,
+    'max_turns': EVENT_MAX_TURNS, 'max_chars': EVENT_MAX_CHARS,
+    'pool': SENTENCE_RERANK_POOL, 'seed_k': SENTENCE_SEED_K,
+    'relevant_floor': 0.20,
+    'event_delivery_clean_on': 0,
+}
 
-    body = header + chr(10) + chr(10).join(lines)
-    shown_ids = []
-    for key in picked_events[:shown_events]:
-        for _s, row in grouped[key]["rows"]:
-            shown_ids.append(str(row.get("id") or ""))
-    return {"text": body, "chars": len(body), "mode": "event",
-            "events_picked": len(picked_events), "events_shown": shown_events,
-            "kept": sum(len(grouped[key]["rows"]) for key in picked_events),
-            "shown": len(shown_ids), "folded": len(folded),
-            "folded_ids": folded, "folded_events": folded_events,
-            "events": [{"event_id": grouped[key]["key"],
-                        "max_cos": grouped[key]["max_cos"],
-                        "rest_mean": grouped[key]["rest_mean"],
-                        "score": grouped[key]["score"],
-                        "sentence_count": grouped[key]["sentence_count"],
-                        "best_entry_id": grouped[key]["best_id"],
-                        "shown": position < shown_events}
-                       for position, key in enumerate(picked_events)],
-            "ids": shown_ids}
+
+def _recall_param(name, store=None, payload=None):
+    """一次调用取一次值：本次请求 payload > core_config.json > env > 常量。
+
+    payload 也算 config：面板刚保存、文件尚未回读时，请求体才是最新的一份。
+    越界由 recall_params 夹紧并 warn；解析失败回退常量、只留一行 warn，
+    绝不因为一个参数读不到就让交付失败。
+    """
+    try:
+        from biocore_memory.config import recall_params as _rp
+        merged = {}
+        try:
+            raw_cfg = _load_runtime_config(store) if store else {}
+        except Exception:
+            raw_cfg = {}
+        if isinstance(raw_cfg, dict) and isinstance(raw_cfg.get('recall'), dict):
+            merged.update(raw_cfg['recall'])
+        pl = payload if isinstance(payload, dict) else {}
+        if isinstance(pl.get('recall'), dict):
+            merged.update(pl['recall'])
+        # payload 顶层同名字段（面板/宿主直传）比磁盘配置新；payload['recall'] 已在上面覆盖
+        if name in pl and name not in (pl.get('recall') or {}):
+            merged[name] = pl.get(name)
+        return _rp.resolve(name, {'recall': merged} if merged else None)
+    except Exception as exc:
+        logger.warning('[recall] %s 解析失败，回退常量 %r: %s: %s',
+                       name, _RECALL_PARAM_CONST.get(name),
+                       type(exc).__name__, str(exc)[:120])
+        return _RECALL_PARAM_CONST.get(name)
 
 
 # 事件预设交付：按事件排名给前 N 个整个事件，不压缩、不截断成摘要
-EVENT_PRESET = int(os.environ.get("BIOCORE_EVENT_PRESET") or 8)
+# 事件预算每轮现读设置（recall.event_preset），env 只作 headless 的默认值：
+# 导入时读一次会让 UI 改值必须重启才生效。
+
+
+def event_preset(store=None, payload=None):
+    """交付时取用：payload > recall.event_preset > env > 8（recall_params 夹紧 [1,20]）。
+
+    兜底链收敛到 recall_params 一处（ACTUAL-TASKS 30）：本函数不再自带
+    MIN/MAX 与第二份回退顺序，只把解析结果夹回 SPECS 的合法区间。
+    """
+    value = _recall_param('event_preset', store, payload)
+    try:
+        value = int(value)
+    except Exception:
+        value = EVENT_PRESET_DEFAULT
+    return max(EVENT_PRESET_MIN, min(EVENT_PRESET_MAX, value))
 EVENT_RERANK_ON = str(os.environ.get("BIOCORE_EVENT_RERANK") or "1").strip().lower() not in (
     "0", "false", "off", "no")
 EVENT_RERANK_TOP = int(os.environ.get("BIOCORE_EVENT_RERANK_TOP") or 10)
@@ -4501,23 +4744,43 @@ def _event_head_rerank(store, query, ranked, grouped, payload=None, top_n=None):
     return [by_id[item] for item in new_head] + tail
 
 
+# 缺摘要器只报一次（按会话），否则每个回合都刷一条，
+# dispatch 一轮就会把日志塞满。上限兜底，防止长进程无限增长。
+_SUMMARIZER_MISSING_SEEN_ACU = set()
+
+
+def _note_missing_summarizer(session_id):
+    """无摘要器时记一条 info（每会话一次），交付照常、维护跳过。"""
+    key = str(session_id or "")
+    if key in _SUMMARIZER_MISSING_SEEN_ACU:
+        return
+    if len(_SUMMARIZER_MISSING_SEEN_ACU) >= 256:
+        _SUMMARIZER_MISSING_SEEN_ACU.clear()
+    _SUMMARIZER_MISSING_SEEN_ACU.add(key)
+    logger.info("[event] 摘要器不可用：本轮只做交付（按已存事件排名取前 N 件），"
+                "维护（切事件/命名/关联/压缩）跳过")
+
+
 def _event_layer_block(session_id, store, query, budget, rerank_config=None,
-                       payload=None, summarizer=None, as_of=None):
+                       payload=None, summarizer=None, as_of=None, scope=None):
     """Incremental event maintenance + two-stage recall, rendered for injection."""
     from biocore_memory.event import events as _E
     if not _E.enabled({_E.FLAG_KEY: True}):
         return None
-    if summarizer is None:
-        # no silent "no notes" degradation: the host must pass its LLM
-        raise RuntimeError("event_layer is on but event_summarizer is missing")
+    # 摘要器只负责维护（切事件 / 命名 / 算关联）；交付（按已存事件排名取前 N 件）
+    # 不需要它。缺摘要器时降级为“只交付”，并把维护整块跳过——既不要把新行
+    # 记成已维护，也不要把开着的事件强行闭合。
+    _has_summarizer = summarizer is not None
+    if not _has_summarizer:
+        _note_missing_summarizer(session_id)
     # the store keeps writes in memory (debounced); prefer it over the file
     try:
         live_entries = list(store.entries)
     except Exception:
         live_entries = []
     if not live_entries:
-        live_entries = load_memory(store, session_id).get("entries") or []
-    entries = [row for row in _visible(live_entries)
+        live_entries = _scoped_load(store, session_id, scope).get("entries") or []
+    entries = [row for row in _visible_for_recall(store, session_id, _visible(live_entries))
                if isinstance(row, dict) and str(row.get("text") or "").strip()]
     if not entries:
         stored0 = _load_event_state(store, session_id)
@@ -4528,6 +4791,22 @@ def _event_layer_block(session_id, store, query, budget, rerank_config=None,
     stored = _load_event_state(store, session_id)
     seen = min(int(stored.get("seen") or 0), len(entries))
     events = list(stored.get("events") or [])
+    # 交付前把断链补上（只读投影）：老库的行没有 event_id，按事件交付会退化成
+    # "一行一个事件"，并列显示也挂不上事件。project_links 返回浅拷贝，落库路径
+    # （_inherit_claim_entities / save_memory）拿到的仍是原行，dispatch 仍然只读。
+    try:
+        from biocore_memory.store import link_repair as _link_repair
+        entries, _link_counts = _link_repair.project_links(entries, events)
+        if _link_counts.get("event_id") or _link_counts.get("turn"):
+            _link_key = (session_id, _link_counts.get("event_id"), _link_counts.get("turn"))
+            if _link_key not in _LINK_PROJECTION_WARNED:
+                _LINK_PROJECTION_WARNED.add(_link_key)
+                logger.warning("[link] 交付期按成员快照补链（不写库）：event_id=%d turn=%d",
+                               _link_counts.get("event_id") or 0,
+                               _link_counts.get("turn") or 0)
+    except Exception as exc:
+        logger.warning("[link] projection failed: %s: %s",
+                       type(exc).__name__, str(exc)[:120])
     global_state = dict(stored.get("state") or {})
     config = {}
     try:
@@ -4550,6 +4829,15 @@ def _event_layer_block(session_id, store, query, budget, rerank_config=None,
         for item in row.get("entries") or []:
             if not item.get("vector"):
                 item["vector"] = None
+    # 读取兜底：事件自己没有向量（纯结构切分不算质心）时，用成员均值现算，只读不写库。
+    for row in events:
+        if row.get('vector'):
+            continue
+        _vecs = [item.get('vector') for item in (row.get('entries') or [])
+                 if isinstance(item, dict) and item.get('vector')]
+        if not _vecs:
+            continue
+        row['vector'] = _mean_vector(_vecs)
     buf = []
     for row in stored.get("open") or []:
         if isinstance(row, dict):
@@ -4570,7 +4858,7 @@ def _event_layer_block(session_id, store, query, budget, rerank_config=None,
         _thr_series = []
     thr = _sim_threshold(_thr_series)
     _entry_embedder = _event_embed_fn(store, config, payload)
-    for offset, row in enumerate(new_rows):
+    for offset, row in enumerate(new_rows if _has_summarizer else []):
         vec = _entry_vector(store, row, config, payload)
         # memory entries carry ts, not turn: fall back to their position
         turn = int(row.get("turn") or (seen + offset + 1))
@@ -4580,13 +4868,14 @@ def _event_layer_block(session_id, store, query, budget, rerank_config=None,
         if buf:
             gap = float(item["ts"]) - float(buf[-1]["ts"])
             sim = _E._cos(_mean_vector([b.get("vector") for b in buf]), vec) if vec else 1.0
-            if _event_should_close(buf, item, sim, gap, thr):
+            if _event_should_close(buf, item, sim, gap, thr,
+                                   store=store, payload=payload):
                 _event_layer_close_adaptive(events, buf, summarizer, global_state,
                                             _entry_embedder)
                 buf = []
         buf.append(item)
     tail_closed = False
-    if buf and (not new_rows or str(query or "").strip()):
+    if _has_summarizer and buf and (not new_rows or str(query or "").strip()):
         # a recall call finalises the open event; a capture call keeps it open
         _event_layer_close_adaptive(events, buf, summarizer, global_state,
                                     _entry_embedder, store=store, session_id=session_id)
@@ -4597,7 +4886,7 @@ def _event_layer_block(session_id, store, query, budget, rerank_config=None,
     try:
         from biocore_memory.event import compaction as _compact
         _budget_chars = int(budget or 0)
-        if _budget_chars > 0 and _compact.should_compact(events, _budget_chars):
+        if _has_summarizer and _budget_chars > 0 and _compact.should_compact(events, _budget_chars):
             _report = _compact.compact(events, _budget_chars, ask=summarizer)
             _event_layer_block._last_compaction = _report
     except Exception as exc:
@@ -4609,19 +4898,20 @@ def _event_layer_block(session_id, store, query, budget, rerank_config=None,
                                                "detail": type(exc).__name__}
     if len(events) > 1:
         events[:] = _merge_small_events(events)
-    for index, ev in enumerate(events, 1):
-        # 事件 id 必须稳定：以前按序号重编号，任何重建都会让已存的引用失效
-        try:
-            _sig = "EV_%s" % __import__("hashlib").sha1(
-                ("%s-%s" % (int(ev.get("start") or 0), int(ev.get("end") or 0))).encode()
-            ).hexdigest()[:8]
-            ev["event_id"] = _sig
-        except Exception:
-            ev["event_id"] = "EV%03d" % index
-    if new_rows or seen != len(entries) or tail_closed:
+    # 事件 id 由 span 派生，不按序号重编号（注释随实现搬进 eventpack）。
+    _eventpack.assign_event_ids(events)
+    # 只有真的做过维护才推进 seen：否则这批新行会被记成“已切过”，
+    # 等摘要器回来时再也切不到它们。
+    if _has_summarizer and (new_rows or seen != len(entries) or tail_closed):
         _save_event_state(store, session_id,
                           {"seen": len(entries), "events": events,
                            "state": global_state, "open": buf})
+    # 写入继承：事件闭合时把 claims 主体写回它引用的那些行，实体通道才有名字
+    try:
+        _inherit_claim_entities(store, session_id, events)
+    except Exception as exc:
+        logger.warning("[entities] inherit failed: %s: %s",
+                       type(exc).__name__, str(exc)[:120])
     _as_of_ts = None
     if str(query or "").strip():
         logger.info("[sentence] gate query=%s entries=%d events=%d",
@@ -4913,7 +5203,11 @@ def _event_layer_block(session_id, store, query, budget, rerank_config=None,
     # claim fields themselves stay in the store, they just stop being
     # rendered -- docs/INJECTION-CONTRACT.md shows the caller-side example.
     head = []
-    lines = state_lines + (_claims + [""] if _claims else []) + lines
+    # 958500b 把“约束规则移出记忆块”时删掉了生成证据行的那段（if _private:
+    # _claims = _claim_lines(...)），却留下了这一项；_claims 于是指向本函数里
+    # import 进来的模块，module + [""] 直接抛 TypeError，整块交付被打回 sentence。
+    # 该 commit 的本意就是不再拼证据行，因此这里只拼状态行与正文。
+    lines = state_lines + lines
     text = "你记得这些事：\n" + "\n".join(lines)
     try:
         _journal(store, session_id, "inject", query=str(query)[:60],
@@ -4949,11 +5243,20 @@ def _trim_lines(text, budget):
     return "\n".join(kept) + "\n" + note
 
 def _inject_summarizer(store, payload):
-    """The host's callable if it sent one, else the config-built one."""
+    """The host's callable if it sent one, else the config-built one, else None.
+
+    交付路径（inject_block）只在这里取摘要器：配置缺失或无效时返回 None，
+    由 _event_layer_block 按「只交付」降级。写入/维护路径（capture）仍走
+    summarizer_from_config 的原契约——没有摘要器就没法切事件，那里继续报错。
+    """
     pl = payload if isinstance(payload, dict) else {}
     if callable(pl.get("event_summarizer")):
         return pl["event_summarizer"]
-    return summarizer_from_config(store, pl)
+    try:
+        return summarizer_from_config(store, pl)
+    except Exception as exc:
+        logger.debug("[event] 摘要器不可用，本轮只交付：%s", str(exc)[:120])
+        return None
 
 
 class ModeDisabled(RuntimeError):
@@ -5205,10 +5508,19 @@ def inject_block(session_id, store, max_chars=None, top_k=TOP_K,
     the layer that decides wording can see how she feels -- not just what was
     said. Everything is behind the body switch and never raises.
     """
+    try:
+        from biocore_memory.core.request_scope import RequestScope
+        _scope = RequestScope()
+    except Exception:
+        _scope = None
     _core = _inject_block_core(
         session_id, store, max_chars=max_chars, top_k=top_k, query=query,
         mode=mode, rerank_config=rerank_config, now=now,
-        include_superseded=include_superseded, payload=payload, as_of=as_of)
+        include_superseded=include_superseded, payload=payload, as_of=as_of,
+        scope=_scope)
+    # 交付即取用：统一在这里写回 hits/last_used，所有交付路径都覆盖（range /
+    # event_rank / 句子 / 片段 / point_expand / cover / recent 回退）。
+    _mark_block_access(store, session_id, _core, query=query, scope=_scope)
     try:
         # Feed the body; do NOT render it here. The reverse injection already
         # exists (expr_state.render_state_block): one render path, one source of
@@ -5234,7 +5546,8 @@ def body_state(store, session_id):
 
 def _inject_block_core(session_id, store, max_chars=None, top_k=TOP_K,
                        query="", mode="query", rerank_config=None, now=None,
-                       include_superseded=False, payload=None, as_of=None):
+                       include_superseded=False, payload=None, as_of=None,
+                       scope=None):
     """Top-k session memories as one bounded Chinese prompt block.
 
     mode="query"  recall this turn's words (engine.recall + env embedder,
@@ -5247,7 +5560,17 @@ def _inject_block_core(session_id, store, max_chars=None, top_k=TOP_K,
     # 0 / None mean "use the default": an explicit rule, not a falsy accident
     # 17 地址即读集：给了明确区间就按区间取，不再走相似度
     _range = (payload or {}).get("turn_range") if isinstance(payload, dict) else None
+    # 阶段顺序由纯函数给出；启用与否仍在该阶段门口读（读取次数与位置保持原样，
+    # 配置热更新在两次读取之间的效果因此不变）。
+    _range_ok = False
     if _range:
+        try:
+            int(_range[0]); int(_range[1])
+            _range_ok = True
+        except Exception:
+            _range_ok = False
+    _stages = _recall_plan.pick_delivery(has_range=_range_ok)
+    if "range" in _stages and _range:
         try:
             lo, hi = int(_range[0]), int(_range[1])
         except Exception:
@@ -5293,60 +5616,34 @@ def _inject_block_core(session_id, store, max_chars=None, top_k=TOP_K,
     # An enabled switch with zero events is not a working event layer: it
     # returns a two-line shell and the merge below then hands that shell back,
     # which is how a 14k budget produced a 326-character block.
-    if _event_layer_on(store, payload):
+    if "event" in _stages and _event_layer_on(store, payload):
         # both views, not either/or: claims carry the correction/conflict state,
         # sentences carry the fact itself. The event layer used to return first,
         # which made the sentence branch below unreachable.
+        # 取 不许调模型（模型只在沉一处）：交付路径不再把摘要器交给事件层做维护。
+        # 维护留在 turn_end 的沉（runtime_consolidate）；这里只交付已存事件。
         event_block = _event_layer_block(
             session_id, store, text_query, budget, rerank_config=rerank_config,
             payload=payload,
-            summarizer=_inject_summarizer(store, payload),
-            as_of=as_of)
-        if not event_block or not event_block.get("text"):
-            raise RuntimeError("event_layer returned an empty block")
-        if SENTENCE_RECALL_ON and str(text_query).strip():
-            try:
-                _pool = [row for row in _visible(load_memory(store, session_id).get("entries"))
-                         if isinstance(row, dict) and str(row.get("text") or "").strip()]
-                _evs = (_load_event_state(store, session_id).get("events") or [])
-                _sent_probe = _sentence_recall_block(
-                    store, session_id, text_query, _pool, _evs, payload=payload,
-                    rerank_config=rerank_config, now=None,
-                    budget_chars=budget)
-                # point to surface: the claims come from the events the hit
-                # sentences belong to, never from the whole history
-                _hit_ids = set(str(x) for x in ((_sent_probe or {}).get("ids") or []))
-                _hit_events = []
-                if _hit_ids:
-                    for _ev in _evs:
-                        for _row in _ev.get("entries") or []:
-                            if str(_row.get("id") or "") in _hit_ids:
-                                _hit_events.append(_ev)
-                                break
-                _lines = _claims_state_lines(_hit_events or _evs, limit=8)
-                _head = chr(10).join(_lines)
-                _room = max(200, budget - len(_head) - 1)
-                _sent = _sentence_recall_block(
-                    store, session_id, text_query, _pool, _evs, payload=payload,
-                    rerank_config=rerank_config, now=None, budget_chars=_room)
-                _body = (_sent or {}).get("text") or ""
-                if _body:
-                    _merged = ((_head + chr(10)) if _head else "") + _body
-                    return dict(event_block, text=_merged, chars=len(_merged))
-            except Exception as exc:
-                logger.warning("[sentence] merge fallback: %s: %s",
-                               type(exc).__name__, str(exc)[:160])
-        if not (event_block.get("events_shown") or event_block.get("events_picked")):
-            # A layer that has nothing to show must not hand back a shell and
-            # pretend: fall through to the sentence path below.
+            summarizer=None,
+            as_of=as_of, scope=scope)
+        # 事件不可用（空块 / 一件都没交付）：降级到下面的逐句阶段，并留一行说明。
+        # 以前这里 raise，整次注入直接失败；也有过把句子块拼进事件块的做法，
+        # 让"逐句"看起来还在用——两者都已去掉：事件交付只给事件本身。
+        if not (event_block or {}).get("text") \
+                or not (event_block.get("events_shown") or event_block.get("events_picked")):
+            logger.warning("[delivery] 事件不可用，已降级为逐句")
             event_block = None
         else:
             return event_block
-    if SENTENCE_RECALL_ON and str(text_query).strip():
+    if "sentence" in _stages and SENTENCE_RECALL_ON and str(text_query).strip():
         # reachable without the event layer: production runs segment recall,
         # so a block nested inside _event_layer_block never executed
         try:
-            _pool = [row for row in _visible(load_memory(store, session_id).get("entries"))
+            _pool = [row for row in _visible_for_recall(
+                         store, session_id,
+                         _visible(_scoped_load(store, session_id, scope).get("entries")),
+                         now=now)
                      if isinstance(row, dict) and str(row.get("text") or "").strip()]
             _evs = (_load_event_state(store, session_id).get("events") or [])
             logger.info("[sentence] main path entries=%d events=%d",
@@ -5404,15 +5701,15 @@ def _inject_block_core(session_id, store, max_chars=None, top_k=TOP_K,
                 _block = dict(_block, text=_merged, chars=len(_merged),
                               state_lines=len(_state_lines))
         if _block and _block.get("text"):
-            try:
-                from biocore_memory import timefmt as _tfa
-                _mark_access(store, session_id, _block.get("ids") or [], now=time.time())
-            except Exception:
-                pass
+            # access 写回已收敛到 inject_block 的交付点，这里不再重复记（否则同一
+            # 次交付在句子分支会被计两次 hits）。
             # 时间链：同一属性说了好几次时，标出哪次被撤回
             try:
-                _summ = _inject_summarizer(store, payload)
-                _rows_v = [row for row in _visible(load_memory(store, session_id).get("entries"))
+                # 取 不许调模型（模型只在沉一处）：时间链的"撤回判定"需要模型，
+                # 这里传 None 让它只做结构展示、不判定；判定留给沉。
+                _summ = None
+                _rows_v = [row for row in _visible(_scoped_load(store, session_id, scope)
+                                                   .get("entries"))
                            if isinstance(row, dict) and row.get("vector")]
                 _chain_lines = _chains_lines(_rows_v, _summ)
                 if _chain_lines:
@@ -5435,7 +5732,7 @@ def _inject_block_core(session_id, store, max_chars=None, top_k=TOP_K,
                 except Exception:
                     pass
             return _block
-    if _segment_recall_on(store, payload) and _segments is not None:
+    if "segment" in _stages and _segment_recall_on(store, payload) and _segments is not None:
         segmented = _inject_segments(
             session_id, store, text_query, limit, budget,
             "你记得这些事：", _date_prefix_on(store, payload))
@@ -5444,13 +5741,16 @@ def _inject_block_core(session_id, store, max_chars=None, top_k=TOP_K,
                 _ft = _fence_untrusted(segmented.get("text"))
                 segmented = dict(segmented, text=_ft, chars=len(_ft))
             return segmented
+    if "entries" not in _stages:
+        return {"text": "", "chars": 0, "ids": []}
     entries = []
     query_used = False
     if chosen == "query" and text_query:
         try:
             picked = _query_entries(store, session_id, text_query, limit,
                                     rerank_config, now=now,
-                                    include_superseded=include_superseded)
+                                    include_superseded=include_superseded,
+                                    scope=scope)
         except Exception:
             picked = None
         if picked:
@@ -5459,7 +5759,10 @@ def _inject_block_core(session_id, store, max_chars=None, top_k=TOP_K,
     if not entries:
         # fetch a wider window so the answer-type bias has room to lift a
         # memory that the recent order alone would have cut
-        entries = sorted(_visible(load_memory(store, session_id).get("entries")),
+        entries = sorted(_visible_for_recall(
+                             store, session_id,
+                             _visible(_scoped_load(store, session_id, scope).get("entries")),
+                             now=now),
                          key=lambda entry: (1 if entry.get("pin") else 0,
                                             _num(entry.get("ts"), 0.0)),
                          reverse=True)[:max(limit, 20)]
@@ -5520,11 +5823,9 @@ def _inject_block_core(session_id, store, max_chars=None, top_k=TOP_K,
             if _code:
                 prefix = "[%s] " % _code + prefix
         line = "\n- " + prefix + content
+        # 原文不裁：装不下就整条跳过，绝不在句子中间切开放省略号
         if len(line) > room:
-            clipped = room - 4 - len(prefix)
-            if clipped <= 1:
-                break
-            line = "\n- " + prefix + content[:clipped] + "…"
+            continue
         text += line
         ids.append(str(entry.get("id") or ""))
     if len(text) <= len(header) + 2:
@@ -6096,15 +6397,28 @@ def _rerank_config(store, payload=None):
     return out
 
 
+def _retrieval_last_path(store):
+    """回执文件的位置：<dataDir>/cache/retrieval_last.json。
+
+    它记的是“上一次召回收到了什么”，属于可弃的调试回执，不该掉在 store 根目录
+    （那里放的是记忆数据；掉在根目录会让“召回不写数据目录”这条契约说不清）。
+    """
+    data_dir = _store_data_dir(store) if store else None
+    if data_dir is None:
+        return None
+    return Path(data_dir) / 'cache' / RETRIEVAL_LAST_FILE
+
+
 def _record_retrieval(store, row):
-    """<dataDir>/retrieval_last.json: what the last recall stage did."""
+    """<dataDir>/cache/retrieval_last.json: what the last recall stage did."""
     try:
-        data_dir = _store_data_dir(store) if store else None
-        if data_dir is None:
+        path = _retrieval_last_path(store)
+        if path is None:
             return False
         row = dict(row)
         row["ts"] = round(time.time(), 3)
-        _atomic_write(Path(data_dir) / RETRIEVAL_LAST_FILE, row)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        _atomic_write(path, row)
         return True
     except Exception:
         return False
@@ -6112,13 +6426,17 @@ def _record_retrieval(store, row):
 
 def _retrieval_last(store):
     try:
-        data_dir = _store_data_dir(store) if store else None
-        if data_dir is None:
+        path = _retrieval_last_path(store)
+        if path is None:
             return {}
-        row = _load_json(Path(data_dir) / RETRIEVAL_LAST_FILE, {})
+        row = _load_json(path, {})
         return row if isinstance(row, dict) else {}
     except Exception:
         return {}
+
+
+# rerank 的故障告警：一次故障周期只打一行，恢复后复位（见 _rerank_rows）
+_RERANK_WARNED = False
 
 
 def _rerank_rows(store, query, rows, payload=None, stage="recall",
@@ -6173,6 +6491,12 @@ def _rerank_rows(store, query, rows, payload=None, stage="recall",
         reasons.append("error")
     if not reranked:
         status["reason"] = str(reasons[0] if reasons else "fallback")
+        # 一次故障周期只告警一次：成功会复位，恢复后再坏属新周期、要能看见
+        global _RERANK_WARNED
+        if not _RERANK_WARNED:
+            _RERANK_WARNED = True
+            logger.warning("[rerank] rerank unavailable, fallback to cosine (reason=%s)",
+                           status["reason"])
         _record_retrieval(store, status)
         return rows, status
     seen = set()
@@ -6191,6 +6515,7 @@ def _rerank_rows(store, query, rows, payload=None, stage="recall",
         if index not in seen:
             ordered.append(row)
     status.update({"reranked": True, "reason": "ok", "kept": len(ordered)})
+    _RERANK_WARNED = False   # 恢复：下一次失败会重新告警
     _record_retrieval(store, status)
     return ordered, status
 
@@ -8176,6 +8501,8 @@ CORE_DEFAULTS = {
     "recall_mode": "query",
     # A date prefix on each injected memory (default ON).
     "memory_date_prefix": True,
+    # 上下文总结 as a recall seed, next to the user's own line (default ON).
+    "context_seed": True,
     # Recall by event segment instead of by entry (default OFF).
     "segment_recall": False,
     # Point-expand: hits first, then the neighbours of each hit (default OFF).
@@ -8275,6 +8602,38 @@ def sanitize_config(doc):
         CONFIG_DROPPED["last"] = dropped
         logger.warning("[config] 丢弃 %d 个不合规项：%s", len(dropped), ",".join(dropped[:6]))
     return out
+
+
+def _run_turn_end_consolidate(store, session_id, payload=None):
+    """沉：turn_end 写入路径的登记入口。
+
+    只登记结构（成员/起止/日期），名字、线索、claims 留空给总结层；
+    开关关着一行不写（连表都不建）；任何异常只 warn，绝不阻塞 turn_end 的其它动作。
+    """
+    try:
+        from biocore_memory.event import runtime_consolidate as _rc
+        if not _rc.enabled(payload, store):
+            return {"enabled": False}
+        root = _store_root(store)
+        if root is None:
+            return {"enabled": True, "reason": "no_store"}
+        db_path = _db_path(root, session_id)
+        entries = _visible(load_memory(store, session_id).get("entries"))
+        state = _load_event_state(store, session_id)
+        events = list(state.get("events") or [])
+        summarizer = _inject_summarizer(store, payload)
+        # 模型名进缓存键：换模型即失效（旧缓存文件保留，只增不改）
+        try:
+            _block = (_load_runtime_config(store).get("summarizer") or {})
+            _model = str(_block.get("model") or "")
+        except Exception:
+            _model = ""
+        return _rc.run(db_path, session_id, entries, events,
+                       summarizer=summarizer, now=time.time(), model=_model)
+    except Exception as exc:
+        logger.warning("[consolidate] turn_end 登记跳过：%s: %s",
+                       type(exc).__name__, str(exc)[:120])
+        return {"enabled": True, "error": type(exc).__name__}
 
 
 def _load_runtime_config(store):
@@ -8681,6 +9040,27 @@ def _trace_affect(raw):
     return out
 
 
+def _read_core_state_file(store):
+    """<dataDir>/core_state.json beside the memory store (best effort).
+
+    The bio layer keeps the live numbers there, while the per-session state
+    file only exists on the adapter fallback path. Reading it here keeps the
+    trace honest no matter which host called us.
+    """
+    try:
+        if not store:
+            return {}
+        base = os.path.dirname(str(store).rstrip("/\\"))
+        path = os.path.join(base, "core_state.json")
+        if not os.path.exists(path):
+            return {}
+        with open(path, "r", encoding="utf-8") as fh:
+            data = json.load(fh)
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
 def build_trace(session_id, payload, gate, captured):
     """Diagnostic row; purely observational (never drives gate/capture)."""
     data = payload if isinstance(payload, dict) else {}
@@ -8691,7 +9071,8 @@ def build_trace(session_id, payload, gate, captured):
         "state_delta": _trace_state_delta(data.get("state_delta")),
         # absolute state, not just deltas: one-step prediction error can only be
         # measured if every turn leaves its numbers behind
-        "affect": _trace_affect(data.get("state") or data.get("bio_state")),
+        "affect": (_trace_affect(data.get("state") or data.get("bio_state"))
+                   or _trace_affect(_read_core_state_file(data.get("store")))),
         "intent": _trace_intent(data.get("intent")),
         "constraints": constraints,
         "length": _trace_length(data.get("length"), constraints),
@@ -8844,6 +9225,39 @@ def dispatch(action, payload=None):
                 save_memory(store, session_id, entries)
             return {"ok": True, "before": before, "changed": changed,
                     "after": _lr.broken_counts(entries, events)}
+
+        if action == "forget":
+            # 忘：先把决策算出来（只读），只有显式 apply 才把行标成已归档。
+            # 决策本身在 biocore_memory.evict.policy（按久未取用、冗余、旧版本、
+            # 事件保留最新一行），这里只负责把分区分给它并在需要时落库。
+            session_id = str(data.get("session_id") or "").strip()
+            if not session_id:
+                return bad("missing session_id")
+            from biocore_memory.evict import policy as _evict_policy
+            _now = data.get("now")
+            stamp = float(_now) if isinstance(_now, (int, float)) else time.time()
+            doc = load_memory(store, session_id)
+            entries = [row for row in (doc.get("entries") or [])
+                       if isinstance(row, dict) and not row.get("deleted")]
+            plan = _evict_policy.tick(entries, now=stamp)
+            applied = []
+            if data.get("apply"):
+                by_id = {str(row.get("id") or ""): row for row in entries}
+                for entry_id in plan["archive"]:
+                    row = by_id.get(str(entry_id))
+                    if row is None:
+                        continue
+                    row["deleted"] = True
+                    row["deleted_ts"] = round(stamp, 3)
+                    row["deleted_reason"] = "evicted"
+                    applied.append(str(entry_id))
+                if applied:
+                    save_memory(store, session_id, doc)
+            return {"ok": True, "now": stamp, "entries": len(entries),
+                    "archive": len(plan["archive"]), "flag": len(plan["flag"]),
+                    "keep": len(plan["keep"]), "archive_ids": plan["archive"][:20],
+                    "applied": applied,
+                    "stale_days": round(_evict_policy._stale_seconds() / 86400.0, 2)}
 
         if action == "turn_start":
             session_id = str(data.get("session_id") or "").strip()
@@ -9265,6 +9679,9 @@ def dispatch(action, payload=None):
                     "capture": False,
                     "reason": "disabled" if not capture_enabled else "no_store",
                 }, "entry": None}
+            # 沉：把本轮新写入的行登记成"待总结块"。挂在写入路径尾部，
+            # 开关缺省 0；无摘要器只留 unsummarized 标记；失败只 warn。
+            consolidate_info = _run_turn_end_consolidate(store, session_id, data)
             # spatial_feedback: judge the recalled entries against the reply
             # this turn actually sent, append the rows and (when enough of
             # them exist) move the axis weights. Read-only for the memory.
@@ -9394,6 +9811,7 @@ def dispatch(action, payload=None):
                 "governance": governance_info,
                 "relationship": relationship_info,
                 "identity": identity_info,
+                "consolidate": consolidate_info,
             }
         if action == "usage_event":
             if _cache_stats is None:
@@ -9758,6 +10176,20 @@ def dispatch(action, payload=None):
                 data.get("session_id") or data.get("session") or "",
                 data.get("last_human_ts"), data.get("switches") or {},
                 store, now=data.get("now"), state_file=data.get("state_file"))
+        if action == "settings_get":
+            # 面板读设置：三处模型配置（密钥打码）+ 七个设置。只读、不调模型。
+            from biocore_runtime import settings_api as _settings
+            return _settings.settings_get(store, data.get("target") or None)
+        if action == "settings_set":
+            # 面板写设置：备份 → 应用 → 原子写 → 读回校验；运行期立即生效。
+            from biocore_runtime import settings_api as _settings
+            return _settings.settings_set(store, data.get("target") or None,
+                                          data.get("patch") or {}, now=data.get("now"))
+        if action == "test_connection":
+            # 面板用：给三个模型配置各发一次最小请求。只读、不写库、不抛。
+            from biocore_runtime import connection_test as _ct
+            target = data.get("target") or ""
+            return _ct.run(target, store, data)
         if action in ("memory_inject", "memory"):
             session_id = data.get("session_id") or data.get("session") or "default"
             switches = _effective_switches(store, data.get("switches"))

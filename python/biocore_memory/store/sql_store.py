@@ -8,13 +8,24 @@ from __future__ import annotations
 
 import atexit
 import contextlib
+import logging
 import json
 import weakref
 import os
+import itertools
 import sqlite3
 import struct
 import time
 from pathlib import Path
+
+# Batch ids identify one write_doc call. A millisecond stamp alone is not enough:
+# two writes inside the same millisecond shared one id, so undo_batch() reverted
+# both (a delete from the first write was undone together with the second), which
+# corrupted recovery. The stamp stays, a process-local counter makes it unique;
+# a restart starting at 1 is fine because the millisecond will have moved on.
+# Ids already stored as a bare millisecond remain valid: every read path matches
+# the batch string exactly, so old rows keep undoing as before.
+_BATCH_SEQ = itertools.count(1)
 
 SCHEMA = '''
 CREATE TABLE IF NOT EXISTS entries (
@@ -644,7 +655,7 @@ def write_doc(root, session_id, doc, changed=None, deleted=None, stamp_meta=True
                 conn.execute('INSERT INTO meta (k, v) VALUES (?, ?)'
                              ' ON CONFLICT(k) DO UPDATE SET v=excluded.v',
                              (key, str(value)))
-        batch = '%d' % int(time.time() * 1000)
+        batch = '%d-%d' % (int(time.time() * 1000), next(_BATCH_SEQ))
         rows = doc.get('entries') if isinstance(doc.get('entries'), list) else []
         if changed is None:
             changed = rows
@@ -957,5 +968,58 @@ def load_event_state(root, session_id):
         except Exception:
             open_buf = []
         return {"seen": seen, "events": events, "state": state, "open": open_buf}
+    finally:
+        conn.close()
+
+def update_trace_fields(store, session_id, updates, *, use_json=None):
+    """只写使用记录（hits / last_used），纯 SQL，不做 json.loads / json.dumps。
+
+    为什么是 SQL 而不是“读整页→改→整页写回”：整页重写必然带进顺手整理，
+    vector: null 被写成 [] 就是这么来的（2026-11-13 的 bug）。这里只碰指定列与
+    指定 JSON 路径，其它字节由 sqlite 保留。
+
+    使用记录是“谁用过”的依据、不是记忆内容：禁写会让「忘」失去现实依据，
+    延后写会在崩溃时丢计数。
+
+    updates = {entry_id: {"hits": int, "last_used": float}}
+    返回写入的行数；失败抛异常由调用方决定（交付路径应当 try/except + warn）。
+    """
+    updates = {str(k): v for k, v in (updates or {}).items() if k}
+    if not updates:
+        # 空批：不开事务、不产生任何 SQL，只留一行 debug
+        logging.getLogger(__name__).debug(
+            '[trace] nothing to update (session=%s)', session_id)
+        return 0
+    path = Path(str(store)) / 'sessions' / str(session_id) / 'memory.db'
+    if not path.exists():
+        return 0
+    conn = sqlite3.connect(str(path))
+    try:
+        if use_json is None:
+            try:
+                use_json = conn.execute("SELECT json_valid('{}')").fetchone()[0] == 1
+            except Exception:
+                use_json = False
+        written = 0
+        conn.execute('BEGIN')
+        try:
+            for entry_id, fields in updates.items():
+                hits = fields.get('hits')
+                last_used = fields.get('last_used')
+                if use_json:
+                    cur = conn.execute(
+                        "UPDATE entries SET hits = ?, "
+                        "raw = json_set(raw, '$.hits', ?, '$.last_used', ?) "
+                        "WHERE id = ?", (hits, hits, last_used, entry_id))
+                else:
+                    # 降级：只更新列，raw 一个字节都不动
+                    cur = conn.execute(
+                        'UPDATE entries SET hits = ? WHERE id = ?', (hits, entry_id))
+                written += cur.rowcount if cur.rowcount and cur.rowcount > 0 else 0
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        return written
     finally:
         conn.close()

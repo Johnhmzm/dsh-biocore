@@ -743,8 +743,9 @@ class TraceTest(unittest.TestCase):
         out = self._turn_end(diagnostics=self._diagnostics())
         self.assertTrue(out["ok"])
         trace = out["trace"]
+        # affect 是绝对状态快照（不是增量）：没有它就无法测一步预测误差
         self.assertEqual(set(trace), {
-            "ts", "session_id", "state_delta", "intent", "constraints",
+            "ts", "session_id", "state_delta", "affect", "intent", "constraints",
             "length", "gate", "memory", "modules"})
         self.assertEqual(trace["session_id"], "s")
         trace_file = Path(out["trace_file"])
