@@ -1308,7 +1308,8 @@
     if (!chars || !delivery) return
     var source = recall && typeof recall === 'object' ? recall : {}
     if (Number.isFinite(Number(source.inject_chars))) chars.value = String(source.inject_chars)
-    delivery.value = source.delivery === 'event' ? 'event' : 'sentence'
+    // 默认按事件交付；只有显式写了 sentence 才是降级路径（旧代码把 event_rank 显示成逐句）
+    delivery.value = source.delivery === 'sentence' ? 'sentence' : 'event_rank'
     if (events) {
       var preset = Number(source.event_preset)
       events.value = String(Number.isInteger(preset) ? clampEventPreset(preset) : 8)
