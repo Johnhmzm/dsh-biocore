@@ -1899,6 +1899,9 @@
     var preset = $('msEventPreset'); if (preset && s.event_preset != null) preset.value = String(s.event_preset)
     var win = $('msWindow'); if (win && s.window != null) win.value = String(s.window)
     var top = $('msPortraitTop'); if (top && s.portrait_top != null) top.value = String(s.portrait_top)
+    var floor = $('msRelevantFloor'); if (floor && s.relevant_floor != null) floor.value = String(s.relevant_floor)
+    var clean = $('msEventDeliveryClean')
+    if (clean) clean.checked = Number(s.event_delivery_clean_on || 0) === 1
   }
 
   function msFillStatus(status) {
@@ -1963,6 +1966,8 @@
         event_preset: num('msEventPreset', 8),
         window: num('msWindow', 1),
         portrait_top: num('msPortraitTop', 8),
+        relevant_floor: num('msRelevantFloor', 0.2),
+        event_delivery_clean_on: ($('msEventDeliveryClean') || {}).checked ? 1 : 0,
       },
     }
   }
