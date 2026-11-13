@@ -1903,6 +1903,7 @@
     var clean = $('msEventDeliveryClean')
     if (clean) clean.checked = Number(s.event_delivery_clean_on || 0) === 1
     var mode = $('msEventTextMode'); if (mode) mode.value = s.event_text_mode || 'raw'
+    var longc = $('msLongEventChars'); if (longc && s.long_event_chars != null) longc.value = String(s.long_event_chars)
   }
 
   function msFillStatus(status) {
@@ -1970,6 +1971,7 @@
         relevant_floor: num('msRelevantFloor', 0.2),
         event_delivery_clean_on: ($('msEventDeliveryClean') || {}).checked ? 1 : 0,
         event_text_mode: (($('msEventTextMode') || {}).value) || 'raw',
+        long_event_chars: num('msLongEventChars', 1200),
       },
     }
   }

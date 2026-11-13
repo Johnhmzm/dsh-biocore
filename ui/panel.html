@@ -453,8 +453,11 @@
             <option value="summary">总结</option>
             <option value="auto">自动</option>
           </select></label>
+        <label class="field"><span>长事件阈值（字符）</span>
+          <input id="msLongEventChars" type="number" min="200" max="8000" step="100" value="1200">
+        </label>
         <div class="card-actions">
-          <button id="msSave" class="primary-button" type="button">保存</button>
+<button id="msSave" class="primary-button" type="button">保存</button>
           <button id="msReload" class="ghost-button" type="button">重新读取</button>
         </div>
         <p class="hint" id="msHint">保存后立即生效，不重启；越界值会自动夹紧并提示。</p>
