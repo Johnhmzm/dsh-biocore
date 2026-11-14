@@ -1036,28 +1036,7 @@ body[data-tab='settings'] .card {
   cursor: pointer;
 }
 body[data-tab='settings'] .card:hover { border-color: var(--orange); }
-body[data-tab='settings'] .card > *:not(.card-head) { display: none; }
-body[data-tab='settings'] .card.open {
-  grid-column: 1 / -1;
-  height: auto;
-  overflow: visible;
-  cursor: default;
-}
-body[data-tab='settings'] .card.open > .card-head { display: flex; }
-body[data-tab='settings'] .card.open > .field-grid,
-body[data-tab='settings'] .card.open > .group-title,
-body[data-tab='settings'] .card.open > .btn-row,
-body[data-tab='settings'] .card.open > .hint,
-body[data-tab='settings'] .card.open > .switch-row,
-body[data-tab='settings'] .card.open > .table-scroll,
-body[data-tab='settings'] .card.open > .field,
-body[data-tab='settings'] .card.open > .field-block,
-body[data-tab='settings'] .card.open > p,
-body[data-tab='settings'] .card.open > div { display: revert; }
-body[data-tab='settings'] .card.open > .field-grid { display: grid; }
-body[data-tab='settings'] .card.open > .btn-row { display: flex; }
-body[data-tab='settings'] .card.open > .switch-row { display: flex; }
-body[data-tab='settings'] .card.open > .table-scroll { display: block; }
+body[data-tab='settings'] .card:not(.open) > *:not(.card-head) { display: none; }
 
 
 

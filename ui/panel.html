@@ -1,10 +1,10 @@
-<!doctype html>
+﻿<!doctype html>
 <html lang="zh-CN">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="color-scheme" content="dark light">
-<title>生物核 · 终端</title>
+<title>鐢熺墿鏍?路 缁堢</title>
 <link rel="icon" href="orb.png">
 <script>
 /* Theme before first paint: host <html data-theme> wins, then ?theme= preview,
@@ -27,7 +27,7 @@
   else root.removeAttribute('data-theme')
 })()
 </script>
-<link rel="stylesheet" href="panel.css?v=46">
+<link rel="stylesheet" href="panel.css?v=47">
 </head>
 <body data-tab="dashboard">
 <svg class="sprite" aria-hidden="true" focusable="false" xmlns="http://www.w3.org/2000/svg">
@@ -42,21 +42,21 @@
 </svg>
 
 <div class="shell">
-  <nav class="rail" aria-label="主导航">
+  <nav class="rail" aria-label="涓诲鑸?>
     <div class="rail-logo" aria-hidden="true">BC</div>
-    <button class="rail-item active" type="button" data-tab="dashboard" aria-selected="true" title="仪表盘" aria-label="仪表盘">
+    <button class="rail-item active" type="button" data-tab="dashboard" aria-selected="true" title="浠〃鐩? aria-label="浠〃鐩?>
       <svg class="ico" aria-hidden="true"><use href="#i-dashboard"></use></svg>
     </button>
-    <button class="rail-item" type="button" data-tab="memory" aria-selected="false" title="记忆" aria-label="记忆">
+    <button class="rail-item" type="button" data-tab="memory" aria-selected="false" title="璁板繂" aria-label="璁板繂">
       <svg class="ico" aria-hidden="true"><use href="#i-memory"></use></svg>
     </button>
-    <button class="rail-item" type="button" data-tab="relation" aria-selected="false" title="关系" aria-label="关系">
+    <button class="rail-item" type="button" data-tab="relation" aria-selected="false" title="鍏崇郴" aria-label="鍏崇郴">
       <svg class="ico" aria-hidden="true"><use href="#i-relation"></use></svg>
     </button>
-    <button class="rail-item" type="button" data-tab="settings" aria-selected="false" title="配置" aria-label="配置">
+    <button class="rail-item" type="button" data-tab="settings" aria-selected="false" title="閰嶇疆" aria-label="閰嶇疆">
       <svg class="ico" aria-hidden="true"><use href="#i-settings"></use></svg>
     </button>
-    <button class="rail-item" type="button" data-tab="tools" aria-selected="false" title="工具" aria-label="工具">
+    <button class="rail-item" type="button" data-tab="tools" aria-selected="false" title="宸ュ叿" aria-label="宸ュ叿">
       <svg class="ico" aria-hidden="true"><use href="#i-tools"></use></svg>
     </button>
     <div class="rail-foot"><span class="rail-ver" id="railVersion">v__BIOCORE_VERSION__</span></div>
@@ -65,33 +65,33 @@
   <main class="main">
     <header class="top" id="topBar">
       <span class="brand">BIOCORE</span>
-      <span class="ttl" id="pageTitle">终端<em>OPERATOR TERMINAL</em></span>
+      <span class="ttl" id="pageTitle">缁堢<em>OPERATOR TERMINAL</em></span>
       <span class="chip" id="topChip">ONLINE</span>
       <span class="chip" id="topBuild">BUILD __BIOCORE_VERSION__</span>
       <div class="top-right">
-        <span class="top-line"><i class="orb" id="orbState" aria-hidden="true"></i><span class="top-k">SESSION</span> <b class="num" id="topSession">—</b></span>
+        <span class="top-line"><i class="orb" id="orbState" aria-hidden="true"></i><span class="top-k">SESSION</span> <b class="num" id="topSession">鈥?/b></span>
         <span class="num" id="topClock">--:--:--</span>
-        <button id="layoutFab" class="icon-button" type="button" aria-label="编辑布局" title="编辑布局">
+        <button id="layoutFab" class="icon-button" type="button" aria-label="缂栬緫甯冨眬" title="缂栬緫甯冨眬">
           <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><use href="#i-edit"></use></svg>
         </button>
-        <button id="layoutDone" class="icon-button icon-button-accent" type="button" aria-label="完成编辑" title="完成编辑" hidden>
+        <button id="layoutDone" class="icon-button icon-button-accent" type="button" aria-label="瀹屾垚缂栬緫" title="瀹屾垚缂栬緫" hidden>
           <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><use href="#i-check"></use></svg>
         </button>
-        <button id="layoutReset" class="chip chip-button" type="button" hidden>恢复默认</button>
+        <button id="layoutReset" class="chip chip-button" type="button" hidden>鎭㈠榛樿</button>
       </div>
     </header>
 
     <div class="body" id="grid">
 
       <div class="stack">
-        <section class="card" data-card-id="intero" data-card-label="自体感知">
+        <section class="card" data-card-id="intero" data-card-label="鑷綋鎰熺煡">
           <header class="card-head">
             <i class="sq" aria-hidden="true"></i>
-            <b>INTEROCEPTION</b><span class="zh">/ 自体感知</span>
-            <span class="r" id="interoMeta">—</span>
+            <b>INTEROCEPTION</b><span class="zh">/ 鑷綋鎰熺煡</span>
+            <span class="r" id="interoMeta">鈥?/span>
           </header>
           <div class="hero">
-            <div class="dial" aria-label="心情指数">
+            <div class="dial" aria-label="蹇冩儏鎸囨暟">
               <svg viewBox="0 0 168 168" aria-hidden="true">
                 <circle class="dial-track" cx="84" cy="84" r="72"></circle>
                 <circle class="dial-dash" cx="84" cy="84" r="72"></circle>
@@ -99,248 +99,248 @@
                 <circle class="dial-ring" cx="84" cy="84" r="82"></circle>
               </svg>
               <div class="dial-v">
-                <b class="num" id="dialValue">—</b>
-                <span id="dialLabel">—</span>
+                <b class="num" id="dialValue">鈥?/b>
+                <span id="dialLabel">鈥?/span>
               </div>
             </div>
             <div class="chan-col">
               <div class="chans">
-                <div class="ch" aria-label="绷紧">
+                <div class="ch" aria-label="缁风揣">
                   <span class="k">TENSION</span>
                   <span class="tr"><i id="tensionBar"></i><u class="tk"></u></span>
-                  <span class="n num" id="tensionValue">—</span>
+                  <span class="n num" id="tensionValue">鈥?/span>
                 </div>
-                <div class="ch" aria-label="暖">
+                <div class="ch" aria-label="鏆?>
                   <span class="k">WARMTH</span>
                   <span class="tr"><i id="warmthBar"></i><u class="tk"></u></span>
-                  <span class="n num" id="warmthValue">—</span>
+                  <span class="n num" id="warmthValue">鈥?/span>
                 </div>
-                <div class="ch" aria-label="沉">
+                <div class="ch" aria-label="娌?>
                   <span class="k">WEIGHT</span>
                   <span class="tr"><i id="heavinessBar"></i><u class="tk"></u></span>
-                  <span class="n num" id="heavinessValue">—</span>
+                  <span class="n num" id="heavinessValue">鈥?/span>
                 </div>
-                <div class="ch" aria-label="清">
+                <div class="ch" aria-label="娓?>
                   <span class="k">CLARITY</span>
                   <span class="tr"><i id="clarityBar"></i><u class="tk"></u></span>
-                  <span class="n num" id="clarityValue">—</span>
+                  <span class="n num" id="clarityValue">鈥?/span>
                 </div>
               </div>
-              <p class="note" id="interoNote">—</p>
+              <p class="note" id="interoNote">鈥?/p>
             </div>
           </div>
         </section>
 
-        <section class="card" data-card-id="log" data-card-label="记忆">
+        <section class="card" data-card-id="log" data-card-label="璁板繂">
           <header class="card-head">
             <i class="sq" aria-hidden="true"></i>
-            <b>EPISODIC LOG</b><span class="zh">/ 记忆</span>
-            <span class="r" id="logMeta">—</span>
+            <b>EPISODIC LOG</b><span class="zh">/ 璁板繂</span>
+            <span class="r" id="logMeta">鈥?/span>
           </header>
           <table class="log-table">
-            <thead><tr><th>TIME</th><th>摘要</th><th>角色</th><th>CONTENT</th><th class="ta-r">W</th></tr></thead>
-            <tbody id="memoryList"><tr class="is-empty"><td colspan="5">—</td></tr></tbody>
+            <thead><tr><th>TIME</th><th>鎽樿</th><th>瑙掕壊</th><th>CONTENT</th><th class="ta-r">W</th></tr></thead>
+            <tbody id="memoryList"><tr class="is-empty"><td colspan="5">鈥?/td></tr></tbody>
           </table>
         </section>
       </div>
 
       <div class="stack">
-        <section class="card" data-card-id="state" data-card-label="当前">
+        <section class="card" data-card-id="state" data-card-label="褰撳墠">
           <header class="card-head">
             <i class="sq" aria-hidden="true"></i>
-            <b>STATE</b><span class="zh">/ 当前</span>
+            <b>STATE</b><span class="zh">/ 褰撳墠</span>
             <span class="r">READ ONLY</span>
           </header>
-          <div class="kv" aria-label="关系"><span class="k">RELATION</span><span id="stateRelation">—</span></div>
-          <div class="kv" aria-label="语气"><span class="k">TONE</span><span id="stateTone">—</span></div>
-          <div class="kv" aria-label="自主"><span class="k">AUTONOMY</span><span id="stateAutonomy">—</span></div>
-          <div class="kv"><span class="k">INTENT</span><span class="num" id="stateIntent">—</span></div>
-          <div class="kv"><span class="k">SOCIAL PAIN</span><span class="num" id="statePain">—</span></div>
-          <p class="note" id="motivation">—</p>
+          <div class="kv" aria-label="鍏崇郴"><span class="k">RELATION</span><span id="stateRelation">鈥?/span></div>
+          <div class="kv" aria-label="璇皵"><span class="k">TONE</span><span id="stateTone">鈥?/span></div>
+          <div class="kv" aria-label="鑷富"><span class="k">AUTONOMY</span><span id="stateAutonomy">鈥?/span></div>
+          <div class="kv"><span class="k">INTENT</span><span class="num" id="stateIntent">鈥?/span></div>
+          <div class="kv"><span class="k">SOCIAL PAIN</span><span class="num" id="statePain">鈥?/span></div>
+          <p class="note" id="motivation">鈥?/p>
           <p class="state-note" id="emptyHint" hidden></p>
         </section>
 
-        <section class="card" data-card-id="today" data-card-label="今日">
+        <section class="card" data-card-id="today" data-card-label="浠婃棩">
           <header class="card-head">
             <i class="sq" aria-hidden="true"></i>
-            <b>TODAY</b><span class="zh">/ 今日</span>
-            <span class="r">00:00 — NOW</span>
+            <b>TODAY</b><span class="zh">/ 浠婃棩</span>
+            <span class="r">00:00 鈥?NOW</span>
           </header>
           <div class="tiles">
-            <div class="tile"><div class="k">NEW MEMORY</div><div class="n num" id="todayMem">—</div></div>
-            <div class="tile"><div class="k">SAMPLES</div><div class="n num" id="todayTurns">—</div></div>
-            <div class="tile"><div class="k">PROACTIVE</div><div class="n num" id="todayProactive">—</div></div>
-            <div class="tile"><div class="k">CACHE HIT</div><div class="n num" id="todayCache">—</div></div>
+            <div class="tile"><div class="k">NEW MEMORY</div><div class="n num" id="todayMem">鈥?/div></div>
+            <div class="tile"><div class="k">SAMPLES</div><div class="n num" id="todayTurns">鈥?/div></div>
+            <div class="tile"><div class="k">PROACTIVE</div><div class="n num" id="todayProactive">鈥?/div></div>
+            <div class="tile"><div class="k">CACHE HIT</div><div class="n num" id="todayCache">鈥?/div></div>
           </div>
         </section>
 
-        <section class="card" data-card-id="loops" data-card-label="待办">
+        <section class="card" data-card-id="loops" data-card-label="寰呭姙">
           <header class="card-head">
             <i class="sq" aria-hidden="true"></i>
-            <b>OPEN LOOPS</b><span class="zh">/ 待办</span>
-            <span class="r" id="loopsMeta">—</span>
+            <b>OPEN LOOPS</b><span class="zh">/ 寰呭姙</span>
+            <span class="r" id="loopsMeta">鈥?/span>
           </header>
-          <div class="kv"><span class="k">PROMISE</span><span id="loopPromise">—</span></div>
-          <div class="kv"><span class="k">UNANSWERED</span><span id="loopUnanswered">—</span></div>
-          <div class="kv"><span class="k">REPAIR</span><span id="loopRepair">—</span></div>
+          <div class="kv"><span class="k">PROMISE</span><span id="loopPromise">鈥?/span></div>
+          <div class="kv"><span class="k">UNANSWERED</span><span id="loopUnanswered">鈥?/span></div>
+          <div class="kv"><span class="k">REPAIR</span><span id="loopRepair">鈥?/span></div>
         </section>
       </div>
 
       <div class="stack">
-        <section class="card" data-card-id="dims" data-card-label="维度">
+        <section class="card" data-card-id="dims" data-card-label="缁村害">
           <header class="card-head">
             <i class="sq" aria-hidden="true"></i>
-            <b>DIMENSIONS</b><span class="zh">/ 维度</span>
+            <b>DIMENSIONS</b><span class="zh">/ 缁村害</span>
             <span class="r" id="dimsMeta">12 AXES</span>
           </header>
           <div class="kv-rows" id="dimsRows">
-            <div class="kv" data-dim="v"><span class="k">VALENCE</span><span class="num">—</span></div>
-            <div class="kv" data-dim="a"><span class="k">AROUSAL</span><span class="num">—</span></div>
-            <div class="kv" data-dim="dominance"><span class="k">DOMINANCE</span><span class="num">—</span></div>
-            <div class="kv" data-dim="stress"><span class="k">STRESS</span><span class="num">—</span></div>
-            <div class="kv" data-dim="social"><span class="k">SOCIAL</span><span class="num">—</span></div>
-            <div class="kv" data-dim="trust"><span class="k">TRUST</span><span class="num">—</span></div>
-            <div class="kv" data-dim="closeness"><span class="k">CLOSENESS</span><span class="num">—</span></div>
-            <div class="kv" data-dim="conflict"><span class="k">CONFLICT</span><span class="num">—</span></div>
-            <div class="kv" data-dim="needs.belonging"><span class="k">NEED BELONGING</span><span class="num">—</span></div>
-            <div class="kv" data-dim="needs.self_esteem"><span class="k">NEED ESTEEM</span><span class="num">—</span></div>
-            <div class="kv" data-dim="needs.control"><span class="k">NEED CONTROL</span><span class="num">—</span></div>
-            <div class="kv" data-dim="needs.meaningful_existence"><span class="k">NEED MEANING</span><span class="num">—</span></div>
+            <div class="kv" data-dim="v"><span class="k">VALENCE</span><span class="num">鈥?/span></div>
+            <div class="kv" data-dim="a"><span class="k">AROUSAL</span><span class="num">鈥?/span></div>
+            <div class="kv" data-dim="dominance"><span class="k">DOMINANCE</span><span class="num">鈥?/span></div>
+            <div class="kv" data-dim="stress"><span class="k">STRESS</span><span class="num">鈥?/span></div>
+            <div class="kv" data-dim="social"><span class="k">SOCIAL</span><span class="num">鈥?/span></div>
+            <div class="kv" data-dim="trust"><span class="k">TRUST</span><span class="num">鈥?/span></div>
+            <div class="kv" data-dim="closeness"><span class="k">CLOSENESS</span><span class="num">鈥?/span></div>
+            <div class="kv" data-dim="conflict"><span class="k">CONFLICT</span><span class="num">鈥?/span></div>
+            <div class="kv" data-dim="needs.belonging"><span class="k">NEED BELONGING</span><span class="num">鈥?/span></div>
+            <div class="kv" data-dim="needs.self_esteem"><span class="k">NEED ESTEEM</span><span class="num">鈥?/span></div>
+            <div class="kv" data-dim="needs.control"><span class="k">NEED CONTROL</span><span class="num">鈥?/span></div>
+            <div class="kv" data-dim="needs.meaningful_existence"><span class="k">NEED MEANING</span><span class="num">鈥?/span></div>
           </div>
         </section>
 
-        <section class="card" data-card-id="cache" data-card-label="缓存">
+        <section class="card" data-card-id="cache" data-card-label="缂撳瓨">
           <header class="card-head">
             <i class="sq" aria-hidden="true"></i>
-            <b>CACHE</b><span class="zh">/ 缓存</span>
+            <b>CACHE</b><span class="zh">/ 缂撳瓨</span>
             <span class="r">30S</span>
           </header>
-          <div class="kv"><span class="k">HIT RATE</span><span class="num" id="cacheStatText">—</span></div>
+          <div class="kv"><span class="k">HIT RATE</span><span class="num" id="cacheStatText">鈥?/span></div>
           <div class="tr cache-tr"><i id="cacheBar"></i></div>
-          <div class="kv"><span class="k">CACHE_READ</span><span class="num" id="cacheDetail">—</span></div>
+          <div class="kv"><span class="k">CACHE_READ</span><span class="num" id="cacheDetail">鈥?/span></div>
         </section>
 
-        <section class="card" data-card-id="system" data-card-label="系统">
+        <section class="card" data-card-id="system" data-card-label="绯荤粺">
           <header class="card-head">
             <i class="sq" aria-hidden="true"></i>
-            <b>SYSTEM</b><span class="zh">/ 系统</span>
-            <span class="r" id="systemMeta">—</span>
+            <b>SYSTEM</b><span class="zh">/ 绯荤粺</span>
+            <span class="r" id="systemMeta">鈥?/span>
           </header>
-          <div class="kv"><span class="k">ADAPTER</span><span class="num" id="sysAdapter">—</span></div>
-          <div class="kv"><span class="k">RECALL</span><span class="num" id="sysRecall">—</span></div>
-          <div class="kv"><span class="k">UPDATED</span><span class="num" id="sysUpdated">—</span></div>
-          <div class="kv"><span class="k">DEGRADED</span><span class="num" id="sysDegraded">—</span></div>
+          <div class="kv"><span class="k">ADAPTER</span><span class="num" id="sysAdapter">鈥?/span></div>
+          <div class="kv"><span class="k">RECALL</span><span class="num" id="sysRecall">鈥?/span></div>
+          <div class="kv"><span class="k">UPDATED</span><span class="num" id="sysUpdated">鈥?/span></div>
+          <div class="kv"><span class="k">DEGRADED</span><span class="num" id="sysDegraded">鈥?/span></div>
         </section>
       </div>
 
-      <section class="strip" data-card-id="chart" data-card-label="24 小时">
+      <section class="strip" data-card-id="chart" data-card-label="24 灏忔椂">
         <header class="card-head">
           <i class="sq" aria-hidden="true"></i>
           <b>MOOD TRACE</b><span class="zh">/ 24H</span>
-          <span class="r" id="chartHint">—</span>
+          <span class="r" id="chartHint">鈥?/span>
         </header>
         <div class="hz">
-          <div class="hz-peak num"><span>PEAK</span><b id="peakValue">—</b></div>
+          <div class="hz-peak num"><span>PEAK</span><b id="peakValue">鈥?/b></div>
           <div class="hz-main">
-            <div class="tl" id="moodChart" role="img" aria-label="心情 24 小时"></div>
+            <div class="tl" id="moodChart" role="img" aria-label="蹇冩儏 24 灏忔椂"></div>
             <div class="lb"><span>00</span><span>06</span><span>12</span><span>18</span><span>23</span></div>
           </div>
         </div>
-        <p class="chart-empty" id="chartEmpty" hidden>还没有采样</p>
+        <p class="chart-empty" id="chartEmpty" hidden>杩樻病鏈夐噰鏍?/p>
       </section>
 
-      <section class="card" data-card-id="memory" data-card-label="最近记忆">
+      <section class="card" data-card-id="memory" data-card-label="鏈€杩戣蹇?>
         <header class="card-head">
           <i class="sq" aria-hidden="true"></i>
-          <b>MEMORY</b><span class="zh">/ 最近记忆</span>
-          <span class="r" id="memoryHint">共 0 条</span>
+          <b>MEMORY</b><span class="zh">/ 鏈€杩戣蹇?/span>
+          <span class="r" id="memoryHint">鍏?0 鏉?/span>
         </header>
         <table class="log-table">
-          <thead><tr><th>TIME</th><th>摘要</th><th>角色</th><th>CONTENT</th><th class="ta-r">W</th></tr></thead>
-          <tbody id="memoryListFull"><tr class="is-empty"><td colspan="5">—</td></tr></tbody>
+          <thead><tr><th>TIME</th><th>鎽樿</th><th>瑙掕壊</th><th>CONTENT</th><th class="ta-r">W</th></tr></thead>
+          <tbody id="memoryListFull"><tr class="is-empty"><td colspan="5">鈥?/td></tr></tbody>
         </table>
       </section>
 
-      <section class="card" data-card-id="memory-summary" data-card-label="记忆概览">
+      <section class="card" data-card-id="memory-summary" data-card-label="璁板繂姒傝">
         <header class="card-head">
           <i class="sq" aria-hidden="true"></i>
-          <b>CAPACITY</b><span class="zh">/ 记忆概览</span>
-          <span class="r" id="capText">—</span>
+          <b>CAPACITY</b><span class="zh">/ 璁板繂姒傝</span>
+          <span class="r" id="capText">鈥?/span>
         </header>
         <div class="triple">
-          <div class="triple-col"><span>共</span><strong class="num" id="memTotal">—</strong></div>
-          <div class="triple-col"><span>今日新增</span><strong class="num" id="memToday">—</strong></div>
-          <div class="triple-col"><span>召回次数</span><strong class="num" id="memRecall">—</strong></div>
+          <div class="triple-col"><span>鍏?/span><strong class="num" id="memTotal">鈥?/strong></div>
+          <div class="triple-col"><span>浠婃棩鏂板</span><strong class="num" id="memToday">鈥?/strong></div>
+          <div class="triple-col"><span>鍙洖娆℃暟</span><strong class="num" id="memRecall">鈥?/strong></div>
         </div>
         <div class="subblock">
-          <div class="data-row"><span>容量</span><b class="num" id="capFillText">—</b></div>
+          <div class="data-row"><span>瀹归噺</span><b class="num" id="capFillText">鈥?/b></div>
           <div class="tr"><i id="capFill"></i></div>
         </div>
       </section>
-      <section class="card" data-card-id="compaction-archive" data-card-label="压缩归档">
+      <section class="card" data-card-id="compaction-archive" data-card-label="鍘嬬缉褰掓。">
         <header class="card-head">
           <i class="sq" aria-hidden="true"></i>
-          <b>ARCHIVE</b><span class="zh">/ 压缩归档</span>
-          <span class="r" id="caStatus">读取中</span>
+          <b>ARCHIVE</b><span class="zh">/ 鍘嬬缉褰掓。</span>
+          <span class="r" id="caStatus">璇诲彇涓?/span>
         </header>
         <div class="btn-row">
-          <button id="caRefresh" class="btn" type="button">刷新</button>
+          <button id="caRefresh" class="btn" type="button">鍒锋柊</button>
         </div>
         <div class="table-scroll"><table class="log-table ca-table">
-            <thead><tr><th>会话</th><th>压缩次数</th><th>未成件段数</th><th>上次处理</th><th class="ta-r">操作</th></tr></thead>
-            <tbody id="caList"><tr class="is-empty"><td colspan="5">—</td></tr></tbody>
+            <thead><tr><th>浼氳瘽</th><th>鍘嬬缉娆℃暟</th><th>鏈垚浠舵鏁?/th><th>涓婃澶勭悊</th><th class="ta-r">鎿嶄綔</th></tr></thead>
+            <tbody id="caList"><tr class="is-empty"><td colspan="5">鈥?/td></tr></tbody>
           </table>
         </div>
       </section>
 
 
-      <section class="card" data-card-id="metrics" data-card-label="关系数值">
+      <section class="card" data-card-id="metrics" data-card-label="鍏崇郴鏁板€?>
         <header class="card-head">
           <i class="sq" aria-hidden="true"></i>
-          <b>RELATION</b><span class="zh">/ 关系数值</span>
-          <span class="r" id="relationHint">只读</span>
+          <b>RELATION</b><span class="zh">/ 鍏崇郴鏁板€?/span>
+          <span class="r" id="relationHint">鍙</span>
         </header>
         <div class="relation" id="metrics"></div>
       </section>
 
-      <section class="card" data-card-id="narrative" data-card-label="叙事摘要">
+      <section class="card" data-card-id="narrative" data-card-label="鍙欎簨鎽樿">
         <header class="card-head">
           <i class="sq" aria-hidden="true"></i>
-          <b>NARRATIVE</b><span class="zh">/ 叙事摘要</span>
-          <span class="r" id="narrativeHint">上一轮</span>
+          <b>NARRATIVE</b><span class="zh">/ 鍙欎簨鎽樿</span>
+          <span class="r" id="narrativeHint">涓婁竴杞?/span>
         </header>
         <dl class="data-list" id="narrative"></dl>
       </section>
 
-      <section class="card" data-card-id="persona" data-card-label="人设">
+      <section class="card" data-card-id="persona" data-card-label="浜鸿">
         <header class="card-head">
           <i class="sq" aria-hidden="true"></i>
-          <b>PERSONA</b><span class="zh">/ 人设</span>
-          <span class="r" id="personaStatus">读取中</span>
+          <b>PERSONA</b><span class="zh">/ 浜鸿</span>
+          <span class="r" id="personaStatus">璇诲彇涓?/span>
         </header>
         <label class="field field-block">
-          <span>人设提示词</span>
-          <textarea id="personaText" class="persona-text" rows="6" placeholder="性格、说话方式、在意什么"></textarea>
+          <span>浜鸿鎻愮ず璇?/span>
+          <textarea id="personaText" class="persona-text" rows="6" placeholder="鎬ф牸銆佽璇濇柟寮忋€佸湪鎰忎粈涔?></textarea>
         </label>
         <div class="btn-row">
-          <button id="personaSave" class="btn btn-accent" type="button">保存并编译</button>
-          <button id="personaPersist" class="btn" type="button">设为常驻</button>
-          <button id="personaRollback" class="btn" type="button" hidden>恢复原人设</button>
+          <button id="personaSave" class="btn btn-accent" type="button">淇濆瓨骞剁紪璇?/button>
+          <button id="personaPersist" class="btn" type="button">璁句负甯搁┗</button>
+          <button id="personaRollback" class="btn" type="button" hidden>鎭㈠鍘熶汉璁?/button>
         </div>
-        <p class="hint" id="personaHint">编译只改倾向，不写记忆与安全策略</p>
+        <p class="hint" id="personaHint">缂栬瘧鍙敼鍊惧悜锛屼笉鍐欒蹇嗕笌瀹夊叏绛栫暐</p>
       </section>
 
-      <section class="card" data-card-id="model" data-card-label="API 设置">
+      <section class="card" data-card-id="model" data-card-label="API 璁剧疆">
         <header class="card-head">
           <i class="sq" aria-hidden="true"></i>
-          <b>API</b><span class="zh">/ API 设置</span>
-          <span class="r" id="modelStatus">未保存</span>
+          <b>API</b><span class="zh">/ API 璁剧疆</span>
+          <span class="r" id="modelStatus">鏈繚瀛?/span>
         </header>
 
-        <p class="group-title">向量检索</p>
-        <p class="hint">只用于记忆检索，与对话模型无关</p>
+        <p class="group-title">鍚戦噺妫€绱?/p>
+        <p class="hint">鍙敤浜庤蹇嗘绱紝涓庡璇濇ā鍨嬫棤鍏?/p>
         <div class="field-grid">
-          <label class="field"><span>模式</span>
+          <label class="field"><span>妯″紡</span>
             <select id="embeddingMode">
               <option value="auto">auto</option>
               <option value="remote">remote</option>
@@ -348,27 +348,27 @@
               <option value="off">off</option>
             </select>
           </label>
-          <label class="field"><span>模型</span>
+          <label class="field"><span>妯″瀷</span>
             <input id="modelName" type="text" placeholder="BAAI/bge-m3" autocomplete="off">
           </label>
           <label class="field"><span>Base URL</span>
             <input id="modelBaseUrl" type="url" placeholder="https://api.example.com/v1" autocomplete="off">
           </label>
           <label class="field"><span>API Key</span>
-            <input id="modelApiKey" type="password" placeholder="留空表示沿用已保存的 Key" autocomplete="new-password">
+            <input id="modelApiKey" type="password" placeholder="鐣欑┖琛ㄧず娌跨敤宸蹭繚瀛樼殑 Key" autocomplete="new-password">
           </label>
         </div>
 
-        <p class="group-title">召回精排</p>
+        <p class="group-title">鍙洖绮炬帓</p>
         <label class="switch-row">
           <span class="switch-text">
-            <span class="switch-label">启用重排</span>
-            <span class="switch-desc">召回后用 rerank 精排</span>
+            <span class="switch-label">鍚敤閲嶆帓</span>
+            <span class="switch-desc">鍙洖鍚庣敤 rerank 绮炬帓</span>
           </span>
           <input id="rerankEnabled" type="checkbox">
         </label>
         <div class="field-grid" id="rerankFields">
-          <label class="field"><span>模型</span>
+          <label class="field"><span>妯″瀷</span>
             <input id="rerankModel" type="text" placeholder="jina-reranker-v2-base-multilingual" autocomplete="off">
           </label>
           <label class="field"><span>Top N</span>
@@ -378,279 +378,279 @@
             <input id="rerankBaseUrl" type="url" placeholder="https://api.jina.ai/v1" autocomplete="off">
           </label>
           <label class="field"><span>API Key</span>
-            <input id="rerankApiKey" type="password" placeholder="留空表示沿用已保存的 Key" autocomplete="new-password">
+            <input id="rerankApiKey" type="password" placeholder="鐣欑┖琛ㄧず娌跨敤宸蹭繚瀛樼殑 Key" autocomplete="new-password">
           </label>
         </div>
 
-        <p class="group-title">总结模型</p>
+        <p class="group-title">鎬荤粨妯″瀷</p>
         <div class="field-grid">
           <label class="field"><span>Base URL</span>
             <input id="msSumBase" type="url" autocomplete="off" placeholder="https://api.deepseek.com">
           </label>
-          <label class="field"><span>模型</span>
+          <label class="field"><span>妯″瀷</span>
             <input id="msSumModel" type="text" autocomplete="off" placeholder="deepseek-chat">
           </label>
-          <label class="field"><span>密钥</span>
+          <label class="field"><span>瀵嗛挜</span>
             <span class="ms-key-row">
               <input id="msSumKey" type="password" readonly autocomplete="new-password">
-              <button class="btn ms-key-edit" data-ms-target="summarizer" type="button">修改</button>
+              <button class="btn ms-key-edit" data-ms-target="summarizer" type="button">淇敼</button>
             </span>
           </label>
         </div>
-        <p class="hint ms-result" id="msSumResult">尚未测试</p>
+        <p class="hint ms-result" id="msSumResult">灏氭湭娴嬭瘯</p>
 
         <div class="btn-row">
-          <button id="modelTest" class="btn" type="button">测试 Embedding</button>
-          <button id="rerankTest" class="btn" type="button">测试 Rerank</button>
-          <button class="btn ms-test" data-ms-target="summarizer" type="button">测试总结</button>
-          <button id="modelSave" class="btn btn-accent" type="button">保存</button>
+          <button id="modelTest" class="btn" type="button">娴嬭瘯 Embedding</button>
+          <button id="rerankTest" class="btn" type="button">娴嬭瘯 Rerank</button>
+          <button class="btn ms-test" data-ms-target="summarizer" type="button">娴嬭瘯鎬荤粨</button>
+          <button id="modelSave" class="btn btn-accent" type="button">淇濆瓨</button>
         </div>
       </section>
 
-      <section class="card" data-card-id="memory-settings" data-card-label="记忆设置">
+      <section class="card" data-card-id="memory-settings" data-card-label="璁板繂璁剧疆">
         <header class="card-head">
           <i class="sq" aria-hidden="true"></i>
-          <b>MEMORY</b><span class="zh">/ 记忆设置</span>
-          <span class="r" id="msStatus">读取中</span>
+          <b>MEMORY</b><span class="zh">/ 璁板繂璁剧疆</span>
+          <span class="r" id="msStatus">璇诲彇涓?/span>
         </header>
-        <p class="group-title">开关</p>
+        <p class="group-title">寮€鍏?/p>
         <label class="switch-row">
           <span class="switch-text">
-            <span class="switch-label">时间分层交付</span>
-            <span class="switch-desc">近处原文、远处概述、更早一句概括</span>
+            <span class="switch-label">鏃堕棿鍒嗗眰浜や粯</span>
+            <span class="switch-desc">杩戝鍘熸枃銆佽繙澶勬杩般€佹洿鏃╀竴鍙ユ鎷?/span>
           </span>
           <input id="msTiered" type="checkbox">
         </label>
         <label class="switch-row">
           <span class="switch-text">
-            <span class="switch-label">画像</span>
-            <span class="switch-desc">事件结算后追加一条画像</span>
+            <span class="switch-label">鐢诲儚</span>
+            <span class="switch-desc">浜嬩欢缁撶畻鍚庤拷鍔犱竴鏉＄敾鍍?/span>
           </span>
           <input id="msPortraitOn" type="checkbox">
         </label>
         <label class="switch-row">
           <span class="switch-text">
-            <span class="switch-label">总结</span>
-            <span class="switch-desc">turn_end 后登记/结算事件</span>
+            <span class="switch-label">鎬荤粨</span>
+            <span class="switch-desc">turn_end 鍚庣櫥璁?缁撶畻浜嬩欢</span>
           </span>
           <input id="msConsolidateOn" type="checkbox">
         </label>
         <label class="switch-row">
           <span class="switch-text">
-            <span class="switch-label">返回体形状</span>
-            <span class="switch-desc">测试结果按值形状过滤</span>
+            <span class="switch-label">杩斿洖浣撳舰鐘?/span>
+            <span class="switch-desc">娴嬭瘯缁撴灉鎸夊€煎舰鐘惰繃婊?/span>
           </span>
           <input id="msDetailShape" type="checkbox">
         </label>
-        <p class="group-title">交付与画像</p>
+        <p class="group-title">浜や粯涓庣敾鍍?/p>
         <div class="field-grid two">
-          <label class="field"><span>事件数</span>
+          <label class="field"><span>浜嬩欢鏁?/span>
             <input id="msEventPreset" type="number" min="1" max="20" step="1" value="8">
           </label>
-          <label class="field"><span>窗口</span>
+          <label class="field"><span>绐楀彛</span>
             <input id="msWindow" type="number" min="0" max="2" step="1" value="1">
           </label>
-          <label class="field"><span>画像条数</span>
+          <label class="field"><span>鐢诲儚鏉℃暟</span>
             <input id="msPortraitTop" type="number" min="1" max="50" step="1" value="8">
           </label>
         </div>
         <div class="btn-row">
-          <button id="msReload" class="btn" type="button">重新读取</button>
-          <button id="msSave" class="btn btn-accent" type="button">保存设置</button>
+          <button id="msReload" class="btn" type="button">閲嶆柊璇诲彇</button>
+          <button id="msSave" class="btn btn-accent" type="button">淇濆瓨璁剧疆</button>
         </div>
-        <p class="hint" id="msHint">保存后立即生效，不重启；越界值会自动夹紧并提示。</p>
+        <p class="hint" id="msHint">淇濆瓨鍚庣珛鍗崇敓鏁堬紝涓嶉噸鍚紱瓒婄晫鍊间細鑷姩澶圭揣骞舵彁绀恒€?/p>
       </section>
 
-      <section class="card" data-card-id="memory-thresholds" data-card-label="阈值与状态">
+      <section class="card" data-card-id="memory-thresholds" data-card-label="闃堝€间笌鐘舵€?>
         <header class="card-head">
           <i class="sq" aria-hidden="true"></i>
-          <b>THRESHOLDS</b><span class="zh">/ 阈值与状态</span>
-          <span class="r">立即生效</span>
+          <b>THRESHOLDS</b><span class="zh">/ 闃堝€间笌鐘舵€?/span>
+          <span class="r">绔嬪嵆鐢熸晥</span>
         </header>
-        <p class="group-title">压缩阈值</p>
+        <p class="group-title">鍘嬬缉闃堝€?/p>
         <div class="field-grid two">
-          <label class="field"><span>阈值 token</span>
+          <label class="field"><span>闃堝€?token</span>
             <input id="msCompactTokens" type="number" min="0" max="2000000" step="1000" value="0">
           </label>
-          <label class="field"><span>上下文窗口</span>
+          <label class="field"><span>涓婁笅鏂囩獥鍙?/span>
             <input id="msCompactWindow" type="number" min="0" max="4000000" step="1000" value="0">
           </label>
-          <label class="field"><span>相关门槛</span>
+          <label class="field"><span>鐩稿叧闂ㄦ</span>
             <input id="msRelevantFloor" type="number" min="0" max="1" step="0.05" value="0.2">
           </label>
         </div>
         <label class="switch-row">
           <span class="switch-text">
-            <span class="switch-label">干净事件交付</span>
-            <span class="switch-desc">按干净事件而不是逐句投放</span>
+            <span class="switch-label">骞插噣浜嬩欢浜や粯</span>
+            <span class="switch-desc">鎸夊共鍑€浜嬩欢鑰屼笉鏄€愬彞鎶曟斁</span>
           </span>
           <input id="msEventDeliveryClean" type="checkbox">
         </label>
         <div class="field-grid two">
-          <label class="field"><span>交付文本</span>
+          <label class="field"><span>浜や粯鏂囨湰</span>
             <select id="msEventTextMode">
-              <option value="raw">原文</option>
-              <option value="summary">总结</option>
-              <option value="auto">自动</option>
+              <option value="raw">鍘熸枃</option>
+              <option value="summary">鎬荤粨</option>
+              <option value="auto">鑷姩</option>
             </select>
           </label>
-          <label class="field"><span>长事件阈值</span>
+          <label class="field"><span>闀夸簨浠堕槇鍊?/span>
             <input id="msLongEventChars" type="number" min="200" max="8000" step="100" value="1200">
           </label>
         </div>
         <div class="btn-row">
-          <button id="msSave2" class="btn btn-accent" type="button">保存设置</button>
+          <button id="msSave2" class="btn btn-accent" type="button">淇濆瓨璁剧疆</button>
         </div>
-        <p class="group-title">向量</p>
+        <p class="group-title">鍚戦噺</p>
         <label class="switch-row">
           <span class="switch-text">
-            <span class="switch-label">向量兜底</span>
-            <span class="switch-desc">回复后/压缩后各补一小批缺失向量（最多 20 条）</span>
+            <span class="switch-label">鍚戦噺鍏滃簳</span>
+            <span class="switch-desc">鍥炲鍚?鍘嬬缉鍚庡悇琛ヤ竴灏忔壒缂哄け鍚戦噺锛堟渶澶?20 鏉★級</span>
           </span>
           <input id="msVectorBackfillOn" type="checkbox" checked>
         </label>
-        <p class="state-note" id="msVectorStatus">缺向量：—</p>
+        <p class="state-note" id="msVectorStatus">缂哄悜閲忥細鈥?/p>
         <div class="btn-row">
-          <button id="msVectorCheck" type="button" class="btn">体检</button>
-          <button id="msUnitsBuild" type="button" class="btn">补建句子</button>
-          <button id="msVectorBackfill" type="button" class="btn">补齐向量</button>
+          <button id="msVectorCheck" type="button" class="btn">浣撴</button>
+          <button id="msUnitsBuild" type="button" class="btn">琛ュ缓鍙ュ瓙</button>
+          <button id="msVectorBackfill" type="button" class="btn">琛ラ綈鍚戦噺</button>
         </div>
-        <p class="group-title">只读状态</p>
+        <p class="group-title">鍙鐘舵€?/p>
         <dl class="data-list data-list-inline">
-          <div><dt>修补命中率</dt><dd class="num" id="msRepair">—</dd></div>
-          <div><dt>最近一次总结</dt><dd id="msConsolidate">—</dd></div>
-          <div><dt>画像条数</dt><dd class="num" id="msPortrait">—</dd></div>
-          <div><dt>访问日志今日</dt><dd class="num" id="msAccessToday">—</dd></div>
+          <div><dt>淇ˉ鍛戒腑鐜?/dt><dd class="num" id="msRepair">鈥?/dd></div>
+          <div><dt>鏈€杩戜竴娆℃€荤粨</dt><dd id="msConsolidate">鈥?/dd></div>
+          <div><dt>鐢诲儚鏉℃暟</dt><dd class="num" id="msPortrait">鈥?/dd></div>
+          <div><dt>璁块棶鏃ュ織浠婃棩</dt><dd class="num" id="msAccessToday">鈥?/dd></div>
         </dl>
       </section>
 
 
 
-      <section class="card" data-card-id="recall" data-card-label="召回注入">
+      <section class="card" data-card-id="recall" data-card-label="鍙洖娉ㄥ叆">
         <header class="card-head">
           <i class="sq" aria-hidden="true"></i>
-          <b>RECALL</b><span class="zh">/ 召回注入</span>
-          <span class="r" id="recallStatus">读取中</span>
+          <b>RECALL</b><span class="zh">/ 鍙洖娉ㄥ叆</span>
+          <span class="r" id="recallStatus">璇诲彇涓?/span>
         </header>
         <div class="field-grid">
-          <label class="field"><span>事件预算</span>
+          <label class="field"><span>浜嬩欢棰勭畻</span>
             <input id="recallEvents" type="number" min="1" max="20" step="1" value="8">
           </label>
-          <label class="field"><span>注入预算</span>
+          <label class="field"><span>娉ㄥ叆棰勭畻</span>
             <input id="recallChars" type="number" min="500" max="200000" step="1000" value="14000">
           </label>
-          <label class="field"><span>交付方式</span>
+          <label class="field"><span>浜や粯鏂瑰紡</span>
             <select id="recallDelivery">
-              <option value="event_rank">按事件（默认）</option>
-              <option value="sentence">逐句（降级路径）</option>
+              <option value="event_rank">鎸変簨浠讹紙榛樿锛?/option>
+              <option value="sentence">閫愬彞锛堥檷绾ц矾寰勶級</option>
             </select>
           </label>
         </div>
-        <p class="hint" id="recallHint">交付按事件计数：每轮最多投放多少个整事件（1–20，默认 12），保存后立即生效。干净事件交付路径不再按字符截断——件数与长件分层才是预算；字符预算只对旧的逐句路径生效。同库同题的命中率：5k→76.5%　10k→85.9%　14k→88.2%　20k→90.6%　40k→97.6%。</p>
+        <p class="hint" id="recallHint">浜や粯鎸変簨浠惰鏁帮細姣忚疆鏈€澶氭姇鏀惧灏戜釜鏁翠簨浠讹紙1鈥?0锛岄粯璁?12锛夛紝淇濆瓨鍚庣珛鍗崇敓鏁堛€傚共鍑€浜嬩欢浜や粯璺緞涓嶅啀鎸夊瓧绗︽埅鏂€斺€斾欢鏁颁笌闀夸欢鍒嗗眰鎵嶆槸棰勭畻锛涘瓧绗﹂绠楀彧瀵规棫鐨勯€愬彞璺緞鐢熸晥銆傚悓搴撳悓棰樼殑鍛戒腑鐜囷細5k鈫?6.5%銆€10k鈫?5.9%銆€14k鈫?8.2%銆€20k鈫?0.6%銆€40k鈫?7.6%銆?/p>
         <div class="btn-row">
-          <button id="recallSave" class="btn btn-accent" type="button">保存</button>
+          <button id="recallSave" class="btn btn-accent" type="button">淇濆瓨</button>
         </div>
       </section>
 
-      <section class="card" data-card-id="switches" data-card-label="开关">
+      <section class="card" data-card-id="switches" data-card-label="寮€鍏?>
         <header class="card-head">
           <i class="sq" aria-hidden="true"></i>
-          <b>SWITCHES</b><span class="zh">/ 开关</span>
-          <span class="r" id="switchHint">写入宿主 flags</span>
+          <b>SWITCHES</b><span class="zh">/ 寮€鍏?/span>
+          <span class="r" id="switchHint">鍐欏叆瀹夸富 flags</span>
         </header>
         <div class="switches" id="switches"></div>
       </section>
 
-      <section class="card" data-card-id="expression" data-card-label="表达">
+      <section class="card" data-card-id="expression" data-card-label="琛ㄨ揪">
         <header class="card-head">
           <i class="sq" aria-hidden="true"></i>
-          <b>EXPRESSION</b><span class="zh">/ 表达</span>
-          <span class="r" id="expressionStatus">长度由人设决定</span>
+          <b>EXPRESSION</b><span class="zh">/ 琛ㄨ揪</span>
+          <span class="r" id="expressionStatus">闀垮害鐢变汉璁惧喅瀹?/span>
         </header>
         <label class="switch-row">
           <span class="switch-text">
-            <span class="switch-label">长度约束</span>
-            <span class="switch-desc">按目标与上限字数约束表达</span>
+            <span class="switch-label">闀垮害绾︽潫</span>
+            <span class="switch-desc">鎸夌洰鏍囦笌涓婇檺瀛楁暟绾︽潫琛ㄨ揪</span>
           </span>
           <input id="expressionToggle" type="checkbox">
         </label>
         <div class="field-grid" id="expressionFields" hidden>
-          <label class="field"><span>目标字数</span><input id="lengthTarget" type="number" min="1" max="200" value="10"></label>
-          <label class="field"><span>上限字数</span><input id="lengthMax" type="number" min="2" max="400" value="30"></label>
+          <label class="field"><span>鐩爣瀛楁暟</span><input id="lengthTarget" type="number" min="1" max="200" value="10"></label>
+          <label class="field"><span>涓婇檺瀛楁暟</span><input id="lengthMax" type="number" min="2" max="400" value="30"></label>
         </div>
         <div class="btn-row">
-          <button id="expressionSave" class="btn btn-accent" type="button">保存表达</button>
+          <button id="expressionSave" class="btn btn-accent" type="button">淇濆瓨琛ㄨ揪</button>
         </div>
       </section>
 
-      <section class="card" data-card-id="advanced" data-card-label="维护">
+      <section class="card" data-card-id="advanced" data-card-label="缁存姢">
         <header class="card-head">
           <i class="sq" aria-hidden="true"></i>
-          <b>SERVICE</b><span class="zh">/ 维护</span>
-          <span class="r" id="advancedHint">只影响这台浏览器</span>
+          <b>SERVICE</b><span class="zh">/ 缁存姢</span>
+          <span class="r" id="advancedHint">鍙奖鍝嶈繖鍙版祻瑙堝櫒</span>
         </header>
         <div class="advanced-row">
-          <div class="data-inline"><span>出口清洗</span><b id="sanitizeReplyText">—</b></div>
+          <div class="data-inline"><span>鍑哄彛娓呮礂</span><b id="sanitizeReplyText">鈥?/b></div>
           <div class="btn-row">
-            <button id="resetLayout" class="btn" type="button">恢复默认布局</button>
-            <button id="clearDraft" class="btn" type="button">清空本地草稿</button>
+            <button id="resetLayout" class="btn" type="button">鎭㈠榛樿甯冨眬</button>
+            <button id="clearDraft" class="btn" type="button">娓呯┖鏈湴鑽夌</button>
           </div>
         </div>
-        <p class="hint" id="dataDirText">数据目录：宿主托管</p>
+        <p class="hint" id="dataDirText">鏁版嵁鐩綍锛氬涓绘墭绠?/p>
       </section>
 
-      <section class="card" data-card-id="trace" data-card-label="这一轮为什么">
+      <section class="card" data-card-id="trace" data-card-label="杩欎竴杞负浠€涔?>
         <header class="card-head">
           <i class="sq" aria-hidden="true"></i>
-          <b>TRACE</b><span class="zh">/ 这一轮为什么</span>
-          <span class="r" id="traceHint">最近 3 轮</span>
+          <b>TRACE</b><span class="zh">/ 杩欎竴杞负浠€涔?/span>
+          <span class="r" id="traceHint">鏈€杩?3 杞?/span>
         </header>
-        <div class="trace-head-row"><span>时间</span><span>状态变化</span><span>意图</span><span>长度来源</span><span>闸命中</span><span>记忆</span></div>
-        <div class="trace-list" id="traceList"><p class="state-note">还没有记录</p></div>
+        <div class="trace-head-row"><span>鏃堕棿</span><span>鐘舵€佸彉鍖?/span><span>鎰忓浘</span><span>闀垮害鏉ユ簮</span><span>闂稿懡涓?/span><span>璁板繂</span></div>
+        <div class="trace-list" id="traceList"><p class="state-note">杩樻病鏈夎褰?/p></div>
       </section>
 
-      <section class="card" data-card-id="overview" data-card-label="会话总览">
+      <section class="card" data-card-id="overview" data-card-label="浼氳瘽鎬昏">
         <header class="card-head">
           <i class="sq" aria-hidden="true"></i>
-          <b>OVERVIEW</b><span class="zh">/ 会话总览</span>
-          <span class="r" id="ovStatus">未生成</span>
+          <b>OVERVIEW</b><span class="zh">/ 浼氳瘽鎬昏</span>
+          <span class="r" id="ovStatus">鏈敓鎴?/span>
         </header>
-        <p class="group-title">时间线（逐条，免费）</p>
+        <p class="group-title">鏃堕棿绾匡紙閫愭潯锛屽厤璐癸級</p>
         <div class="data-list" id="ovList" style="max-height:220px;overflow:auto"></div>
         <div class="btn-row">
-          <button id="ovTimeline" class="btn" type="button">刷新时间线</button>
-          <button id="ovBuild" class="btn btn-accent" type="button">重算归纳</button>
+          <button id="ovTimeline" class="btn" type="button">鍒锋柊鏃堕棿绾?/button>
+          <button id="ovBuild" class="btn btn-accent" type="button">閲嶇畻褰掔撼</button>
         </div>
-        <p class="group-title">归纳（模型写，按需）</p>
+        <p class="group-title">褰掔撼锛堟ā鍨嬪啓锛屾寜闇€锛?/p>
         <pre id="ovText" class="ms-result" style="white-space:pre-wrap;max-height:320px;overflow:auto"></pre>
       </section>
-      <section class="card" data-card-id="runtime" data-card-label="运行时">
+      <section class="card" data-card-id="runtime" data-card-label="杩愯鏃?>
         <header class="card-head">
           <i class="sq" aria-hidden="true"></i>
-          <b>RUNTIME</b><span class="zh">/ 运行时</span>
-          <span class="r" id="runSession">—</span>
+          <b>RUNTIME</b><span class="zh">/ 杩愯鏃?/span>
+          <span class="r" id="runSession">鈥?/span>
         </header>
         <dl class="data-list">
-          <div><dt>页面运行</dt><dd id="runtimeUptime">—</dd></div>
-          <div><dt>采样点</dt><dd class="num" id="runtimeTurns">—</dd></div>
-          <div><dt>向量模式</dt><dd id="runtimeVector">—</dd></div>
-          <div><dt>会话</dt><dd class="num" id="diagSession">—</dd></div>
-          <div><dt>状态刷新</dt><dd>5 <small>秒</small></dd></div>
-          <div><dt>统计刷新</dt><dd>30 <small>秒</small></dd></div>
+          <div><dt>椤甸潰杩愯</dt><dd id="runtimeUptime">鈥?/dd></div>
+          <div><dt>閲囨牱鐐?/dt><dd class="num" id="runtimeTurns">鈥?/dd></div>
+          <div><dt>鍚戦噺妯″紡</dt><dd id="runtimeVector">鈥?/dd></div>
+          <div><dt>浼氳瘽</dt><dd class="num" id="diagSession">鈥?/dd></div>
+          <div><dt>鐘舵€佸埛鏂?/dt><dd>5 <small>绉?/small></dd></div>
+          <div><dt>缁熻鍒锋柊</dt><dd>30 <small>绉?/small></dd></div>
         </dl>
       </section>
 
-      <section class="card" data-card-id="diagnostics" data-card-label="诊断">
+      <section class="card" data-card-id="diagnostics" data-card-label="璇婃柇">
         <header class="card-head">
           <i class="sq" aria-hidden="true"></i>
-          <b>DIAGNOSTICS</b><span class="zh">/ 诊断</span>
-          <span class="r" id="diagHint">30 秒刷新</span>
+          <b>DIAGNOSTICS</b><span class="zh">/ 璇婃柇</span>
+          <span class="r" id="diagHint">30 绉掑埛鏂?/span>
         </header>
         <dl class="data-list data-list-inline">
-          <div><dt>状态生成</dt><dd class="num" id="diagGenerated">—</dd></div>
-          <div><dt>适配器版本</dt><dd class="num" id="diagAdapter">—</dd></div>
-          <div><dt>插件版本</dt><dd class="num" id="pluginVersion">—</dd></div>
-          <div><dt>降级项</dt><dd id="diagDegraded">—</dd></div>
+          <div><dt>鐘舵€佺敓鎴?/dt><dd class="num" id="diagGenerated">鈥?/dd></div>
+          <div><dt>閫傞厤鍣ㄧ増鏈?/dt><dd class="num" id="diagAdapter">鈥?/dd></div>
+          <div><dt>鎻掍欢鐗堟湰</dt><dd class="num" id="pluginVersion">鈥?/dd></div>
+          <div><dt>闄嶇骇椤?/dt><dd id="diagDegraded">鈥?/dd></div>
         </dl>
       </section>
     </div>
@@ -658,25 +658,25 @@
 </div>
 
 <section class="add-cards" id="addCards" hidden>
-  <h3>已隐藏的卡片</h3>
+  <h3>宸查殣钘忕殑鍗＄墖</h3>
   <div class="add-list" id="addList"></div>
 </section>
 
-<nav class="tabbar" id="tabBar" aria-label="页面切换">
+<nav class="tabbar" id="tabBar" aria-label="椤甸潰鍒囨崲">
   <button class="tab-item active" type="button" data-tab="dashboard" aria-selected="true">
-    <svg class="ico" aria-hidden="true"><use href="#i-dashboard"></use></svg><span>仪表盘</span>
+    <svg class="ico" aria-hidden="true"><use href="#i-dashboard"></use></svg><span>浠〃鐩?/span>
   </button>
   <button class="tab-item" type="button" data-tab="memory" aria-selected="false">
-    <svg class="ico" aria-hidden="true"><use href="#i-memory"></use></svg><span>记忆</span>
+    <svg class="ico" aria-hidden="true"><use href="#i-memory"></use></svg><span>璁板繂</span>
   </button>
   <button class="tab-item" type="button" data-tab="relation" aria-selected="false">
-    <svg class="ico" aria-hidden="true"><use href="#i-relation"></use></svg><span>关系</span>
+    <svg class="ico" aria-hidden="true"><use href="#i-relation"></use></svg><span>鍏崇郴</span>
   </button>
   <button class="tab-item" type="button" data-tab="settings" aria-selected="false">
-    <svg class="ico" aria-hidden="true"><use href="#i-settings"></use></svg><span>配置</span>
+    <svg class="ico" aria-hidden="true"><use href="#i-settings"></use></svg><span>閰嶇疆</span>
   </button>
   <button class="tab-item" type="button" data-tab="tools" aria-selected="false">
-    <svg class="ico" aria-hidden="true"><use href="#i-tools"></use></svg><span>工具</span>
+    <svg class="ico" aria-hidden="true"><use href="#i-tools"></use></svg><span>宸ュ叿</span>
   </button>
 </nav>
 
