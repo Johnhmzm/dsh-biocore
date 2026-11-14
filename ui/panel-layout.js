@@ -261,6 +261,9 @@
     if (!card || !card.querySelector('.card-head')) return
     if (target.closest('input, select, textarea, button, a')) return
     if (!card.classList.contains('open')) {
+      // 一次只展开一个：先收起其它方块（照 AstrBot 那排方块的做法）
+      var open = document.querySelectorAll('body[data-tab="settings"] .card.open')
+      for (var i = 0; i < open.length; i += 1) open[i].classList.remove('open')
       card.classList.add('open')
       return
     }
