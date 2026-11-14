@@ -82,22 +82,129 @@ CREATE INDEX IF NOT EXISTS idx_entries_turn ON entries(turn);
 '''
 
 
-def pack_vector(vec):
+# ---------------------------------------------------------------- 向量编解码
+# 全库唯一的向量编解码点：entries / units / events.centroid / 向量回填都走这里。
+# 两种精度混存是常态——老行 float32（dim*4 字节），新行 float16（dim*2 字节）。
+# 读的时候按 blob 长度 + 库里的 vector_dim 判断，统一交回 float 列表，
+# 上层（召回/打分/重排）不需要知道存在两种精度。
+DEFAULT_PRECISION = 'float16'
+PRECISIONS = ('float32', 'float16')
+_PRECISION_ALIASES = {
+    'f16': 'float16', 'fp16': 'float16', 'half': 'float16', 'float16': 'float16',
+    'f32': 'float32', 'fp32': 'float32', 'single': 'float32', 'float32': 'float32',
+}
+
+
+def normalize_precision(value, default=DEFAULT_PRECISION):
+    """收得出来的别名一律收；认不出来退回 default（写库不因为一个词停下）。"""
+    text = str(value or '').strip().lower()
+    if not text:
+        return default
+    return _PRECISION_ALIASES.get(text, default)
+
+
+def pack_vector(vec, precision='float32'):
+    """向量 -> BLOB。float32 用 'f'，float16 用 'e'（struct 的半个精度，不需要 numpy）。
+
+    默认仍是 float32：units / events.centroid 这些调用点不传精度，行为与换
+    encoding 之前完全一样；entries 的写入点显式传 store 配置的那一档。
+    """
     if not vec:
         return None
     try:
-        return struct.pack('<%df' % len(vec), *[float(x) for x in vec])
+        rows = [float(x) for x in vec]
+        if not rows:
+            return None
+        if normalize_precision(precision, 'float32') == 'float16':
+            return struct.pack('<%de' % len(rows), *rows)
+        return struct.pack('<%df' % len(rows), *rows)
     except Exception:
         return None
 
 
-def unpack_vector(blob):
+def unpack_vector(blob, dim=None):
+    """BLOB -> float 列表。dim 给了就按 dim*4 / dim*2 判精度，没给按 4 字节解。
+
+    dim 来自库里的 meta['vector_dim']（每次打包记一次），所以混存读得对；
+    老库没有这个键、行也全是 float32，按 4 字节解正好是原来的行为。
+    """
     if not blob:
         return []
+    size = len(blob)
     try:
-        return list(struct.unpack('<%df' % (len(blob) // 4), blob))
+        want = int(dim or 0)
     except Exception:
-        return []
+        want = 0
+    try:
+        if want > 0 and size == want * 2:
+            return list(struct.unpack('<%de' % want, blob))
+        if want > 0 and size == want * 4:
+            return list(struct.unpack('<%df' % want, blob))
+        return list(struct.unpack('<%df' % (size // 4), blob))
+    except Exception:
+        try:                      # 不是 4 的倍数 -> 只可能是半精度
+            return list(struct.unpack('<%de' % (size // 2), blob))
+        except Exception:
+            return []
+
+
+def _remember_vector_dim(conn, length):
+    """记下向量维度（一次就够）：混存读回靠它判 4 字节还是 2 字节。"""
+    try:
+        dim = int(length or 0)
+        if dim > 0:
+            conn.execute("INSERT OR IGNORE INTO meta (k, v) VALUES ('vector_dim', ?)",
+                         (str(dim),))
+    except Exception:
+        pass
+
+
+def _vector_dim(conn):
+    try:
+        row = conn.execute("SELECT v FROM meta WHERE k='vector_dim'").fetchone()
+        return int(row[0]) if row and row[0] else None
+    except Exception:
+        return None
+
+
+_PRECISION_CACHE = {}
+
+
+def precision_of(root):
+    """store 的向量精度：core_config.json 的 recall.vector_precision（缺省 float16）。
+
+    store 目录下的 core_config.json 找不到就往上一层找（宿主的配置在 <data>/，
+    记忆在 <data>/memory/）。按 mtime 缓存：改了配置立刻生效，不用重启。
+    """
+    if not root:
+        return DEFAULT_PRECISION
+    base = Path(str(root))
+    for path in (base / 'core_config.json', base.parent / 'core_config.json'):
+        try:
+            stamp = path.stat().st_mtime
+        except OSError:
+            continue
+        hit = _PRECISION_CACHE.get(str(path))
+        if hit and hit[0] == stamp:
+            return hit[1]
+        try:
+            doc = json.loads(path.read_text(encoding='utf-8'))
+        except Exception:
+            continue
+        recall = doc.get('recall') if isinstance(doc, dict) else None
+        value = normalize_precision((recall or {}).get('vector_precision')
+                                    if isinstance(recall, dict) else None)
+        _PRECISION_CACHE[str(path)] = (stamp, value)
+        return value
+    return DEFAULT_PRECISION
+
+
+def _pack_entry_vector(conn, vector, precision):
+    """entries 的写入：按配置打包，顺手记下维度。"""
+    blob = pack_vector(vector, precision)
+    if blob:
+        _remember_vector_dim(conn, len(vector or []))
+    return blob
 
 
 def db_path(root, session_id):
@@ -235,6 +342,7 @@ def import_session(root, session_id, force=False, events_path=None):
     """
     root = Path(root)
     conn = connect(root, session_id)
+    precision = precision_of(root)
     done = conn.execute('SELECT COUNT(*) FROM entries').fetchone()[0]
     if done and not force:
         return conn, {'imported': False, 'entries': done}
@@ -249,7 +357,8 @@ def import_session(root, session_id, force=False, events_path=None):
             ' VALUES (?,?,?,?,?,?,?,?,?,?)',
             (str(row.get('id') or ''), int(row.get('turn') or 0), float(row.get('ts') or 0.0),
              str(row.get('role') or 'user'), str(row.get('text') or ''),
-             pack_vector(row.get('vector')), int(row.get('hits') or 1),
+             _pack_entry_vector(conn, row.get('vector'), precision),
+             int(row.get('hits') or 1),
              float(row.get('importance') or 0.2), 1 if row.get('deleted') else 0,
              json.dumps(row, ensure_ascii=False)))
         count += 1
@@ -283,7 +392,7 @@ def import_session(root, session_id, force=False, events_path=None):
         harvested = harvest_event_vectors(
             (events.get('events') if isinstance(events, dict) else events) or [])
         for entry_id, vector in harvested.items():
-            blob = pack_vector(vector)
+            blob = _pack_entry_vector(conn, vector, precision)
             if blob:
                 conn.execute('UPDATE entries SET vector=? WHERE id=? AND vector IS NULL',
                              (blob, entry_id))
@@ -347,10 +456,11 @@ def update_entry_vectors(root, session_id, vectors):
         return 0
     root = Path(root)
     conn = connect(root, session_id)
+    precision = precision_of(root)
     try:
         written = 0
         for entry_id, vector in vectors.items():
-            blob = pack_vector(vector)
+            blob = _pack_entry_vector(conn, vector, precision)
             if not blob:
                 continue
             cur = conn.execute('UPDATE entries SET vector=? WHERE id=? AND vector IS NULL',
@@ -390,6 +500,7 @@ def save_units(root, session_id, entry_units):
         return 0
     root = Path(root)
     conn = connect(root, session_id)
+    precision = precision_of(root)
     written = 0
     try:
         for entry_id, units in entry_units.items():
@@ -398,7 +509,8 @@ def save_units(root, session_id, entry_units):
                 continue
             conn.execute('DELETE FROM units WHERE entry_id=?', (entry_id,))
             for idx, text, vector in units:
-                blob = pack_vector(vector)
+                # 与 entries 同一档精度：units 也是召回用的向量，没有理由多存一倍
+                blob = _pack_entry_vector(conn, vector, precision)
                 if not blob or not str(text or "").strip():
                     continue
                 conn.execute(
@@ -425,8 +537,9 @@ def load_units(root, session_id):
             ).fetchall()
         except Exception:
             return {}
+        dim = _vector_dim(conn)
         for entry_id, ordv, text, blob in rows:
-            vector = unpack_vector(blob)
+            vector = unpack_vector(blob, dim)
             if not vector:
                 continue
             out.setdefault(str(entry_id), []).append(
@@ -450,6 +563,7 @@ def load_units_for(root, session_id, entry_ids):
     conn = connect(root, session_id)
     try:
         out = {}
+        dim = _vector_dim(conn)
         try:
             for start in range(0, len(ids), 400):
                 chunk = ids[start:start + 400]
@@ -459,7 +573,7 @@ def load_units_for(root, session_id, entry_ids):
                     " WHERE entry_id IN (%s) ORDER BY entry_id, ord" % marks,
                     chunk).fetchall()
                 for entry_id, ordv, text, blob in rows:
-                    vector = unpack_vector(blob)
+                    vector = unpack_vector(blob, dim)
                     if not vector:
                         continue
                     out.setdefault(str(entry_id), []).append(
@@ -490,9 +604,10 @@ def read_entry_vectors(root, session_id):
     conn = connect(root, session_id)
     try:
         out = {}
+        dim = _vector_dim(conn)
         for entry_id, blob in conn.execute(
                 'SELECT id, vector FROM entries WHERE vector IS NOT NULL').fetchall():
-            vector = unpack_vector(blob)
+            vector = unpack_vector(blob, dim)
             if vector:
                 out[str(entry_id)] = vector
         return out
@@ -531,7 +646,7 @@ def _verify_write(conn, changed, deleted):
             raise WriteNotVerified('删除没有生效: %s' % entry_id)
 
 
-def _reinsert_from_raw(conn, entry_id, raw):
+def _reinsert_from_raw(conn, entry_id, raw, precision=DEFAULT_PRECISION):
     """按 raw 里的完整字段把一行插回去（只写 id/raw 会撞 NOT NULL）。"""
     try:
         row = json.loads(raw) if raw else {}
@@ -544,7 +659,8 @@ def _reinsert_from_raw(conn, entry_id, raw):
         (entry_id, row.get('code'), int(row.get('turn') or 0),
          float(row.get('ts') or 0.0), str(row.get('role') or 'user'),
          str(row.get('text') or '(恢复时缺失)'),
-         pack_vector(row.get('vector')), int(row.get('hits') or 1),
+         _pack_entry_vector(conn, row.get('vector'), precision),
+         int(row.get('hits') or 1),
          float(row.get('importance') or 0.2), 0, raw))
 
 
@@ -567,7 +683,7 @@ def undo_batch(root, session_id, batch):
         for op, entry_id, before, after in rows:
             if op == 'delete':
                 if before:
-                    _reinsert_from_raw(conn, str(entry_id), before)
+                    _reinsert_from_raw(conn, str(entry_id), before, precision_of(root))
             else:
                 if before:
                     conn.execute('UPDATE entries SET raw=? WHERE id=?',
@@ -596,6 +712,7 @@ def read_doc(root, session_id, with_vectors=False):
         except Exception:
             meta = {}
         entries = []
+        dim = _vector_dim(conn)   # 混存：entry 的 vector 可能是 f32 也可能是 f16
         # the vector lives in its own BLOB column, not in `raw`: reading only
         # `raw` is why recall saw vector=None on every row
         columns = 'raw, vector, code, semantic_id' if with_vectors else 'raw, code, semantic_id'
@@ -616,7 +733,7 @@ def read_doc(root, session_id, with_vectors=False):
                 entry['semantic_id'] = str(sid)
             if with_vectors:
                 blob = row[1] if len(row) > 1 else None
-                entry['vector'] = unpack_vector(blob)
+                entry['vector'] = unpack_vector(blob, dim)
             entries.append(entry)
         try:
             schema_version = int(meta.get('schema_version') or 1)
@@ -648,6 +765,7 @@ def write_doc(root, session_id, doc, changed=None, deleted=None, stamp_meta=True
     """
     root = Path(root)
     conn = connect(root, session_id)
+    precision = precision_of(root)
     try:
         if stamp_meta:
             for key, value in (('schema_version', doc.get('schema_version', 1)),
@@ -688,7 +806,8 @@ def write_doc(root, session_id, doc, changed=None, deleted=None, stamp_meta=True
                 ' deleted=excluded.deleted, raw=excluded.raw',
                 (str(row.get('id') or ''), code, _sid, int(row.get('turn') or 0),
                  float(row.get('ts') or 0.0), str(row.get('role') or 'user'),
-                 str(row.get('text') or ''), pack_vector(row.get('vector')),
+                 str(row.get('text') or ''),
+                 _pack_entry_vector(conn, row.get('vector'), precision),
                  int(row.get('hits') or 1), float(row.get('importance') or 0.2),
                  1 if row.get('deleted') else 0,
                  json.dumps(row, ensure_ascii=False)))
@@ -799,8 +918,9 @@ def backfill_vectors(root, session_id, events_path=None):
         rows = legacy.get('events') if isinstance(legacy, dict) else legacy
         vectors = harvest_event_vectors(rows or [])
         written = 0
+        precision = precision_of(root)
         for entry_id, vector in vectors.items():
-            blob = pack_vector(vector)
+            blob = _pack_entry_vector(conn, vector, precision)
             if not blob:
                 continue
             cur = conn.execute(
@@ -843,26 +963,9 @@ def _ensure_events_centroid(conn):
         pass
 
 
-def pack_vector(vector):
-    """float32 BLOB: an event centroid costs 4 KB instead of ~20 KB of JSON text."""
-    try:
-        import struct
-        rows = [float(x) for x in (vector or [])]
-        if not rows:
-            return None
-        return struct.pack("<%df" % len(rows), *rows)
-    except Exception:
-        return None
-
-
-def unpack_vector(blob):
-    try:
-        import struct
-        if not blob:
-            return []
-        return list(struct.unpack("<%df" % (len(blob) // 4), blob))
-    except Exception:
-        return []
+# 事件 centroid 用的是同一个 pack_vector / unpack_vector（不传精度 = float32），
+# 一行 4 KB 而不是 ~20 KB 的 JSON 文本。这里曾经有一份重复定义，会盖掉上面的
+# 那一份，导致"改编解码点"看起来改了却没生效，已删。
 
 
 def _event_payload(ev):
