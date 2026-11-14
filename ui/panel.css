@@ -1022,3 +1022,40 @@ body[data-tab='settings'] .sec.open > .btn-row { display: flex; }
 body[data-tab='settings'] .sec.open > .field-grid { display: grid; }
 body[data-tab='settings'] .sec.open > .table-scroll { display: block; }
 
+
+
+/* ---- 设置页：小方块索引，点开展开（作用于 .card）------------------------- */
+body[data-tab='settings'] .body {
+  grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
+  gap: 10px;
+}
+body[data-tab='settings'] .card {
+  height: 104px;
+  padding: 10px;
+  overflow: hidden;
+  cursor: pointer;
+}
+body[data-tab='settings'] .card:hover { border-color: var(--orange); }
+body[data-tab='settings'] .card > *:not(.card-head) { display: none; }
+body[data-tab='settings'] .card.open {
+  grid-column: 1 / -1;
+  height: auto;
+  overflow: visible;
+  cursor: default;
+}
+body[data-tab='settings'] .card.open > .card-head { display: flex; }
+body[data-tab='settings'] .card.open > .field-grid,
+body[data-tab='settings'] .card.open > .group-title,
+body[data-tab='settings'] .card.open > .btn-row,
+body[data-tab='settings'] .card.open > .hint,
+body[data-tab='settings'] .card.open > .switch-row,
+body[data-tab='settings'] .card.open > .table-scroll,
+body[data-tab='settings'] .card.open > .field,
+body[data-tab='settings'] .card.open > .field-block,
+body[data-tab='settings'] .card.open > p,
+body[data-tab='settings'] .card.open > div { display: revert; }
+body[data-tab='settings'] .card.open > .field-grid { display: grid; }
+body[data-tab='settings'] .card.open > .btn-row { display: flex; }
+body[data-tab='settings'] .card.open > .switch-row { display: flex; }
+body[data-tab='settings'] .card.open > .table-scroll { display: block; }
+

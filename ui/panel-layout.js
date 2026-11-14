@@ -262,3 +262,15 @@
     sec.classList.toggle('open')
   }, true)
 
+
+
+  // 设置页：点卡片展开／收起
+  document.addEventListener('click', function (event) {
+    var head = event.target.closest && event.target.closest('.card-head')
+    if (!head) return
+    if (!document.body || document.body.getAttribute('data-tab') !== 'settings') return
+    var card = head.closest('.card')
+    if (!card) return
+    card.classList.toggle('open')
+  }, true)
+
