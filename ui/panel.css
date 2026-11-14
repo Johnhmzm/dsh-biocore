@@ -1033,3 +1033,22 @@ body[data-tab='settings'] .card.open {
 }
 body[data-tab='settings'] .card.open > .card-head { margin-bottom: 8px; }
 body[data-tab='settings'] .card.open > .card-head .r { display: block; }
+
+
+/* 展开后：卡内按列排，按钮行贴在卡片底部内侧 */
+body[data-tab='settings'] .card.open {
+  display: flex;
+  flex-direction: column;
+}
+body[data-tab='settings'] .card.open > .btn-row {
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid var(--line);
+  justify-content: flex-end;
+}
+/* 收起时：标签居中，方块里不要留一大片空 */
+body[data-tab='settings'] .card:not(.open) {
+  align-items: flex-start;
+  justify-content: flex-start;
+}
+
