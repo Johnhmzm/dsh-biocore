@@ -382,16 +382,25 @@
     for (var i = 0; i < rows.length; i += 1) tbody.appendChild(memoryRow(rows[i] || {}))
   }
 
+  /** 时间戳统一成"秒"再当键：库里有的给秒、有的给毫秒，混着用就永远命中不了。 */
+  function tsKey(value) {
+    var n = Number(value)
+    if (!Number.isFinite(n) || n <= 0) return ''
+    if (n > 1e11) n = n / 1000
+    return String(Math.round(n))
+  }
+
   function mergeLabels(rows, labels) {
     var out = []
     var byTs = {}
     for (var i = 0; i < (labels || []).length; i += 1) {
       var label = labels[i] || {}
-      byTs[String(Math.round(Number(label.ts) * 1000))] = label
+      var k = tsKey(label.ts)
+      if (k) byTs[k] = label
     }
     for (var j = 0; j < (rows || []).length; j += 1) {
       var row = rows[j] || {}
-      var hit = byTs[String(Math.round(Number(row.ts) || 0))]
+      var hit = byTs[tsKey(row.ts)]
       out.push(Object.assign({}, row, hit ? { summary: hit.summary, role: hit.role } : {}))
     }
     return out
