@@ -11,6 +11,8 @@ Commands:
   compaction_scan <store> <session_id> [json] -> 会话日志补扫压缩记录（幂等）
   compaction_index <store> <session_id> [json] -> 压缩目录（只读、0 次模型调用）
   memory_search <store> <session_id> [json] -> 模型可见的记忆检索（0 次 chat 调用）
+  memory_list <store> <session_id> [json] -> 记忆目录（id/日期/角色/摘要，不带正文）
+  memory_read <store> <session_id> [json] -> 按 id 取一条原文（≤2000 字）
   persona_compile <json> <md>      -> compile stdin persona text -> AstrBot profile
 
 Nothing in dsh_adapter is imported for its side effects and no adapter file is
@@ -449,6 +451,24 @@ def _compaction_scan(argv):
     return _emit(result)
 
 
+def _memory_action(command):
+    """memory_search / memory_list / memory_read 共用一段搬运逻辑。"""
+
+    def run(argv):
+        store = argv[1] if len(argv) > 1 else ""
+        session_id = argv[2] if len(argv) > 2 else ""
+        payload = _json_arg(argv[3] if len(argv) > 3 else "")
+        payload = dict(payload) if isinstance(payload, dict) else {}
+        payload.setdefault("store", store)
+        payload.setdefault("session_id", session_id)
+        result = _pipeline().dispatch(command, payload)
+        if not isinstance(result, dict):
+            return _emit({"ok": False, "reason": "action_failed"})
+        return _emit(result)
+
+    return run
+
+
 def _memory_search(argv):
     """模型可见的记忆检索：检索/排序全在 pipeline，Node 只搬运 JSON。"""
     store = argv[1] if len(argv) > 1 else ""
@@ -562,6 +582,10 @@ def main(argv):
             return _compaction_index(argv)
         if command == "memory_search" and len(argv) >= 3:
             return _memory_search(argv)
+        if command == "memory_list" and len(argv) >= 3:
+            return _memory_action("memory_list")(argv)
+        if command == "memory_read" and len(argv) >= 3:
+            return _memory_action("memory_read")(argv)
         if command == "runtime_prompt" and len(argv) >= 2:
             return _runtime_prompt(argv)
         if command == "runtime_gate" and len(argv) >= 2:

@@ -1943,6 +1943,13 @@ def memory_search(store, session_id, query, top_k=8, scope='all'):
     text = clean_text(query, 2000)
     if not text:
         return {"ok": False, "reason": "query_required"}
+    # 检索入口顺手补一小批缺失向量（用户要求"被压缩的条目必须有向量"）：最多 20 条、
+    # 失败静默——不补齐就会出现在"没有向量的条目永不命中"的洞。
+    try:
+        if int(_recall_param("vector_backfill_on", store, None) or 0):
+            _vector_top_up(store, sid, limit=20)
+    except Exception:
+        pass
     try:
         limit = int(top_k)
     except Exception:
@@ -1989,6 +1996,105 @@ def memory_search(store, session_id, query, top_k=8, scope='all'):
         row.pop('ts', None)
     return {"ok": True, "query": text, "scope": scope, "count": len(results),
             "results": results}
+
+
+def _all_rows(store, session_id):
+    """目录用：条目 + 压缩记录，统一成 {id, ts, role, kind, text, summary}。"""
+    rows = []
+    try:
+        for entry in load_memory(store, session_id).get('entries') or []:
+            if not isinstance(entry, dict) or entry.get('deleted') or entry.get('archived'):
+                continue
+            text = str(entry.get('text') or '').strip()
+            if not text:
+                continue
+            rows.append({'id': str(entry.get('id') or ''), 'ts': float(entry.get('ts') or 0.0),
+                         'role': str(entry.get('role') or 'user'), 'kind': 'entry',
+                         'text': text,
+                         'summary': str(entry.get('summary') or entry.get('overview') or '')})
+    except Exception:
+        pass
+    try:
+        root = _store_root(store)
+        from biocore_memory.event import compaction_record as _cr
+        for item in _cr.load(_cr.db_path(root, sanitize_session_id(session_id)),
+                             sanitize_session_id(session_id)) if root else []:
+            if not isinstance(item, dict):
+                continue
+            text = str(item.get('text') or '').strip()
+            if not text:
+                continue
+            rows.append({'id': str(item.get('compaction_id') or ''), 'kind': 'compaction',
+                         'ts': float(item.get('window_end') or 0.0), 'role': 'compaction',
+                         'text': text, 'summary': text})
+    except Exception:
+        pass
+    rows.sort(key=lambda row: -(row.get('ts') or 0.0))
+    return rows
+
+
+def _list_summary(row):
+    """目录里的一行摘要：≤40 字——有摘要用摘要，没有就用首句。"""
+    text = str(row.get('summary') or '').strip()
+    if not text:
+        body = str(row.get('text') or '').strip()
+        text = (re.split(r'[。！？!?\n]', body)[0].strip() or body) if body else ''
+    return text[:40]
+
+
+def memory_list(store, session_id, query=None, limit=50, offset=0, scope='all'):
+    """目录：先看有哪些记忆（id/日期/角色/摘要），再用 memory_read 取原文。
+
+    不带正文；按日期新在前；query 可选（给了就按字符二元组粗筛，粗筛只影响"看哪一段"，
+    不影响 memory_read）。0 次模型调用。
+    """
+    root = _store_root(store)
+    if root is None:
+        return {"ok": False, "reason": "no_store"}
+    sid = sanitize_session_id(session_id)
+    try:
+        size = int(limit)
+    except Exception:
+        size = 50
+    size = max(1, min(100, size))
+    try:
+        start = max(0, int(offset))
+    except Exception:
+        start = 0
+    scope = str(scope or 'all').strip().lower()
+    rows = _all_rows(store, sid)
+    if scope in ('text', 'entry'):
+        rows = [row for row in rows if row['kind'] == 'entry']
+    elif scope in ('compaction', 'compactions'):
+        rows = [row for row in rows if row['kind'] == 'compaction']
+    text_query = str(query or '').strip()
+    if text_query:
+        wanted = _bigrams(text_query)
+        rows = [row for row in rows if wanted & _bigrams(row.get('text'))]
+    total = len(rows)
+    page = rows[start:start + size]
+    items = [{'id': row['id'], 'date': _search_date(row.get('ts')),
+              'role': row['role'], 'kind': row['kind'],
+              'summary': _list_summary(row)} for row in page]
+    return {"ok": True, "items": items, "total": total, "offset": start, "limit": size}
+
+
+def memory_read(store, session_id, entry_id):
+    """取一条原文（≤2000 字）：先当条目 id 找，再当压缩记录 id 找。"""
+    root = _store_root(store)
+    if root is None:
+        return {"ok": False, "reason": "no_store"}
+    sid = sanitize_session_id(session_id)
+    wanted = str(entry_id or '').strip()
+    if not wanted:
+        return {"ok": False, "reason": "id_required"}
+    for row in _all_rows(store, sid):
+        if row['id'] != wanted:
+            continue
+        return {"ok": True, "id": row['id'], "date": _search_date(row.get('ts')),
+                "role": row['role'], "kind": row['kind'],
+                "text": str(row.get('text') or '')[:2000]}
+    return {"ok": False, "reason": "not_found"}
 
 
 # ---------------------------------------------------------------- governance
@@ -10946,6 +11052,18 @@ def dispatch(action, payload=None):
             return memory_search(store, session_id, data.get("query"),
                                  data.get("top_k", data.get("limit", 8)),
                                  data.get("scope") or "all")
+        if action == "memory_list":
+            session_id = str(data.get("session_id") or "").strip()
+            if not session_id:
+                return bad("missing session_id")
+            return memory_list(store, session_id, data.get("query"),
+                               data.get("limit", 50), data.get("offset", 0),
+                               data.get("scope") or "all")
+        if action == "memory_read":
+            session_id = str(data.get("session_id") or "").strip()
+            if not session_id:
+                return bad("missing session_id")
+            return memory_read(store, session_id, data.get("id"))
         if action == "vectors_check":
             return vectors_check(store, data.get("session") or data.get("session_id"))
         if action == "vectors_backfill":

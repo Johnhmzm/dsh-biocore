@@ -109,8 +109,9 @@ try {
       const ctx = { on() { return () => {} }, tools: host.tools }
       const dispose = registerMemorySearchTool(ctx, () => '/s',
         { defineTool: fakeDefineTool, search: async () => ({ results: [] }) })
-      assert.equal(host.logs.length, 1, 'ctx.tools 路径应立刻注册')
-      assert.equal(host.logs[0].name, 'memory_search')
+      assert.equal(host.logs.length, 3, 'ctx.tools 路径应立刻注册三个工具')
+      assert.deepEqual(host.logs.map((spec) => spec.name).sort(),
+        ['memory_list', 'memory_read', 'memory_search'])
       assert.equal(typeof dispose, 'function')
     }
 
@@ -127,11 +128,11 @@ try {
       }
       registerMemorySearchTool(ctx, () => '/s',
         { defineTool: fakeDefineTool, search: async () => ({ results: [] }) })
-      assert.equal(host.logs.length, 1, 'inject 路径注册一次')
+      assert.equal(host.logs.length, 3, 'inject 路径注册三个工具')
       // 事件再来几次也不该再注册
       for (const name of Object.keys(handlers)) handlers[name]()
       handlers['session/event'] && handlers['session/event']()
-      assert.equal(host.logs.length, 1, 'registered 标志去重')
+      assert.equal(host.logs.length, 3, 'registered 标志去重')
     }
 
     // (c) 都没有工具、只有事件：第一次事件触发时才注册
@@ -151,11 +152,11 @@ try {
       const fireStep = handlers['agent/pre-step']
       assert.equal(typeof fireEvent, 'function', 'apply 时就要挂上事件触发器')
       fireEvent()
-      assert.equal(host.logs.length, 1, '事件触发时补注册')
+      assert.equal(host.logs.length, 3, '事件触发时补注册三个')
       // 注册成功后监听器会被摘掉：剩下的引用手动再调一次也不该重复注册
       if (typeof fireStep === 'function') fireStep()
       fireEvent()
-      assert.equal(host.logs.length, 1, '仍然只注册一次')
+      assert.equal(host.logs.length, 3, '仍然只注册一次')
     }
 
     // (d) 什么都没有：安静返回，不抛
