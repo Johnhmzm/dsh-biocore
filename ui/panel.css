@@ -1059,3 +1059,28 @@ body[data-tab='settings'] .card.open > .btn-row { display: flex; }
 body[data-tab='settings'] .card.open > .switch-row { display: flex; }
 body[data-tab='settings'] .card.open > .table-scroll { display: block; }
 
+
+
+/* 方块：更像"方块"，标题换成两行、收起时隐藏右侧状态 */
+body[data-tab='settings'] .card {
+  height: 116px;
+  padding: 10px;
+  justify-content: flex-start;
+}
+body[data-tab='settings'] .card > .card-head {
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 0;
+  align-items: flex-start;
+}
+body[data-tab='settings'] .card > .card-head .r { display: none; }
+body[data-tab='settings'] .card > .card-head b,
+body[data-tab='settings'] .card > .card-head .zh {
+  white-space: normal;
+  font-size: 10px;
+  line-height: 1.35;
+  letter-spacing: .1em;
+}
+body[data-tab='settings'] .card.open > .card-head .r { display: block; }
+body[data-tab='settings'] .card.open > .card-head { margin-bottom: 8px; }
+
