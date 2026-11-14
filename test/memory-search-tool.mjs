@@ -93,25 +93,80 @@ try {
     ok('空库 ok、缺 query/缺会话都显式报错')
   }
 
-  // ---- 注册 ------------------------------------------------------------
+  // ---- 注册：三条路，各走一次；只注册一次 -----------------------------
   {
-    const registered = []
-    const ctx = {
-      on() { return () => {} },
-      inject(names, cb) {
-        assert.deepEqual(names, ['tools'])
-        cb({ tools: { register(spec) { registered.push(spec); return () => {} } } })
-      },
+    const maker = () => {
+      const logs = []
+      return {
+        logs,
+        tools: { register(spec) { logs.push(spec); return () => {} } },
+      }
     }
-    const dispose = registerMemorySearchTool(ctx, () => '/s',
-      { defineTool: fakeDefineTool, search: async () => ({ results: [] }) })
-    assert.equal(registered.length, 1)
-    assert.equal(registered[0].name, 'memory_search')
-    assert.equal(typeof dispose, 'function')
-    // 没有 tools 服务：安静返回 null
-    assert.equal(registerMemorySearchTool({ on() {} }, () => '/s', { defineTool: fakeDefineTool }), null)
-    ok('注册：走 ctx.inject(tools) 挂上；没有 tools 服务时安静跳过')
+
+    // (a) ctx.tools 已就绪：apply 时立刻注册
+    {
+      const host = maker()
+      const ctx = { on() { return () => {} }, tools: host.tools }
+      const dispose = registerMemorySearchTool(ctx, () => '/s',
+        { defineTool: fakeDefineTool, search: async () => ({ results: [] }) })
+      assert.equal(host.logs.length, 1, 'ctx.tools 路径应立刻注册')
+      assert.equal(host.logs[0].name, 'memory_search')
+      assert.equal(typeof dispose, 'function')
+    }
+
+    // (b) 只有 inject：服务出现时注册，且事件触发器不会重复注册
+    {
+      const host = maker()
+      const handlers = {}
+      const ctx = {
+        on(name, fn) { handlers[name] = fn; return () => { delete handlers[name] } },
+        inject(names, cb) {
+          assert.deepEqual(names, ['tools'])
+          cb({ tools: host.tools })
+        },
+      }
+      registerMemorySearchTool(ctx, () => '/s',
+        { defineTool: fakeDefineTool, search: async () => ({ results: [] }) })
+      assert.equal(host.logs.length, 1, 'inject 路径注册一次')
+      // 事件再来几次也不该再注册
+      for (const name of Object.keys(handlers)) handlers[name]()
+      handlers['session/event'] && handlers['session/event']()
+      assert.equal(host.logs.length, 1, 'registered 标志去重')
+    }
+
+    // (c) 都没有工具、只有事件：第一次事件触发时才注册
+    {
+      const host = maker()
+      const handlers = {}
+      const ctx = {
+        on(name, fn) { handlers[name] = fn; return () => { delete handlers[name] } },
+      }
+      // apply 时没有 tools
+      registerMemorySearchTool(ctx, () => '/s',
+        { defineTool: fakeDefineTool, search: async () => ({ results: [] }) })
+      assert.equal(host.logs.length, 0, 'apply 时注册不上')
+      // tools 服务随后出现，会话事件触发一次
+      ctx.tools = host.tools
+      const fireEvent = handlers['session/event']
+      const fireStep = handlers['agent/pre-step']
+      assert.equal(typeof fireEvent, 'function', 'apply 时就要挂上事件触发器')
+      fireEvent()
+      assert.equal(host.logs.length, 1, '事件触发时补注册')
+      // 注册成功后监听器会被摘掉：剩下的引用手动再调一次也不该重复注册
+      if (typeof fireStep === 'function') fireStep()
+      fireEvent()
+      assert.equal(host.logs.length, 1, '仍然只注册一次')
+    }
+
+    // (d) 什么都没有：安静返回，不抛
+    {
+      const ctx = { on() { return () => {} } }
+      assert.doesNotThrow(() => registerMemorySearchTool(ctx, () => '/s',
+        { defineTool: fakeDefineTool, search: async () => ({ results: [] }) }))
+    }
+    ok('注册三条路：ctx.tools / inject / 事件触发都能挂上，且只注册一次')
   }
+
 } finally {
   // 无临时文件
 }
