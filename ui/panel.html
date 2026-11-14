@@ -456,6 +456,15 @@
         <label class="field"><span>长事件阈值（字符）</span>
           <input id="msLongEventChars" type="number" min="200" max="8000" step="100" value="1200">
         </label>
+        <label class="field"><span>事件分公式</span>
+          <select id="msEventScoreMode">
+            <option value="max">max（缺省，实测最好）</option>
+            <option value="lse">lse（平滑最大值）</option>
+          </select>
+        </label>
+        <label class="field"><span>β（仅 lse 用）</span>
+          <input id="msEventBeta" type="number" min="0.3" max="8" step="0.1" value="2">
+        </label>
         <div class="card-actions">
 <button id="msSave" class="primary-button" type="button">保存</button>
           <button id="msReload" class="ghost-button" type="button">重新读取</button>
