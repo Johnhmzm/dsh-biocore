@@ -2,6 +2,7 @@
 //
 // 不碰宿主：注入 defineTool/ctx/search，宿主包只在真实运行里出现。
 import assert from 'node:assert/strict'
+import * as LIB from '../lib/modules/memory-search-tool.js'
 import {
   PARAMETERS,
   TEXT_LIMIT,
@@ -27,8 +28,9 @@ try {
     assert.ok(TOOL_DESCRIPTION.includes('回忆过去'), 'a) 用途')
     assert.ok(TOOL_DESCRIPTION.includes('先调用本工具'), 'b) 优先用它')
     assert.ok(TOOL_DESCRIPTION.includes('不要用关键词或字符匹配'), 'b) 明确禁止关键词翻历史')
-    assert.ok(TOOL_DESCRIPTION.includes('原文片段与压缩目录'), 'c) 返回什么')
-    assert.ok(TOOL_DESCRIPTION.includes('按日期排序'), 'c) 排序')
+    assert.ok(TOOL_DESCRIPTION.includes('句子与它所属事件的一行摘要'), 'c) 命中给句子与事件摘要')
+    assert.ok(TOOL_DESCRIPTION.includes('event_id'), 'c) 要上下文用 event_id')
+    assert.ok(TOOL_DESCRIPTION.includes('entry_id'), 'c) 要单条用 entry_id')
     ok('描述写清用途 / 优先用它 / 返回原文与压缩目录并按日期排序')
   }
 
@@ -41,7 +43,8 @@ try {
     assert.equal(spec.parameters.top_k.type, 'integer')
     assert.equal(spec.parameters.scope.type, 'string')
     assert.deepEqual(spec.parameters.scope.enum, ['all', 'text', 'compaction'])
-    assert.equal(spec.output.schema.properties.results.items.properties.text.type, 'string')
+    assert.equal(spec.output.schema.properties.results.items.properties.sentence.type, 'string')
+    assert.equal(spec.output.schema.properties.results.items.properties.hits_in_event.type, 'integer')
     assert.equal(clampTopK(0), 1, 'top_k 下界')
     assert.equal(clampTopK(99), 20, 'top_k 上界')
     assert.equal(clampTopK('abc'), 8, '非数字 -> 缺省')
@@ -51,7 +54,7 @@ try {
     ok('schema：query 必填、top_k 夹紧 1–20、scope 枚举；输出结构固定')
   }
 
-  // ---- 执行：结构 / 截断 / 排序 ---------------------------------------
+  // ---- 执行：结构 / 截断（句子级字段见 memory-list-read.mjs） ----------
   {
     let seen = null
     const spec = buildMemoryToolSpec({
@@ -60,8 +63,8 @@ try {
       search: async (store, sessionId, payload) => {
         seen = { store, sessionId, payload }
         return { ok: true, results: [
-          { date: '2026-11-12 21:00', role: 'user', text: LONG, kind: 'entry' },
-          { date: '2026-11-12 22:10', role: 'compaction', text: '【压缩目录】覆盖 …', kind: 'compaction' },
+          { date: '2026-11-12 21:31', role: 'assistant', sentence: LONG,
+            event_summary: '事件一', entry_id: 'e1', event_id: 'EV1', hits_in_event: 2 },
         ] }
       },
     })
@@ -71,13 +74,14 @@ try {
     assert.equal(seen.sessionId, 'session-a')
     assert.equal(seen.payload.query, '我们最开始是为了什么开始改记忆的')
     assert.equal(seen.payload.top_k, 9)
-    assert.equal(value.count, 2)
-    assert.equal(value.results[0].text.length, TEXT_LIMIT, '截断到 400 字')
-    assert.equal(value.results[1].kind, 'compaction')
-    assert.deepEqual(Object.keys(value.results[0]).sort(), ['date', 'kind', 'role', 'text'])
+    assert.equal(value.count, 1)
+    assert.equal(value.results[0].sentence.length, LIB.SENTENCE_LIMIT, '句子截到 200 字')
+    assert.equal(value.results[0].event_summary, '事件一')
+    assert.equal(value.results[0].entry_id, 'e1')
+    assert.equal(value.results[0].event_id, 'EV1')
     const rendered = spec.output.render({}, value)[0].text
-    assert.ok(rendered.includes('记忆检索结果'))
-    ok('执行：参数透传、结构四字段、正文截断 400 字')
+    assert.ok(rendered.includes('记忆检索'))
+    ok('执行：参数透传、句子/事件字段齐、句子截断')
   }
 
   // ---- 空库 / 无 query / 无 session ------------------------------------

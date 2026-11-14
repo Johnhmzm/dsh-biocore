@@ -1930,76 +1930,23 @@ def _search_compactions(store, session_id, query, top_k):
     return out
 
 
-def memory_search(store, session_id, query, top_k=8, scope='all'):
-    """模型可见的记忆检索：给出日期、角色与原文（截断 400 字）。
-
-    排序复用注入那条路（engine.recall + rerank + 句子重排），压缩记录走向量直配；
-    两个来源合并后按时间新在前。0 次 chat 调用（最多一次 embedding）。
-    """
-    root = _store_root(store)
-    if root is None:
-        return {"ok": False, "reason": "no_store"}
-    sid = sanitize_session_id(session_id)
-    text = clean_text(query, 2000)
-    if not text:
-        return {"ok": False, "reason": "query_required"}
-    # 检索入口顺手补一小批缺失向量（用户要求"被压缩的条目必须有向量"）：最多 20 条、
-    # 失败静默——不补齐就会出现在"没有向量的条目永不命中"的洞。
-    try:
-        if int(_recall_param("vector_backfill_on", store, None) or 0):
-            _vector_top_up(store, sid, limit=20)
-    except Exception:
-        pass
-    try:
-        limit = int(top_k)
-    except Exception:
-        limit = 8
-    limit = max(1, min(20, limit))
-    scope = str(scope or 'all').strip().lower()
-    if scope not in ('all', 'text', 'compaction'):
-        scope = 'all'
-
-    results = []
-    if scope in ('all', 'text'):
-        try:
-            _embed_cfg, rerank_cfg = _vector_space_config(store)
-        except Exception:
-            rerank_cfg = None
-        picked = []
-        try:
-            # budget 是 token 预算，不是条数：给足（否则短条数会被预算剪空），
-            # 真正的条数在合并之后按 limit 截断。
-            picked = _query_entries(store, sid, text, max(20000, limit * 2000),
-                                    rerank_cfg) or []
-        except Exception as exc:
-            logger.warning("[search] 条目检索失败：%s: %s", type(exc).__name__, str(exc)[:120])
-            picked = []
-        if not picked:
-            # 召回空手（老库没向量 / 查询与条目没有语义命中 / engine 写路径报错）：
-            # 用字符二元组兜底，工具永远不因缺向量而空手。
-            picked = _lexical_rows(store, sid, text, limit)
-        for entry in picked[:max(limit * 4, limit)]:
-            if not isinstance(entry, dict):
-                continue
-            results.append({'date': _search_date(entry.get('ts')),
-                            'role': str(entry.get('role') or ''),
-                            'text': str(entry.get('text') or '')[:400],
-                            'kind': 'entry',
-                            'ts': float(entry.get('ts') or 0.0)})
-    if scope in ('all', 'compaction'):
-        results.extend(_search_compactions(store, sid, text, limit))
-
-    # 新在前：同一个日期粒度下 kind 不重要，稳定排序靠 ts
-    results.sort(key=lambda row: -(row.get('ts') or 0.0))
-    results = results[:limit]
-    for row in results:
-        row.pop('ts', None)
-    return {"ok": True, "query": text, "scope": scope, "count": len(results),
-            "results": results}
+def _sentences_of(text, limit_chars=200):
+    """把一段正文切成句子（保留句末标点），每条截到 limit_chars。"""
+    body = str(text or "").strip()
+    if not body:
+        return []
+    parts = re.split(r"(?<=[。！？!?；;\n])", body)
+    out = []
+    for part in parts:
+        item = part.strip()
+        if len(item) < 2:
+            continue
+        out.append(item[:limit_chars])
+    return out
 
 
 def _all_rows(store, session_id):
-    """目录用：条目 + 压缩记录，统一成 {id, ts, role, kind, text, summary}。"""
+    """读路径用：条目 + 压缩记录，统一成 {id, ts, role, kind, text, summary}。"""
     rows = []
     try:
         for entry in load_memory(store, session_id).get('entries') or []:
@@ -2033,21 +1980,276 @@ def _all_rows(store, session_id):
     return rows
 
 
-def _list_summary(row):
-    """目录里的一行摘要：≤40 字——有摘要用摘要，没有就用首句。"""
-    text = str(row.get('summary') or '').strip()
-    if not text:
-        body = str(row.get('text') or '').strip()
-        text = (re.split(r'[。！？!?\n]', body)[0].strip() or body) if body else ''
-    return text[:40]
+def _entry_map(store, session_id):
+    """entry_id -> {id, ts, role, text, summary}（只含可见条目）。"""
+    mapping = {}
+    try:
+        for entry in load_memory(store, session_id).get("entries") or []:
+            if not isinstance(entry, dict) or entry.get("deleted") or entry.get("archived"):
+                continue
+            text = str(entry.get("text") or "").strip()
+            if not text:
+                continue
+            mapping[str(entry.get("id") or "")] = {
+                "id": str(entry.get("id") or ""), "ts": float(entry.get("ts") or 0.0),
+                "role": str(entry.get("role") or "user"), "text": text,
+                "summary": str(entry.get("summary") or entry.get("overview") or "")}
+    except Exception:
+        pass
+    return mapping
 
 
-def memory_list(store, session_id, query=None, limit=50, offset=0, scope='all'):
-    """目录：先看有哪些记忆（id/日期/角色/摘要），再用 memory_read 取原文。
+def _events_index(store, session_id):
+    """(entry_id -> event, [event...])：事件是句子之上的一层上下文。"""
+    by_entry = {}
+    events = []
+    try:
+        state = _load_event_state(store, session_id) or {}
+        for event in state.get("events") or []:
+            if not isinstance(event, dict):
+                continue
+            events.append(event)
+            for member in event.get("entries") or []:
+                if isinstance(member, dict) and member.get("id"):
+                    by_entry[str(member["id"])] = event
+    except Exception:
+        pass
+    return by_entry, events
 
-    不带正文；按日期新在前；query 可选（给了就按字符二元组粗筛，粗筛只影响"看哪一段"，
-    不影响 memory_read）。0 次模型调用。
+
+def _event_summary(event, entry=None):
+    """事件的一行总结：事件 overview > 条目摘要 > 首句，≤40 字。"""
+    if isinstance(event, dict):
+        for key in ("overview", "summary", "note", "text"):
+            value = str(event.get(key) or "").strip()
+            if value:
+                return value[:40]
+    if isinstance(entry, dict):
+        value = str(entry.get("summary") or "").strip()
+        if value:
+            return value[:40]
+        body = str(entry.get("text") or "").strip()
+        if body:
+            return (re.split(r"[。！？!?\n]", body)[0].strip() or body)[:40]
+    return ""
+
+
+def _units_with_vectors(store, session_id):
+    """句子层：units 里带向量的句子（[{id, entry_id, text, vector}]）。"""
+    root = _store_root(store)
+    if root is None:
+        return []
+    try:
+        path = _sql_store().db_path(root, sanitize_session_id(session_id))
+        if not path.is_file():
+            return []
+        conn = sqlite3.connect(path.as_uri() + "?mode=ro", uri=True, timeout=5.0)
+    except Exception:
+        return []
+    try:
+        rows = conn.execute(
+            "SELECT id, entry_id, text, vector, ord FROM units"
+            " WHERE vector IS NOT NULL AND text IS NOT NULL ORDER BY ord").fetchall()
+    except Exception:
+        return []
+    finally:
+        conn.close()
+    out = []
+    for row in rows:
+        try:
+            vector = _sql_store().unpack_vector(row[3])
+        except Exception:
+            vector = None
+        if not vector:
+            continue
+        out.append({"id": str(row[0]), "entry_id": str(row[1] or ""),
+                    "text": str(row[2] or ""), "vector": [float(x) for x in vector]})
+    return out
+
+
+def _pick_sentence(text, query, want_chars=200):
+    """从一条正文里挑与 query 最贴的一句（二元组重合最多；都不重合就取第一句）。"""
+    sentences = _sentences_of(text, want_chars)
+    if not sentences:
+        return ""
+    wanted = _bigrams(query)
+    if not wanted:
+        return sentences[0]
+    best, best_score = sentences[0], -1
+    for sentence in sentences:
+        score = len(wanted & _bigrams(sentence))
+        if score > best_score:
+            best, best_score = sentence, score
+    return best
+
+
+def memory_search(store, session_id, query, top_k=8, scope="all"):
+    """三层检索的第一层：命中到句子，并带上事件摘要与两个 id。
+
+    句子层优先用 units 的向量（真·句子级相似度）；没有 units 向量时退到
+    "条目召回 + 逐句挑最贴的那句"——结果结构与排序含义不变，句子照样是原话。
+    0 次 chat 调用（最多一次 embedding）。
     """
+    root = _store_root(store)
+    if root is None:
+        return {"ok": False, "reason": "no_store"}
+    sid = sanitize_session_id(session_id)
+    text = clean_text(query, 2000)
+    if not text:
+        return {"ok": False, "reason": "query_required"}
+    try:
+        limit = int(top_k)
+    except Exception:
+        limit = 8
+    limit = max(1, min(20, limit))
+
+    # 句子缺向量就先补一小批（用户要求：被压缩的条目必须有向量）
+    try:
+        if int(_recall_param("vector_backfill_on", store, None) or 0):
+            _vector_top_up(store, sid, limit=20)
+    except Exception:
+        pass
+
+    entries = _entry_map(store, sid)
+    by_entry_event, _events = _events_index(store, sid)
+    results = []
+    units = _units_with_vectors(store, sid)
+    if units:
+        vectors = _embed_texts(store, [text])
+        if vectors:
+            scored = []
+            for unit in units:
+                score = _cosine_list(vectors[0], unit["vector"])
+                if score <= 0:
+                    continue
+                scored.append((score, unit))
+            scored.sort(key=lambda item: -item[0])
+            for score, unit in scored[:limit]:
+                entry = entries.get(unit["entry_id"]) or {}
+                event = by_entry_event.get(unit["entry_id"])
+                results.append({
+                    "date": _search_date(entry.get("ts")),
+                    "role": str(entry.get("role") or "user"),
+                    "sentence": str(unit.get("text") or "")[:200],
+                    "event_summary": _event_summary(event, entry),
+                    "entry_id": unit["entry_id"],
+                    "event_id": str((event or {}).get("event_id") or ""),
+                })
+    if not results:
+        # 没有句子向量：条目召回 + 逐句挑最贴的（结构与上面完全一致）
+        picked = []
+        try:
+            _embed_cfg, rerank_cfg = _vector_space_config(store)
+        except Exception:
+            rerank_cfg = None
+        try:
+            picked = _query_entries(store, sid, text, max(20000, limit * 2000),
+                                    rerank_cfg) or []
+        except Exception as exc:
+            logger.warning("[search] 条目检索失败：%s: %s", type(exc).__name__, str(exc)[:120])
+            picked = []
+        if not picked:
+            picked = _lexical_rows(store, sid, text, limit)
+        for entry in picked[:limit]:
+            if not isinstance(entry, dict):
+                continue
+            entry_id = str(entry.get("id") or "")
+            event = by_entry_event.get(entry_id)
+            sentence = _pick_sentence(entry.get("text"), text)
+            if not sentence:
+                continue
+            results.append({
+                "date": _search_date(entry.get("ts")),
+                "role": str(entry.get("role") or "user"),
+                "sentence": sentence[:200],
+                "event_summary": _event_summary(event, entry),
+                "entry_id": entry_id,
+                "event_id": str((event or {}).get("event_id") or ""),
+            })
+    # 同一件事只占一行：多句命中同一事件就合并（留分最高那句 + hits_in_event）。
+    # 事件的标识是它的总结：没有 event_id 的老数据按总结文本归并。
+    merged = []
+    seen = {}
+    for row in results:
+        key = ("ev:" + row["event_id"]) if row.get("event_id") else \
+            ("sum:" + (row.get("event_summary") or row.get("sentence") or "")[:40])
+        if key in seen:
+            merged[seen[key]]["hits_in_event"] += 1
+            continue
+        row["hits_in_event"] = 1
+        seen[key] = len(merged)
+        merged.append(row)
+    merged.sort(key=lambda row: row.get("date") or "", reverse=True)
+    return {"ok": True, "query": text, "count": len(merged), "results": merged[:limit],
+            "layer": "sentence"}
+
+
+def _event_by_id(store, session_id, event_id):
+    try:
+        for event in (_load_event_state(store, session_id) or {}).get("events") or []:
+            if str((event or {}).get("event_id") or "") == str(event_id):
+                return event
+    except Exception:
+        pass
+    return None
+
+
+def memory_read(store, session_id, entry_id=None, event_id=None):
+    """第二/三层：给 entry_id 读一条正文（≤2000），给 event_id 读整件（≤4000）。"""
+    root = _store_root(store)
+    if root is None:
+        return {"ok": False, "reason": "no_store"}
+    sid = sanitize_session_id(session_id)
+    entry_key = str(entry_id or "").strip()
+    event_key = str(event_id or "").strip()
+    if entry_key:
+        for row in _all_rows(store, sid):
+            if row["id"] == entry_key:
+                return {"ok": True, "id": row["id"], "date": _search_date(row.get("ts")),
+                        "role": row["role"], "kind": row["kind"],
+                        "text": str(row.get("text") or "")[:2000], "level": "entry"}
+        return {"ok": False, "reason": "not_found"}
+    if event_key:
+        event = _event_by_id(store, sid, event_key)
+        if not event:
+            return {"ok": False, "reason": "not_found"}
+        entries = _entry_map(store, sid)
+        members = []
+        for member in (event or {}).get("entries") or []:
+            key = str((member or {}).get("id") or "")
+            row = entries.get(key) or member
+            if not isinstance(row, dict):
+                continue
+            members.append({
+                "ts": float(row.get("ts") or 0.0),
+                "role": str(row.get("role") or ""),
+                "text": str(row.get("text") or "").strip()})
+        members.sort(key=lambda item: item["ts"])
+        head = _event_summary(event)
+        body = []
+        used = len(head) + 2 if head else 0
+        for item in members:
+            piece = "[%s] %s：%s" % (_search_date(item["ts"]),
+                                     item["role"] or "user", item["text"])
+            if used + len(piece) + 1 > 4000:
+                break
+            body.append(piece)
+            used += len(piece) + 1
+        if not body and not head:
+            return {"ok": False, "reason": "not_found"}
+        text_out = ((head + chr(10) + chr(10)) if head else "") + chr(10).join(body)
+        start_ts = members[0]["ts"] if members else 0.0
+        end_ts = members[-1]["ts"] if members else 0.0
+        return {"ok": True, "id": event_key, "kind": "event", "level": "event",
+                "date": _search_date(start_ts),
+                "date_range": [_search_date(start_ts), _search_date(end_ts)],
+                "role": "event", "entries": len(members),
+                "text": text_out[:4000]}
+    return {"ok": False, "reason": "id_required"}
+
+
+def memory_list(store, session_id, query=None, limit=50, offset=0, scope="all"):
+    """目录按事件列（一行一件）：事件 id、日期范围、条目数、一行总结。"""
     root = _store_root(store)
     if root is None:
         return {"ok": False, "reason": "no_store"}
@@ -2061,40 +2263,67 @@ def memory_list(store, session_id, query=None, limit=50, offset=0, scope='all'):
         start = max(0, int(offset))
     except Exception:
         start = 0
-    scope = str(scope or 'all').strip().lower()
-    rows = _all_rows(store, sid)
-    if scope in ('text', 'entry'):
-        rows = [row for row in rows if row['kind'] == 'entry']
-    elif scope in ('compaction', 'compactions'):
-        rows = [row for row in rows if row['kind'] == 'compaction']
-    text_query = str(query or '').strip()
+    entries = _entry_map(store, sid)
+    _by_entry, events = _events_index(store, sid)
+    rows = []
+    seen = set()
+    for event in events:
+        event_id = str((event or {}).get("event_id") or "")
+        summary_key = _event_summary(event)
+        # 事件的唯一性：有 event_id 用它，没有就按总结文本（总结相同视为同一件）
+        key = ("ev:" + event_id) if event_id else ("sum:" + summary_key)
+        if not summary_key and not event_id:
+            continue
+        if key in seen:
+            continue
+        seen.add(key)
+        if not event_id:
+            event_id = "sum-" + str(abs(hash(summary_key)) % 10 ** 10)
+        members = [str((member or {}).get("id") or "")
+                   for member in (event.get("entries") or [])]
+        stamps = [entries[key]["ts"] for key in members if key in entries and entries[key]["ts"] > 0]
+        if not stamps:
+            continue
+        has_overview = any(str((event or {}).get(key) or "").strip()
+                           for key in ("overview", "summary", "note"))
+        # 没有事件总结时：用第一个成员条目兜底（首句），并标成 first_sentence
+        first_entry = next((entries[key] for key in members if key in entries), None)
+        rows.append({"id": event_id, "kind": "event",
+                     "start": min(stamps), "end": max(stamps),
+                     "count": len([key for key in members if key in entries]),
+                     "summary": _event_summary(event, first_entry),
+                     "has_overview": has_overview,
+                     "text": " ".join(entries[key]["text"] for key in members if key in entries)})
+    # 事件之外还有"没进事件的条目"：压成一条兜底行，别让它们从目录里消失
+    in_events = set()
+    for event in events:
+        for member in event.get("entries") or []:
+            in_events.add(str((member or {}).get("id") or ""))
+    orphans = [key for key in entries if key not in in_events]
+    if orphans:
+        stamps = [entries[key]["ts"] for key in orphans if entries[key]["ts"] > 0]
+        if stamps:
+            rows.append({"id": "ungrouped", "kind": "ungrouped",
+                         "start": min(stamps), "end": max(stamps), "count": len(orphans),
+                         "summary": "未归入事件的条目 %d 条" % len(orphans),
+                         "text": " ".join(entries[key]["text"] for key in orphans)})
+    rows.sort(key=lambda row: -(row.get("end") or 0.0))
+    text_query = str(query or "").strip()
     if text_query:
         wanted = _bigrams(text_query)
-        rows = [row for row in rows if wanted & _bigrams(row.get('text'))]
+        rows = [row for row in rows if wanted & _bigrams(row.get("text"))]
+    if str(scope or "all").strip().lower() in ("text", "entry"):
+        rows = [row for row in rows if row["kind"] == "entry"]
     total = len(rows)
     page = rows[start:start + size]
-    items = [{'id': row['id'], 'date': _search_date(row.get('ts')),
-              'role': row['role'], 'kind': row['kind'],
-              'summary': _list_summary(row)} for row in page]
-    return {"ok": True, "items": items, "total": total, "offset": start, "limit": size}
-
-
-def memory_read(store, session_id, entry_id):
-    """取一条原文（≤2000 字）：先当条目 id 找，再当压缩记录 id 找。"""
-    root = _store_root(store)
-    if root is None:
-        return {"ok": False, "reason": "no_store"}
-    sid = sanitize_session_id(session_id)
-    wanted = str(entry_id or '').strip()
-    if not wanted:
-        return {"ok": False, "reason": "id_required"}
-    for row in _all_rows(store, sid):
-        if row['id'] != wanted:
-            continue
-        return {"ok": True, "id": row['id'], "date": _search_date(row.get('ts')),
-                "role": row['role'], "kind": row['kind'],
-                "text": str(row.get('text') or '')[:2000]}
-    return {"ok": False, "reason": "not_found"}
+    items = [{"id": row["id"], "kind": row["kind"],
+              "date_range": [_search_date(row["start"]), _search_date(row["end"])],
+              "entries": row["count"], "summary": row["summary"][:40],
+              # 事件的标识就是总结：没有总结时用首句顶上，但要标出来
+              "summary_source": "event" if row.get("has_overview") else "first_sentence"}
+             for row in page]
+    return {"ok": True, "items": items, "total": total, "offset": start, "limit": size,
+            "layer": "event"}
 
 
 # ---------------------------------------------------------------- governance
@@ -11063,7 +11292,8 @@ def dispatch(action, payload=None):
             session_id = str(data.get("session_id") or "").strip()
             if not session_id:
                 return bad("missing session_id")
-            return memory_read(store, session_id, data.get("id"))
+            return memory_read(store, session_id, data.get("entry_id", data.get("id")),
+                               data.get("event_id"))
         if action == "vectors_check":
             return vectors_check(store, data.get("session") or data.get("session_id"))
         if action == "vectors_backfill":
