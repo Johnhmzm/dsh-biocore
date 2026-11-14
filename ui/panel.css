@@ -761,15 +761,11 @@ body[data-tab='settings'] .group-title, body[data-tab='settings'] .za-group-titl
   letter-spacing: .06em;
   margin: 12px 0 8px;
 }
-body[data-tab='settings'] .field-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
-body[data-tab='settings'] .field-grid > .field { display: grid; grid-template-columns: 140px 1fr; align-items: center;
-  column-gap: 12px; row-gap: 12px; }
-body[data-tab='settings'] .field-grid > .field.field-wide { grid-column: 1 / -1; }
+/* 标签文字：不换行，超出省略，避免把控件挤掉 */
 body[data-tab='settings'] .field-grid > .field > span,
-body[data-tab='settings'] .field > span { color: var(--muted, #8b8d7f); font-size: 12px; line-height: 32px; }
-body[data-tab='settings'] .field-grid input, body[data-tab='settings'] .field-grid select,
-body[data-tab='settings'] .field input, body[data-tab='settings'] .field select {
-  height: 32px; min-width: 0; width: 100%; box-sizing: border-box; flex: 1;
+body[data-tab='settings'] .field > span {
+  color: var(--muted, #8b8d7f); font-size: 12px; line-height: 32px;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
 .btn-row { display: flex; justify-content: flex-end; align-items: center; gap: 12px; margin: 24px 0 12px; }
 .btn-row.ca-actions { justify-content: flex-start; margin: 0 0 12px; }
