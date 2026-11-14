@@ -27,7 +27,7 @@
   else root.removeAttribute('data-theme')
 })()
 </script>
-<link rel="stylesheet" href="panel.css?v=37">
+<link rel="stylesheet" href="panel.css?v=40">
 </head>
 <body data-tab="dashboard">
 <svg class="sprite" aria-hidden="true" focusable="false" xmlns="http://www.w3.org/2000/svg">
@@ -296,8 +296,8 @@
         <dl class="data-list" id="narrative"></dl>
       </section>
 
-      <section class="sec" data-card-id="persona" data-card-label="人设">
-        <header class="sec-head">
+      <section class="card" data-card-id="persona" data-card-label="人设">
+        <header class="card-head">
           <i class="sq" aria-hidden="true"></i>
           <b>PERSONA</b><span class="zh">/ 人设</span>
           <span class="r" id="personaStatus">读取中</span>
@@ -314,8 +314,8 @@
         <p class="hint" id="personaHint">编译只改倾向，不写记忆与安全策略</p>
       </section>
 
-      <section class="sec" data-card-id="model" data-card-label="向量检索">
-        <header class="sec-head">
+      <section class="card" data-card-id="model" data-card-label="向量检索">
+        <header class="card-head">
           <i class="sq" aria-hidden="true"></i>
           <b>EMBEDDING</b><span class="zh">/ 向量检索</span>
           <span class="r" id="modelStatus">未保存</span>
@@ -346,8 +346,8 @@
         </div>
       </section>
 
-      <section class="sec" data-card-id="rerank" data-card-label="召回精排">
-        <header class="sec-head">
+      <section class="card" data-card-id="rerank" data-card-label="召回精排">
+        <header class="card-head">
           <i class="sq" aria-hidden="true"></i>
           <b>RERANK</b><span class="zh">/ 召回精排</span>
           <span class="r">召回后精排</span>
@@ -379,8 +379,8 @@
         </div>
       </section>
 
-      <section class="sec" data-card-id="summarizer" data-card-label="总结模型">
-        <header class="sec-head">
+      <section class="card" data-card-id="summarizer" data-card-label="总结模型">
+        <header class="card-head">
           <i class="sq" aria-hidden="true"></i>
           <b>SUMMARY</b><span class="zh">/ 总结模型</span>
           <span class="r">事件归纳</span>
@@ -406,8 +406,8 @@
         </div>
       </section>
 
-      <section class="sec" data-card-id="memory-settings" data-card-label="记忆设置">
-        <header class="sec-head">
+      <section class="card" data-card-id="memory-settings" data-card-label="记忆设置">
+        <header class="card-head">
           <i class="sq" aria-hidden="true"></i>
           <b>MEMORY</b><span class="zh">/ 记忆设置</span>
           <span class="r" id="msStatus">读取中</span>
@@ -460,8 +460,8 @@
         <p class="hint" id="msHint">保存后立即生效，不重启；越界值会自动夹紧并提示。</p>
       </section>
 
-      <section class="sec" data-card-id="memory-thresholds" data-card-label="阈值与状态">
-        <header class="sec-head">
+      <section class="card" data-card-id="memory-thresholds" data-card-label="阈值与状态">
+        <header class="card-head">
           <i class="sq" aria-hidden="true"></i>
           <b>THRESHOLDS</b><span class="zh">/ 阈值与状态</span>
           <span class="r">立即生效</span>
@@ -523,8 +523,8 @@
         </dl>
       </section>
 
-      <section class="sec" data-card-id="compaction-archive" data-card-label="压缩归档">
-        <header class="sec-head">
+      <section class="card" data-card-id="compaction-archive" data-card-label="压缩归档">
+        <header class="card-head">
           <i class="sq" aria-hidden="true"></i>
           <b>ARCHIVE</b><span class="zh">/ 压缩归档</span>
           <span class="r" id="caStatus">读取中</span>
@@ -539,8 +539,8 @@
         </div>
       </section>
 
-      <section class="sec" data-card-id="recall" data-card-label="召回注入">
-        <header class="sec-head">
+      <section class="card" data-card-id="recall" data-card-label="召回注入">
+        <header class="card-head">
           <i class="sq" aria-hidden="true"></i>
           <b>RECALL</b><span class="zh">/ 召回注入</span>
           <span class="r" id="recallStatus">读取中</span>
@@ -565,8 +565,8 @@
         </div>
       </section>
 
-      <section class="sec" data-card-id="switches" data-card-label="开关">
-        <header class="sec-head">
+      <section class="card" data-card-id="switches" data-card-label="开关">
+        <header class="card-head">
           <i class="sq" aria-hidden="true"></i>
           <b>SWITCHES</b><span class="zh">/ 开关</span>
           <span class="r" id="switchHint">写入宿主 flags</span>
@@ -574,8 +574,8 @@
         <div class="switches" id="switches"></div>
       </section>
 
-      <section class="sec" data-card-id="expression" data-card-label="表达">
-        <header class="sec-head">
+      <section class="card" data-card-id="expression" data-card-label="表达">
+        <header class="card-head">
           <i class="sq" aria-hidden="true"></i>
           <b>EXPRESSION</b><span class="zh">/ 表达</span>
           <span class="r" id="expressionStatus">长度由人设决定</span>
@@ -596,8 +596,8 @@
         </div>
       </section>
 
-      <section class="sec" data-card-id="advanced" data-card-label="维护">
-        <header class="sec-head">
+      <section class="card" data-card-id="advanced" data-card-label="维护">
+        <header class="card-head">
           <i class="sq" aria-hidden="true"></i>
           <b>SERVICE</b><span class="zh">/ 维护</span>
           <span class="r" id="advancedHint">只影响这台浏览器</span>
@@ -612,8 +612,8 @@
         <p class="hint" id="dataDirText">数据目录：宿主托管</p>
       </section>
 
-      <section class="sec" data-card-id="trace" data-card-label="这一轮为什么">
-        <header class="sec-head">
+      <section class="card" data-card-id="trace" data-card-label="这一轮为什么">
+        <header class="card-head">
           <i class="sq" aria-hidden="true"></i>
           <b>TRACE</b><span class="zh">/ 这一轮为什么</span>
           <span class="r" id="traceHint">最近 3 轮</span>
@@ -622,23 +622,23 @@
         <div class="trace-list" id="traceList"><p class="state-note">还没有记录</p></div>
       </section>
 
-      <section class="sec" data-card-id="overview" data-card-label="会话总览">
-        <header class="sec-head">
+      <section class="card" data-card-id="overview" data-card-label="会话总览">
+        <header class="card-head">
           <i class="sq" aria-hidden="true"></i>
           <b>OVERVIEW</b><span class="zh">/ 会话总览</span>
           <span class="r" id="ovStatus">未生成</span>
         </header>
         <p class="group-title">时间线（逐条，免费）</p>
         <div class="data-list" id="ovList" style="max-height:220px;overflow:auto"></div>
-        <p class="group-title">归纳（模型写，按需）</p>
-        <pre id="ovText" class="ms-result" style="white-space:pre-wrap;max-height:320px;overflow:auto"></pre>
         <div class="btn-row">
           <button id="ovTimeline" class="btn" type="button">刷新时间线</button>
           <button id="ovBuild" class="btn btn-accent" type="button">重算归纳</button>
         </div>
+        <p class="group-title">归纳（模型写，按需）</p>
+        <pre id="ovText" class="ms-result" style="white-space:pre-wrap;max-height:320px;overflow:auto"></pre>
       </section>
-      <section class="sec" data-card-id="runtime" data-card-label="运行时">
-        <header class="sec-head">
+      <section class="card" data-card-id="runtime" data-card-label="运行时">
+        <header class="card-head">
           <i class="sq" aria-hidden="true"></i>
           <b>RUNTIME</b><span class="zh">/ 运行时</span>
           <span class="r" id="runSession">—</span>
@@ -653,8 +653,8 @@
         </dl>
       </section>
 
-      <section class="sec" data-card-id="diagnostics" data-card-label="诊断">
-        <header class="sec-head">
+      <section class="card" data-card-id="diagnostics" data-card-label="诊断">
+        <header class="card-head">
           <i class="sq" aria-hidden="true"></i>
           <b>DIAGNOSTICS</b><span class="zh">/ 诊断</span>
           <span class="r" id="diagHint">30 秒刷新</span>
