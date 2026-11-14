@@ -481,7 +481,7 @@
           <label class="field"><span>事件预算（个）</span>
             <input id="recallEvents" type="number" min="1" max="20" step="1" value="8">
           </label>
-          <label class="field"><span>注入预算（字符）</span>
+          <label class="field"><span>注入预算（字符，仅旧路径生效）</span>
             <input id="recallChars" type="number" min="500" max="200000" step="1000" value="14000">
           </label>
           <label class="field"><span>交付方式</span>
@@ -491,7 +491,7 @@
             </select>
           </label>
         </div>
-        <p class="hint" id="recallHint">交付按事件计数：每轮最多投放多少个整事件（1–20，默认 8），保存后立即生效。字符预算只在调用方没给预算时生效；同库同题的命中率：5k→76.5%　10k→85.9%　14k→88.2%　20k→90.6%　40k→97.6%。</p>
+        <p class="hint" id="recallHint">交付按事件计数：每轮最多投放多少个整事件（1–20，默认 12），保存后立即生效。干净事件交付路径不再按字符截断——件数与长件分层才是预算；字符预算只对旧的逐句路径生效。同库同题的命中率：5k→76.5%　10k→85.9%　14k→88.2%　20k→90.6%　40k→97.6%。</p>
         <div class="card-actions">
           <button id="recallSave" class="primary-button" type="button">保存</button>
         </div>
