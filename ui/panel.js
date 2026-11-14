@@ -1959,7 +1959,6 @@
     var mode = $('msEventTextMode'); if (mode) mode.value = s.event_text_mode || 'raw'
     var longc = $('msLongEventChars'); if (longc && s.long_event_chars != null) longc.value = String(s.long_event_chars)
     var smode = $('msEventScoreMode'); if (smode) smode.value = s.event_score_mode || 'max'
-    var sbeta = $('msEventBeta'); if (sbeta && s.event_beta != null) sbeta.value = String(s.event_beta)
   }
 
   function msFillStatus(status) {
@@ -2029,7 +2028,6 @@
         event_text_mode: (($('msEventTextMode') || {}).value) || 'raw',
         long_event_chars: num('msLongEventChars', 1200),
         event_score_mode: (($('msEventScoreMode') || {}).value) || 'max',
-        event_beta: num('msEventBeta', 2),
       },
     }
   }
