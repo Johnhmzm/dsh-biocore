@@ -928,3 +928,28 @@ body[data-tab='tools'] .btn {
 }
 body[data-tab='tools'] .btn:hover { border-color: var(--orange); color: #f0c07a; }
 body[data-tab='tools'] .btn-accent { border-color: var(--orange); color: #f0c07a; }
+
+
+/* ---- 设置 / 工具页容器：单一网格，永不溢出、永不重叠 --------------------
+ * 之前同时存在 display:flex（竖排）与列宽/多列规则，卡片既会挤成一行又会溢出。
+ * 这里统一成 auto-fill 网格：按可用宽度决定列数，卡片高度各自独立。 */
+body:is([data-tab='settings'], [data-tab='tools']) .body {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(340px, 1fr));
+  grid-auto-rows: min-content;
+  align-items: start;
+  align-content: start;
+  gap: 12px;
+  overflow-x: hidden;
+  overflow-y: auto;
+  padding: 12px 14px 28px;
+}
+body:is([data-tab='settings'], [data-tab='tools']) .body > .stack { display: contents; }
+body:is([data-tab='settings'], [data-tab='tools']) .body > .stack > [data-card-id],
+body:is([data-tab='settings'], [data-tab='tools']) .body > [data-card-id] {
+  min-width: 0;
+  height: auto;
+  margin: 0;
+  break-inside: auto;
+}
+
