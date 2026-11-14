@@ -1731,6 +1731,50 @@ def _vector_top_up(store, session_id, limit=20):
         return None
 
 
+def units_build(store, session=None, limit=200, budget_seconds=None):
+    """给已有条目补建句子与向量（幂等）：新建多少、跳过多少、耗时。"""
+    started = time.time()
+    root = _store_root(store)
+    if root is None:
+        return {"ok": False, "reason": "no_store"}
+    sessions = _sessions_of(store, session)
+    budget = max(1, int(limit or 200))
+    out = {"ok": True, "sessions": len(sessions), "entries": 0, "units": 0,
+           "skipped": 0, "session_id": (sessions[0] if len(sessions) == 1 else ""),
+           "elapsed": 0.0}
+    for sid in sessions:
+        try:
+            rows = [row for row in load_memory(store, sid).get("entries") or []
+                    if isinstance(row, dict) and str(row.get("text") or "").strip()]
+        except Exception:
+            rows = []
+        if not rows:
+            continue
+        try:
+            have = _sql_store().unit_ids_with_vectors(root, sid)
+        except Exception:
+            have = {}
+        pending = []
+        for row in rows:
+            entry_id = str(row.get("id") or "")
+            units = _unit_texts(str(row.get("text") or ""))
+            if not entry_id or not units:
+                continue
+            if len(have.get(entry_id) or ()) >= len(units):
+                continue
+            pending.append(row)
+        pending = pending[:budget]
+        out["entries"] += len(pending)
+        if not pending:
+            continue
+        written = _ensure_units(store, sid, entries=pending,
+                                budget_seconds=budget_seconds or max(2.0, min(60.0, budget * 0.05)))
+        out["units"] += int(written or 0)
+    out["skipped"] = max(0, out["entries"] - out["units"])
+    out["elapsed"] = round(time.time() - started, 2)
+    return out
+
+
 def vectors_check(store, session=None):
     """体检：三个表各有多少行缺向量（只读，不调模型、不调 embedding）。"""
     root = _store_root(store)
@@ -1930,6 +1974,59 @@ def _search_compactions(store, session_id, query, top_k):
     return out
 
 
+def context_cutoff(store, session_id):
+    """上下文边界 = 最近一次压缩记录的 window_end（没有就用 created_at）。
+
+    压缩过的内容已经折进目录、在上下文里了；只有**早于这条边界**的东西才真正
+    需要"回忆"。返回 None 表示这个会话还没压缩过（上下文是完整的）。
+    """
+    root = _store_root(store)
+    if root is None:
+        return None
+    sid = sanitize_session_id(session_id)
+    try:
+        from biocore_memory.event import compaction_record as _cr
+        rows = _cr.load(_cr.db_path(root, sid), sid) or []
+    except Exception:
+        return None
+    if not rows:
+        return None
+    stamps = []
+    for row in rows:
+        for key in ("window_end", "created_at"):
+            try:
+                value = float(row.get(key) or 0.0)
+            except Exception:
+                value = 0.0
+            if value > 0:
+                stamps.append(value)
+                break
+    return max(stamps) if stamps else None
+
+
+def _recent_fallback_cutoff():
+    """压缩记录里没有可用时间（老数据）时的兜底：排除最近 10 分钟写入的条目。"""
+    return time.time() - 600.0
+
+
+def _cutoff_for(store, session_id):
+    """(cutoff, reason)：cutoff=None 表示"全都还在上下文里"。"""
+    cutoff = context_cutoff(store, session_id)
+    if cutoff is not None:
+        return cutoff, "compaction"
+    try:
+        from biocore_memory.event import compaction_record as _cr
+        root = _store_root(store)
+        rows = _cr.load(_cr.db_path(root, sanitize_session_id(session_id)),
+                        sanitize_session_id(session_id)) if root else []
+    except Exception:
+        rows = []
+    if rows:
+        # 有压缩记录但没有可用时间 -> 兜底规则
+        return _recent_fallback_cutoff(), "recent_fallback"
+    return None, "nothing_beyond_context"
+
+
 def _sentences_of(text, limit_chars=200):
     """把一段正文切成句子（保留句末标点），每条截到 limit_chars。"""
     body = str(text or "").strip()
@@ -2083,7 +2180,7 @@ def _pick_sentence(text, query, want_chars=200):
     return best
 
 
-def memory_search(store, session_id, query, top_k=8, scope="all"):
+def memory_search(store, session_id, query, top_k=8, scope="all", include_context=False):
     """三层检索的第一层：命中到句子，并带上事件摘要与两个 id。
 
     句子层优先用 units 的向量（真·句子级相似度）；没有 units 向量时退到
@@ -2110,6 +2207,12 @@ def memory_search(store, session_id, query, top_k=8, scope="all"):
     except Exception:
         pass
 
+    cutoff, cut_reason = _cutoff_for(store, sid)
+    if cutoff is None and not include_context:
+        # 整段会话都还在上下文里：没有"需要回忆"的东西，别让模型以为记忆是空的
+        return {"ok": True, "query": text, "count": 0, "results": [], "layer": "sentence",
+                "reason": "nothing_beyond_context"}
+
     entries = _entry_map(store, sid)
     by_entry_event, _events = _events_index(store, sid)
     results = []
@@ -2124,7 +2227,8 @@ def memory_search(store, session_id, query, top_k=8, scope="all"):
                     continue
                 scored.append((score, unit))
             scored.sort(key=lambda item: -item[0])
-            for score, unit in scored[:limit]:
+            # 先多取一些候选：上下文边界过滤会在后面砍掉一部分，砍完还要够 limit 条
+            for score, unit in scored[:max(limit * 5, 20)]:
                 entry = entries.get(unit["entry_id"]) or {}
                 event = by_entry_event.get(unit["entry_id"])
                 results.append({
@@ -2134,6 +2238,7 @@ def memory_search(store, session_id, query, top_k=8, scope="all"):
                     "event_summary": _event_summary(event, entry),
                     "entry_id": unit["entry_id"],
                     "event_id": str((event or {}).get("event_id") or ""),
+                    "_ts": float(entry.get("ts") or 0.0),
                 })
     if not results:
         # 没有句子向量：条目召回 + 逐句挑最贴的（结构与上面完全一致）
@@ -2149,8 +2254,8 @@ def memory_search(store, session_id, query, top_k=8, scope="all"):
             logger.warning("[search] 条目检索失败：%s: %s", type(exc).__name__, str(exc)[:120])
             picked = []
         if not picked:
-            picked = _lexical_rows(store, sid, text, limit)
-        for entry in picked[:limit]:
+            picked = _lexical_rows(store, sid, text, max(limit * 10, 30))
+        for entry in picked[:max(limit * 10, 30)]:
             if not isinstance(entry, dict):
                 continue
             entry_id = str(entry.get("id") or "")
@@ -2165,23 +2270,31 @@ def memory_search(store, session_id, query, top_k=8, scope="all"):
                 "event_summary": _event_summary(event, entry),
                 "entry_id": entry_id,
                 "event_id": str((event or {}).get("event_id") or ""),
+                "_ts": float(entry.get("ts") or 0.0),
             })
+    # 只留"不在当前上下文里"的：早于压缩边界（或 include_context 全要）
     # 同一件事只占一行：多句命中同一事件就合并（留分最高那句 + hits_in_event）。
     # 事件的标识是它的总结：没有 event_id 的老数据按总结文本归并。
+    if not include_context and cutoff is not None:
+        results = [row for row in results if (row.get("_ts") or 0.0) < cutoff]
     merged = []
-    seen = {}
+    seen_keys = {}
     for row in results:
+        row.pop("_ts", None)
         key = ("ev:" + row["event_id"]) if row.get("event_id") else \
             ("sum:" + (row.get("event_summary") or row.get("sentence") or "")[:40])
-        if key in seen:
-            merged[seen[key]]["hits_in_event"] += 1
+        if key in seen_keys:
+            merged[seen_keys[key]]["hits_in_event"] += 1
             continue
         row["hits_in_event"] = 1
-        seen[key] = len(merged)
+        seen_keys[key] = len(merged)
         merged.append(row)
     merged.sort(key=lambda row: row.get("date") or "", reverse=True)
-    return {"ok": True, "query": text, "count": len(merged), "results": merged[:limit],
-            "layer": "sentence"}
+    out = {"ok": True, "query": text, "count": len(merged), "results": merged[:limit],
+           "layer": "sentence", "context_cutoff": _search_date(cutoff) if cutoff else ""}
+    if cut_reason == "recent_fallback":
+        out["reason"] = "recent_fallback"
+    return out
 
 
 def _event_by_id(store, session_id, event_id):
@@ -2248,7 +2361,8 @@ def memory_read(store, session_id, entry_id=None, event_id=None):
     return {"ok": False, "reason": "id_required"}
 
 
-def memory_list(store, session_id, query=None, limit=50, offset=0, scope="all"):
+def memory_list(store, session_id, query=None, limit=50, offset=0, scope="all",
+                include_context=False):
     """目录按事件列（一行一件）：事件 id、日期范围、条目数、一行总结。"""
     root = _store_root(store)
     if root is None:
@@ -2263,6 +2377,10 @@ def memory_list(store, session_id, query=None, limit=50, offset=0, scope="all"):
         start = max(0, int(offset))
     except Exception:
         start = 0
+    cutoff, cut_reason = _cutoff_for(store, sid)
+    if cutoff is None and not include_context:
+        return {"ok": True, "items": [], "total": 0, "offset": 0, "limit": size,
+                "layer": "event", "reason": "nothing_beyond_context"}
     entries = _entry_map(store, sid)
     _by_entry, events = _events_index(store, sid)
     rows = []
@@ -2284,6 +2402,9 @@ def memory_list(store, session_id, query=None, limit=50, offset=0, scope="all"):
         stamps = [entries[key]["ts"] for key in members if key in entries and entries[key]["ts"] > 0]
         if not stamps:
             continue
+        # 事件按"整件是否还在上下文里"判断：结束时间早于压缩边界才算需要回忆
+        if not include_context and cutoff is not None and max(stamps) >= cutoff:
+            continue
         has_overview = any(str((event or {}).get(key) or "").strip()
                            for key in ("overview", "summary", "note"))
         # 没有事件总结时：用第一个成员条目兜底（首句），并标成 first_sentence
@@ -2300,6 +2421,9 @@ def memory_list(store, session_id, query=None, limit=50, offset=0, scope="all"):
         for member in event.get("entries") or []:
             in_events.add(str((member or {}).get("id") or ""))
     orphans = [key for key in entries if key not in in_events]
+    if orphans and not include_context and cutoff is not None:
+        # 兜底桶也只收"不在上下文里"的条目（否则它会把刚说的那句带进来）
+        orphans = [key for key in orphans if (entries[key].get("ts") or 0.0) < cutoff]
     if orphans:
         stamps = [entries[key]["ts"] for key in orphans if entries[key]["ts"] > 0]
         if stamps:
@@ -2307,6 +2431,21 @@ def memory_list(store, session_id, query=None, limit=50, offset=0, scope="all"):
                          "start": min(stamps), "end": max(stamps), "count": len(orphans),
                          "summary": "未归入事件的条目 %d 条" % len(orphans),
                          "text": " ".join(entries[key]["text"] for key in orphans)})
+    if include_context:
+        # 压缩目录本身已经在上下文里：默认不列，只有显式 include_context 才带上
+        try:
+            from biocore_memory.event import compaction_record as _cr
+            for item in _cr.load(_cr.db_path(root, sid), sid) or []:
+                text = str(item.get("text") or "").strip()
+                if not text:
+                    continue
+                stamp = float(item.get("window_end") or item.get("created_at") or 0.0)
+                rows.append({"id": str(item.get("compaction_id") or ""), "kind": "compaction",
+                             "start": stamp, "end": stamp,
+                             "count": int(item.get("shadowed_count") or 0),
+                             "summary": text[:40], "has_overview": True, "text": text})
+        except Exception:
+            pass
     rows.sort(key=lambda row: -(row.get("end") or 0.0))
     text_query = str(query or "").strip()
     if text_query:
@@ -2322,8 +2461,11 @@ def memory_list(store, session_id, query=None, limit=50, offset=0, scope="all"):
               # 事件的标识就是总结：没有总结时用首句顶上，但要标出来
               "summary_source": "event" if row.get("has_overview") else "first_sentence"}
              for row in page]
-    return {"ok": True, "items": items, "total": total, "offset": start, "limit": size,
-            "layer": "event"}
+    out = {"ok": True, "items": items, "total": total, "offset": start, "limit": size,
+           "layer": "event", "context_cutoff": _search_date(cutoff) if cutoff else ""}
+    if cut_reason == "recent_fallback":
+        out["reason"] = "recent_fallback"
+    return out
 
 
 # ---------------------------------------------------------------- governance
@@ -4073,6 +4215,17 @@ def _ensure_units(store, session_id, entries=None, budget_seconds=None):
             return 0
         config = _load_runtime_config(store) or {}
         embed_many = _event_embed_fn(store, config, None)
+        if embed_many is None:
+            # 事件层的 embedder 走不通时，退回检索用的那套 embedding 配置
+            # （同一份 core_config.json；实测两者对 api_key 的解析不同）
+            provider, _cfg = _embedding_provider(store)
+            if provider is not None:
+                # provider.embed 收的是"一批文本"，_embed_chunked 的单文本回调是单句
+                def embed_many(text, _provider=provider):
+                    got = _provider.embed([text]) or []
+                    return got[0] if got else []
+        if embed_many is None:
+            return 0
         batch = getattr(embed_many, "embed_many", None)
         texts = [u for _e, units in pending for u in units]
         if _deadline is not None:
@@ -10788,6 +10941,15 @@ def dispatch(action, payload=None):
                     _vector_top_up(store, session_id, limit=20)
             except Exception:
                 pass
+            # 句子层：把刚写的这条拆成句子并算向量（有秒级预算、失败静默）。
+            # 以前只有 _save_event_state 会建 units——事件层不跑就一条句子都没有。
+            units_written = 0
+            try:
+                if isinstance(entry, dict) and entry.get("text"):
+                    units_written = _ensure_units(store, session_id, entries=[entry],
+                                                  budget_seconds=UNIT_BUILD_SECONDS)
+            except Exception:
+                units_written = 0
             return {
                 "ok": True,
                 "gate": {"blocked": gate["blocked"], "action": gate["action"],
@@ -10814,6 +10976,7 @@ def dispatch(action, payload=None):
                 "relationship": relationship_info,
                 "identity": identity_info,
                 "consolidate": consolidate_info,
+                "units_written": int(units_written or 0),
             }
         if action == "usage_event":
             if _cache_stats is None:
@@ -11280,20 +11443,25 @@ def dispatch(action, payload=None):
                 return bad("missing session_id")
             return memory_search(store, session_id, data.get("query"),
                                  data.get("top_k", data.get("limit", 8)),
-                                 data.get("scope") or "all")
+                                 data.get("scope") or "all",
+                                 bool(data.get("include_context")))
         if action == "memory_list":
             session_id = str(data.get("session_id") or "").strip()
             if not session_id:
                 return bad("missing session_id")
             return memory_list(store, session_id, data.get("query"),
                                data.get("limit", 50), data.get("offset", 0),
-                               data.get("scope") or "all")
+                               data.get("scope") or "all",
+                               bool(data.get("include_context")))
         if action == "memory_read":
             session_id = str(data.get("session_id") or "").strip()
             if not session_id:
                 return bad("missing session_id")
             return memory_read(store, session_id, data.get("entry_id", data.get("id")),
                                data.get("event_id"))
+        if action == "units_build":
+            return units_build(store, data.get("session") or data.get("session_id"),
+                               data.get("limit", 200), data.get("budget_seconds"))
         if action == "vectors_check":
             return vectors_check(store, data.get("session") or data.get("session_id"))
         if action == "vectors_backfill":

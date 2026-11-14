@@ -1983,8 +1983,10 @@
   function bindVectorButtons() {
     var check = $('msVectorCheck')
     var fill = $('msVectorBackfill')
+    var units = $('msUnitsBuild')
     if (check) check.addEventListener('click', function () { void msVectorCheck() })
     if (fill) fill.addEventListener('click', function () { void msVectorBackfill() })
+    if (units) units.addEventListener('click', function () { void msUnitsBuild() })
   }
 
   function loadMemorySettings() {
@@ -2047,6 +2049,32 @@
       return msVectorCheck()
     }).catch(function () {
       if (node) node.textContent = '补齐失败 连不上宿主'
+      return null
+    }).then(function (result) {
+      if (button) button.disabled = false
+      return result
+    })
+  }
+
+  /** 补建句子：给已有条目拆句并算向量（幂等），完成后复查缺向量数。 */
+  function msUnitsBuild() {
+    var node = $('msVectorStatus')
+    var button = $('msUnitsBuild')
+    if (button) button.disabled = true
+    if (node) node.textContent = '句子：补建中…'
+    return msAction('units_build', { limit: 200 }).then(function (out) {
+      var body = (out && out.body) || {}
+      if (body.ok !== true) {
+        if (node) node.textContent = '补建句子失败：' + (body.reason || body.code || out.status)
+        return body
+      }
+      if (node) {
+        node.textContent = '补建句子：处理条目 ' + (body.entries || 0) + ' 条，新建句子 '
+          + (body.units || 0) + ' 条（' + (body.elapsed || 0) + 's）'
+      }
+      return msVectorCheck()
+    }).catch(function () {
+      if (node) node.textContent = '补建句子失败 连不上宿主'
       return null
     }).then(function (result) {
       if (button) button.disabled = false
