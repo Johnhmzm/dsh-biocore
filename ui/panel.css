@@ -252,13 +252,12 @@ body:not([data-tab="dashboard"]) .body [data-card-id] { flex: none; }
   box-shadow: var(--shadow-card);
 }
 
-/* 看板：保持原观感（10/12 内边距、直角斜切、无圆角）。
- * 整条选择器包在 :where() 里，特异性等同 .card，后面的媒体查询仍可按原位覆盖。 */
-:where(body[data-tab="dashboard"]) .card,
-:where(body[data-tab="dashboard"]) .strip {
+/* 看板卡片：普通长方形（不再斜切四角、不再圆角） */
+body[data-tab="dashboard"] .card,
+body[data-tab="dashboard"] .strip {
   padding: 10px 12px;
   border-radius: 0;
-  clip-path: polygon(0 0, calc(100% - 14px) 0, 100% 14px, 100% 100%, 14px 100%, 0 calc(100% - 14px));
+  clip-path: none;
 }
 .card::before,
 .strip::before {
