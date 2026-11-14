@@ -454,17 +454,6 @@
           <button id="msVectorCheck" type="button" class="btn-ghost">体检</button>
           <button id="msVectorBackfill" type="button" class="btn-ghost">补齐向量</button>
         </div>
-        <p class="group-title">召回等待</p>
-        <div class="field-grid">
-          <label class="field"><span>等待上限（ms）</span>
-            <input id="msInjectWait" type="number" min="0" max="60000" step="1000" value="10000">
-            <small class="field-hint">0 = 一直等到召回完成</small>
-          </label>
-          <label class="field"><span>缓存有效期（ms）</span>
-            <input id="msInjectTtl" type="number" min="0" max="600000" step="1000" value="15000">
-            <small class="field-hint">同一句提问在这之内直接复用</small>
-          </label>
-        </div>
         <p class="group-title">压缩阈值</p>
         <div class="field-grid">
           <label class="field"><span>阈值 token（0=关）</span>

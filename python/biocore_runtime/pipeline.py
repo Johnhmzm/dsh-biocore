@@ -9186,6 +9186,27 @@ RECALL_INJECT_DEFAULT = 14000
 RECALL_DELIVERIES = ("event_rank", "sentence", "event")
 
 
+def _raw_recall_config(store):
+    """core_config.json 里的 recall 段（不过白名单）：面板写的键只在这里读得到。"""
+    if not store:
+        return {}
+    try:
+        data_dir = _store_data_dir(store)
+    except Exception:
+        return {}
+    if not data_dir:
+        return {}
+    path = Path(data_dir) / CORE_CONFIG_FILE
+    if not path.is_file():
+        return {}
+    try:
+        doc = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    recall = doc.get("recall") if isinstance(doc, dict) else None
+    return recall if isinstance(recall, dict) else {}
+
+
 def recall_settings(store, payload=None):
     """recall.inject_chars / recall.delivery, validated loudly.
 
@@ -9196,11 +9217,18 @@ def recall_settings(store, payload=None):
     pl = payload if isinstance(payload, dict) else {}
     cfg = {}
     try:
-        raw_cfg = _load_runtime_config(store) if store else {}
-        if isinstance(raw_cfg.get("recall"), dict):
-            cfg = raw_cfg["recall"]
+        # core_config.json 的 recall 段要直接读文件：_load_runtime_config 会按白名单
+        # 过滤，recall.* 会被整段丢掉（实测 recall keys: []），面板写的值等于没写。
+        cfg = _raw_recall_config(store)
     except Exception:
         cfg = {}
+    if not cfg:
+        try:
+            raw_cfg = _load_runtime_config(store) if store else {}
+            if isinstance(raw_cfg.get("recall"), dict):
+                cfg = raw_cfg["recall"]
+        except Exception:
+            cfg = {}
     budget = cfg.get("inject_chars")
     if budget is None:
         budget = os.environ.get("BIOCORE_RECALL_INJECT_CHARS")
@@ -9220,6 +9248,8 @@ def recall_settings(store, payload=None):
     if delivery not in RECALL_DELIVERIES:
         raise RuntimeError("recall.delivery=%r 不合法；只接受 %s"
                            % (delivery, " / ".join(RECALL_DELIVERIES)))
+    # 常驻注入已删除：这里只返回"给一次"用的预算与交付方式（recall_params 里的
+    # inject_mode / inject_detail 已标停用，无消费方）。
     return {"inject_chars": value, "delivery": delivery}
 
 # 配置白名单：只允许这些键，且类型要对得上。

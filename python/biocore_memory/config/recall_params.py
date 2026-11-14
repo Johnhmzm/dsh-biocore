@@ -54,6 +54,12 @@ SPECS = {
     'compaction_on': (1, 0, 1),
     # 一次挂回最多附多少字的压缩摘要（超了按行边界裁，不切句子）
     'compaction_chars': (3000, 200, 12000),
+    # —— 已停用，无消费方 ——
+    # 常驻注入整条功能已删除（压缩目录本身就是一次性上下文注入，模型要细节用
+    # memory_search）。保留这些常量只为老配置文件的解析不炸；新代码不要再读它们。
+    'inject_mode': (0, 0, 2),
+    'inject_detail': (1, 0, 1),
+    'inject_max_chars_summary': (500, 120, 4000),
     # 向量体检+补齐：缺向量的行（entries/units/compactions）在 turn_end 与压缩写入
     # 之后各做一次少量补齐（最多 20 条）。缺省开；关掉只是减少 embedding 调用。
     'vector_backfill_on': (1, 0, 1),
@@ -88,6 +94,9 @@ ENV_NAMES = {
     'compaction_on': 'BIOCORE_COMPACTION_ON',
     'compaction_chars': 'BIOCORE_COMPACTION_CHARS',
     'vector_backfill_on': 'BIOCORE_VECTOR_BACKFILL',
+    'inject_max_chars_summary': 'BIOCORE_RECALL_INJECT_SUMMARY_CHARS',
+    'inject_mode': 'BIOCORE_RECALL_INJECT_MODE',
+    'inject_detail': 'BIOCORE_RECALL_INJECT_DETAIL',
 }
 
 

@@ -46,10 +46,6 @@ SETTINGS_SPEC = {
     'compaction_threshold_tokens': ('int', 0, 2000000),
     'compaction_threshold_ratio': ('float', 0.0, 0.95),
     'compaction_context_window': ('int', 0, 4000000),
-    # 记忆注入等召回的上限（毫秒）：0 = 一直等到召回完成；缺省 10000（先等再答）
-    'inject_wait_ms': ('int', 0, 60000),
-    # 缓存有效期（毫秒）：同一句提问在 TTL 内直接复用，不重新召回，缺省 15000
-    'inject_ttl_ms': ('int', 0, 600000),
     # 向量兜底：turn_end / 压缩写入后各补一次少量缺失向量（缺省开）
     'vector_backfill_on': ('int', 0, 1),
 }
@@ -69,8 +65,6 @@ RECALL_KEYS = {
     'compaction_threshold_tokens': 'recall.compaction_threshold_tokens',
     'compaction_threshold_ratio': 'recall.compaction_threshold_ratio',
     'compaction_context_window': 'recall.compaction_context_window',
-    'inject_wait_ms': 'recall.inject_wait_ms',
-    'inject_ttl_ms': 'recall.inject_ttl_ms',
     'vector_backfill_on': 'recall.vector_backfill_on',
 }
 
