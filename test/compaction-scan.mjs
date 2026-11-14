@@ -168,18 +168,40 @@ try {
   assert.equal(one.calls.record.length, 2, '同一批事件不再落库（compactionId 去重）')
   ok('一级重复输入不重复落库（已处理的 compactionId 记住）')
 
-  // ---- 一级拿不到：退回日志扫描 ----------------------------------------
-  const empty = harness()
-  empty.fire(fakeSession('session-b', []))
-  await empty.mod.drain()
-  assert.equal(empty.calls.record.length, 0)
-  assert.equal(empty.calls.scan.length, 1, '一条事件都拿不到 -> 走日志')
+  // ---- 只有「一条事件都拿不到」才退回日志 ------------------------------
+  const noApi = harness()
+  noApi.fire(fakeSession('session-c', [], 'none'))
+  await noApi.mod.drain()
+  assert.equal(noApi.calls.scan.length, 1, '宿主没有这两个 API -> 走日志')
 
-  const none = harness()
-  none.fire(fakeSession('session-c', [], 'none'))
-  await none.mod.drain()
-  assert.equal(none.calls.scan.length, 1, '宿主没有这两个 API -> 走日志')
-  ok('一级拿不到事件（空数组 / 没有 API）就退回日志扫描')
+  const nullSession = harness()
+  nullSession.fire(null)
+  await nullSession.mod.drain()
+  assert.equal(nullSession.calls.scan.length, 1, '连会话对象都没有 -> 走日志')
+  ok('一级一条事件都拿不到（没有 API / 没有会话对象）才退回日志扫描')
+
+  // ---- 内存读到了事件就信它：没有 compaction 也不碰日志 ------------------
+  const quietTurn = harness()
+  const chatty = fakeSession('session-b',
+    [{ type: 'user/message', seq: 5 }, { type: 'assistant/message', seq: 6 }])
+  quietTurn.fire(chatty)
+  await quietTurn.mod.drain()
+  assert.equal(quietTurn.calls.record.length, 0)
+  assert.equal(quietTurn.calls.scan.length, 0, 'events>0 但 compactions=0 -> 不扫日志')
+  quietTurn.advance(SCAN_INTERVAL_MS)
+  quietTurn.setStats({ mtimeMs: 99, size: 999 })   // 日志确实变了
+  quietTurn.fire(fakeSession('session-b',
+    [{ type: 'user/message', seq: 5 }, { type: 'assistant/message', seq: 6 },
+      { type: 'user/message', seq: 7 }]))
+  await quietTurn.mod.drain()
+  assert.equal(quietTurn.calls.scan.length, 0, '日志变了也不扫：内存给出了答案')
+  ok('内存读到事件但没有 compaction：一次也不碰日志（哪怕 60 秒已过、日志变了）')
+
+  const emptySlice = harness()
+  emptySlice.fire(fakeSession('session-b2', []))
+  await emptySlice.mod.drain()
+  assert.equal(emptySlice.calls.scan.length, 0, '空数组也是「拿到了事件」：不扫日志')
+  ok('snapshotEvents 返回空数组（没有新事件）同样不扫日志')
 
   const viaOwn = harness()
   viaOwn.fire(fakeSession('session-d', [compactionEvent(2)], 'throws'))
@@ -202,8 +224,9 @@ try {
   assert.equal(tiered.calls.scan.length, 0, '有 compaction 时二级根本不跑')
   ok('一级不节流：60 秒内的新压缩照样落库')
 
+  // 二级的节流：用「没有会话对象 / 没有这两个 API」的会话才走得到二级
   const throttled = harness()
-  const noCompaction = fakeSession('session-f', [{ type: 'user/message', seq: 5 }], 'own')
+  const noCompaction = { id: 'session-f' }
   throttled.fire(noCompaction)
   await throttled.mod.drain()
   assert.equal(throttled.calls.scan.length, 1)
