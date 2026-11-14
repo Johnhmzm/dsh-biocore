@@ -41,20 +41,18 @@
 
     { id: 'memory', tab: 'memory', label: '最近记忆', col: 0 },
     { id: 'memory-summary', tab: 'memory', label: '记忆概览', col: 0 },
+    { id: 'compaction-archive', tab: 'memory', label: '压缩归档', col: 0 },
 
     { id: 'metrics', tab: 'relation', label: '关系数值', col: 0 },
     { id: 'narrative', tab: 'relation', label: '叙事摘要', col: 0 },
 
     { id: 'persona', tab: 'settings', label: '人设', col: 0 },
-    { id: 'model', tab: 'settings', label: '向量检索', col: 0 },
-    { id: 'rerank', tab: 'settings', label: '召回精排', col: 0 },
-    { id: 'summarizer', tab: 'settings', label: '总结模型', col: 0 },
+    { id: 'model', tab: 'settings', label: 'API 设置', col: 0 },
     { id: 'memory-settings', tab: 'settings', label: '记忆设置', col: 0 },
     { id: 'memory-thresholds', tab: 'settings', label: '阈值与状态', col: 0 },
     { id: 'recall', tab: 'settings', label: '召回注入', col: 0 },
     { id: 'switches', tab: 'settings', label: '开关', col: 0 },
     { id: 'expression', tab: 'settings', label: '表达', col: 0 },
-    { id: 'compaction-archive', tab: 'settings', label: '压缩归档', col: 0 },
     { id: 'advanced', tab: 'settings', label: '维护', col: 0 },
 
     { id: 'overview', tab: 'tools', label: '会话总览', col: 0 },

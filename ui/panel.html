@@ -277,6 +277,22 @@
           <div class="tr"><i id="capFill"></i></div>
         </div>
       </section>
+      <section class="card" data-card-id="compaction-archive" data-card-label="压缩归档">
+        <header class="card-head">
+          <i class="sq" aria-hidden="true"></i>
+          <b>ARCHIVE</b><span class="zh">/ 压缩归档</span>
+          <span class="r" id="caStatus">读取中</span>
+        </header>
+        <div class="btn-row">
+          <button id="caRefresh" class="btn" type="button">刷新</button>
+        </div>
+        <div class="table-scroll"><table class="log-table ca-table">
+            <thead><tr><th>会话</th><th>压缩次数</th><th>未成件段数</th><th>上次处理</th><th class="ta-r">操作</th></tr></thead>
+            <tbody id="caList"><tr class="is-empty"><td colspan="5">—</td></tr></tbody>
+          </table>
+        </div>
+      </section>
+
 
       <section class="card" data-card-id="metrics" data-card-label="关系数值">
         <header class="card-head">
@@ -314,14 +330,16 @@
         <p class="hint" id="personaHint">编译只改倾向，不写记忆与安全策略</p>
       </section>
 
-      <section class="card" data-card-id="model" data-card-label="向量检索">
+      <section class="card" data-card-id="model" data-card-label="API 设置">
         <header class="card-head">
           <i class="sq" aria-hidden="true"></i>
-          <b>EMBEDDING</b><span class="zh">/ 向量检索</span>
+          <b>API</b><span class="zh">/ API 设置</span>
           <span class="r" id="modelStatus">未保存</span>
         </header>
+
+        <p class="group-title">向量检索</p>
         <p class="hint">只用于记忆检索，与对话模型无关</p>
-        <div class="field-grid two">
+        <div class="field-grid">
           <label class="field"><span>模式</span>
             <select id="embeddingMode">
               <option value="auto">auto</option>
@@ -333,25 +351,15 @@
           <label class="field"><span>模型</span>
             <input id="modelName" type="text" placeholder="BAAI/bge-m3" autocomplete="off">
           </label>
-          <label class="field field-wide"><span>Base URL</span>
+          <label class="field"><span>Base URL</span>
             <input id="modelBaseUrl" type="url" placeholder="https://api.example.com/v1" autocomplete="off">
           </label>
-          <label class="field field-wide"><span>API Key</span>
+          <label class="field"><span>API Key</span>
             <input id="modelApiKey" type="password" placeholder="留空表示沿用已保存的 Key" autocomplete="new-password">
           </label>
         </div>
-        <div class="btn-row">
-          <button id="modelTest" class="btn" type="button">测试 Embedding</button>
-          <button id="modelSave" class="btn btn-accent" type="button">保存设置</button>
-        </div>
-      </section>
 
-      <section class="card" data-card-id="rerank" data-card-label="召回精排">
-        <header class="card-head">
-          <i class="sq" aria-hidden="true"></i>
-          <b>RERANK</b><span class="zh">/ 召回精排</span>
-          <span class="r">召回后精排</span>
-        </header>
+        <p class="group-title">召回精排</p>
         <label class="switch-row">
           <span class="switch-text">
             <span class="switch-label">启用重排</span>
@@ -359,40 +367,30 @@
           </span>
           <input id="rerankEnabled" type="checkbox">
         </label>
-        <div class="field-grid two" id="rerankFields">
+        <div class="field-grid" id="rerankFields">
           <label class="field"><span>模型</span>
             <input id="rerankModel" type="text" placeholder="jina-reranker-v2-base-multilingual" autocomplete="off">
           </label>
           <label class="field"><span>Top N</span>
             <input id="rerankTopN" type="number" min="1" max="100" value="20">
           </label>
-          <label class="field field-wide"><span>Base URL</span>
+          <label class="field"><span>Base URL</span>
             <input id="rerankBaseUrl" type="url" placeholder="https://api.jina.ai/v1" autocomplete="off">
           </label>
-          <label class="field field-wide"><span>API Key</span>
+          <label class="field"><span>API Key</span>
             <input id="rerankApiKey" type="password" placeholder="留空表示沿用已保存的 Key" autocomplete="new-password">
           </label>
         </div>
-        <div class="btn-row">
-          <button id="rerankTest" class="btn" type="button">测试 Rerank</button>
-          <button id="rerankSave" class="btn btn-accent" type="button">保存设置</button>
-        </div>
-      </section>
 
-      <section class="card" data-card-id="summarizer" data-card-label="总结模型">
-        <header class="card-head">
-          <i class="sq" aria-hidden="true"></i>
-          <b>SUMMARY</b><span class="zh">/ 总结模型</span>
-          <span class="r">事件归纳</span>
-        </header>
-        <div class="field-grid two">
-          <label class="field field-wide"><span>Base URL</span>
+        <p class="group-title">总结模型</p>
+        <div class="field-grid">
+          <label class="field"><span>Base URL</span>
             <input id="msSumBase" type="url" autocomplete="off" placeholder="https://api.deepseek.com">
           </label>
           <label class="field"><span>模型</span>
             <input id="msSumModel" type="text" autocomplete="off" placeholder="deepseek-chat">
           </label>
-          <label class="field field-wide"><span>密钥</span>
+          <label class="field"><span>密钥</span>
             <span class="ms-key-row">
               <input id="msSumKey" type="password" readonly autocomplete="new-password">
               <button class="btn ms-key-edit" data-ms-target="summarizer" type="button">修改</button>
@@ -400,9 +398,12 @@
           </label>
         </div>
         <p class="hint ms-result" id="msSumResult">尚未测试</p>
+
         <div class="btn-row">
+          <button id="modelTest" class="btn" type="button">测试 Embedding</button>
+          <button id="rerankTest" class="btn" type="button">测试 Rerank</button>
           <button class="btn ms-test" data-ms-target="summarizer" type="button">测试总结</button>
-          <button id="summarizerSave" class="btn btn-accent" type="button">保存设置</button>
+          <button id="modelSave" class="btn btn-accent" type="button">保存</button>
         </div>
       </section>
 
@@ -523,21 +524,7 @@
         </dl>
       </section>
 
-      <section class="card" data-card-id="compaction-archive" data-card-label="压缩归档">
-        <header class="card-head">
-          <i class="sq" aria-hidden="true"></i>
-          <b>ARCHIVE</b><span class="zh">/ 压缩归档</span>
-          <span class="r" id="caStatus">读取中</span>
-        </header>
-        <div class="btn-row">
-          <button id="caRefresh" class="btn" type="button">刷新</button>
-        </div>
-        <div class="table-scroll"><table class="log-table ca-table">
-            <thead><tr><th>会话</th><th>压缩次数</th><th>未成件段数</th><th>上次处理</th><th class="ta-r">操作</th></tr></thead>
-            <tbody id="caList"><tr class="is-empty"><td colspan="5">—</td></tr></tbody>
-          </table>
-        </div>
-      </section>
+
 
       <section class="card" data-card-id="recall" data-card-label="召回注入">
         <header class="card-head">
