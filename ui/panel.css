@@ -948,7 +948,6 @@ body:is([data-tab='settings'], [data-tab='tools']) .body > .stack { display: con
 body:is([data-tab='settings'], [data-tab='tools']) .body > .stack > [data-card-id],
 body:is([data-tab='settings'], [data-tab='tools']) .body > [data-card-id] {
   min-width: 0;
-  height: auto;
   margin: 0;
   break-inside: auto;
 }
@@ -993,40 +992,12 @@ body[data-tab='settings'] .field select {
 }
 body[data-tab='settings'] .field textarea { min-height: 96px; }
 body[data-tab='settings'] .field-wide { grid-column: 1 / -1; }
-
-
-
-/* ---- 设置页：小方块索引，点开才展开 --------------------------------------
- * 收起时是一块方块（只有卡头）；点一下 .open，整张卡占满一行并显示内容。 */
+/* ---- 设置页：方块 + 点击展开 (唯一一套) ------------------------------
+ * 收起：132×104 方块，卡头两行（英文 / 中文），右侧状态隐藏；
+ * 展开：.open 后占满整行、高度自适应，内容回来（不用 display:revert）。
+ * 只作用于 body[data-tab='settings']。 */
 body[data-tab='settings'] .body {
-  grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
-  gap: 10px;
-}
-body[data-tab='settings'] .sec {
-  height: 108px;
-  padding: 10px 10px 8px;
-  overflow: hidden;
-  cursor: pointer;
-  transition: border-color .15s, background .15s;
-}
-body[data-tab='settings'] .sec:hover { border-color: var(--orange); }
-body[data-tab='settings'] .sec > *:not(.sec-head) { display: none; }
-body[data-tab='settings'] .sec.open {
-  grid-column: 1 / -1;
-  height: auto;
-  overflow: visible;
-  cursor: default;
-}
-body[data-tab='settings'] .sec.open > *:not(.sec-head) { display: revert; }
-body[data-tab='settings'] .sec.open > .btn-row { display: flex; }
-body[data-tab='settings'] .sec.open > .field-grid { display: grid; }
-body[data-tab='settings'] .sec.open > .table-scroll { display: block; }
-
-
-
-/* ---- 设置页：小方块索引，点开展开（作用于 .card）------------------------- */
-body[data-tab='settings'] .body {
-  grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(132px, 1fr));
   gap: 10px;
 }
 body[data-tab='settings'] .card {
@@ -1034,32 +1005,31 @@ body[data-tab='settings'] .card {
   padding: 10px;
   overflow: hidden;
   cursor: pointer;
+  transition: border-color .15s ease;
 }
 body[data-tab='settings'] .card:hover { border-color: var(--orange); }
-body[data-tab='settings'] .card:not(.open) > *:not(.card-head) { display: none; }
-
-
-
-/* 方块：更像"方块"，标题换成两行、收起时隐藏右侧状态 */
-body[data-tab='settings'] .card {
-  height: 116px;
-  padding: 10px;
-  justify-content: flex-start;
-}
 body[data-tab='settings'] .card > .card-head {
   flex-wrap: wrap;
-  gap: 6px;
-  margin: 0;
   align-items: flex-start;
+  gap: 4px;
+  margin: 0;
 }
-body[data-tab='settings'] .card > .card-head .r { display: none; }
 body[data-tab='settings'] .card > .card-head b,
 body[data-tab='settings'] .card > .card-head .zh {
-  white-space: normal;
   font-size: 10px;
   line-height: 1.35;
-  letter-spacing: .1em;
+  letter-spacing: .08em;
+  white-space: normal;
 }
-body[data-tab='settings'] .card.open > .card-head .r { display: block; }
+body[data-tab='settings'] .card > .card-head .r { display: none; }
+/* 收起状态只隐藏一次：除了卡头，其余全藏 */
+body[data-tab='settings'] .card:not(.open) > *:not(.card-head) { display: none; }
+/* 展开 */
+body[data-tab='settings'] .card.open {
+  grid-column: 1 / -1;
+  height: auto;
+  overflow: visible;
+  cursor: default;
+}
 body[data-tab='settings'] .card.open > .card-head { margin-bottom: 8px; }
-
+body[data-tab='settings'] .card.open > .card-head .r { display: block; }

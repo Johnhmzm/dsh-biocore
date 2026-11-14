@@ -250,27 +250,20 @@
 })(typeof window !== 'undefined' ? window
   : (typeof globalThis !== 'undefined' ? globalThis : this));
 
-
-  // 设置页：点方块展开／收起
+  // 设置页：方块点击展开 / 收起（只绑一次）
+  // 收起→点卡片任意处展开；展开→点卡头收起，点内容里的控件不收起。
   document.addEventListener('click', function (event) {
+    var body = document.body
+    if (!body || body.getAttribute('data-tab') !== 'settings') return
     var target = event.target
-    if (!target.closest) return
-    var head = target.closest('body[data-tab="settings"] .sec .sec-head')
-    if (!head) return
-    var sec = head.closest('.sec')
-    if (!sec) return
-    sec.classList.toggle('open')
-  }, true)
-
-
-
-  // 设置页：点卡片展开／收起
-  document.addEventListener('click', function (event) {
-    var head = event.target.closest && event.target.closest('.card-head')
-    if (!head) return
-    if (!document.body || document.body.getAttribute('data-tab') !== 'settings') return
-    var card = head.closest('.card')
-    if (!card) return
-    card.classList.toggle('open')
-  }, true)
-
+    if (!target || !target.closest) return
+    var card = target.closest('.card')
+    if (!card || !card.querySelector('.card-head')) return
+    if (target.closest('input, select, textarea, button, a')) return
+    if (!card.classList.contains('open')) {
+      card.classList.add('open')
+      return
+    }
+    if (!target.closest('.card-head')) return
+    card.classList.remove('open')
+  }, false)
