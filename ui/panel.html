@@ -27,7 +27,7 @@
   else root.removeAttribute('data-theme')
 })()
 </script>
-<link rel="stylesheet" href="panel.css?v=32">
+<link rel="stylesheet" href="panel.css?v=33">
 </head>
 <body data-tab="dashboard">
 <svg class="sprite" aria-hidden="true" focusable="false" xmlns="http://www.w3.org/2000/svg">
@@ -306,10 +306,10 @@
           <span>人设提示词</span>
           <textarea id="personaText" class="persona-text" rows="6" placeholder="性格、说话方式、在意什么"></textarea>
         </label>
-        <div class="card-actions">
-          <button id="personaSave" class="primary-button" type="button">保存并编译</button>
-          <button id="personaPersist" class="ghost-button" type="button">设为常驻</button>
-          <button id="personaRollback" class="ghost-button" type="button" hidden>恢复原人设</button>
+        <div class="btn-row">
+          <button id="personaSave" class="btn btn-accent" type="button">保存并编译</button>
+          <button id="personaPersist" class="btn" type="button">设为常驻</button>
+          <button id="personaRollback" class="btn" type="button" hidden>恢复原人设</button>
         </div>
         <p class="hint" id="personaHint">编译只改倾向，不写记忆与安全策略</p>
       </section>
@@ -334,10 +334,10 @@
           <label class="field"><span>模型</span>
             <input id="modelName" type="text" placeholder="BAAI/bge-m3" autocomplete="off">
           </label>
-          <label class="field field-wide"><span>Base URL</span>
+          <label class="field"><span>Base URL</span>
             <input id="modelBaseUrl" type="url" placeholder="https://api.example.com/v1" autocomplete="off">
           </label>
-          <label class="field field-wide"><span>API Key</span>
+          <label class="field"><span>API Key</span>
             <input id="modelApiKey" type="password" placeholder="留空表示沿用已保存的 Key" autocomplete="new-password">
           </label>
         </div>
@@ -363,34 +363,30 @@
             <input id="rerankApiKey" type="password" placeholder="留空表示沿用已保存的 Key" autocomplete="new-password">
           </label>
         </div>
-        <div class="card-actions">
+        <div class="btn-row">
           <button id="modelTest" class="btn" type="button">测试 Embedding</button>
           <button id="rerankTest" class="btn" type="button">测试 Rerank</button>
           <button id="modelSave" class="btn btn-accent" type="button">保存设置</button>
-<p class="group-title">总结模型</p>
+        </div>
+        <p class="group-title">总结模型</p>
         <div class="field-grid">
-          <label class="field field-wide"><span>Base URL</span>
+          <label class="field"><span>Base URL</span>
             <input id="msSumBase" type="url" autocomplete="off" placeholder="https://api.deepseek.com">
           </label>
           <label class="field"><span>模型</span>
             <input id="msSumModel" type="text" autocomplete="off" placeholder="deepseek-chat">
           </label>
-          <label class="field field-wide"><span>密钥</span>
+          <label class="field"><span>密钥</span>
             <span class="ms-key-row">
               <input id="msSumKey" type="password" readonly autocomplete="new-password">
-              <button class="ghost-button ms-key-edit" data-ms-target="summarizer" type="button">修改</button>
+              <button class="btn ms-key-edit" data-ms-target="summarizer" type="button">修改</button>
             </span>
           </label>
         </div>
-        <div class="card-actions">
-          <button class="ghost-button ms-test" data-ms-target="summarizer" type="button">测试</button>
+        <div class="btn-row">
+          <button class="btn ms-test" data-ms-target="summarizer" type="button">测试</button>
         </div>
         <p class="hint ms-result" id="msSumResult">尚未测试</p>
-
-        
-
-        
-        </div>
       </section>
 
       <section class="card" data-card-id="memory-settings" data-card-label="记忆设置">
@@ -449,7 +445,7 @@
           </span>
           <input id="msVectorBackfillOn" type="checkbox" checked>
         </label>
-        <p class="ms-row" id="msVectorStatus">缺向量：—</p>
+        <p class="state-note" id="msVectorStatus">缺向量：—</p>
         <div class="btn-row">
           <button id="msVectorCheck" type="button" class="btn">体检</button>
           <button id="msUnitsBuild" type="button" class="btn">补建句子</button>
@@ -464,23 +460,32 @@
             <input id="msCompactWindow" type="number" min="0" max="4000000" step="1000" value="0">
           </label>
         </div>
-        <label class="field"><span>相关门槛</span>
-          <input id="msRelevantFloor" type="number" min="0" max="1" step="0.05" value="0.2">
-        </label>
-        <label class="ms-row"><span>干净事件交付</span>
+        <div class="field-grid">
+          <label class="field"><span>相关门槛</span>
+            <input id="msRelevantFloor" type="number" min="0" max="1" step="0.05" value="0.2">
+          </label>
+        </div>
+        <label class="switch-row">
+          <span class="switch-text">
+            <span class="switch-label">干净事件交付</span>
+            <span class="switch-desc">按干净事件而不是逐句投放</span>
+          </span>
           <input id="msEventDeliveryClean" type="checkbox">
         </label>
-        <label class="ms-row"><span>交付文本</span>
-          <select id="msEventTextMode">
-            <option value="raw">原文</option>
-            <option value="summary">总结</option>
-            <option value="auto">自动</option>
-          </select></label>
-        <label class="field"><span>长事件阈值（字符）</span>
-          <input id="msLongEventChars" type="number" min="200" max="8000" step="100" value="1200">
-        </label>
-        <div class="card-actions">
-<button id="msReload" class="btn" type="button">重新读取</button>
+        <div class="field-grid">
+          <label class="field"><span>交付文本</span>
+            <select id="msEventTextMode">
+              <option value="raw">原文</option>
+              <option value="summary">总结</option>
+              <option value="auto">自动</option>
+            </select>
+          </label>
+          <label class="field"><span>长事件阈值（字符）</span>
+            <input id="msLongEventChars" type="number" min="200" max="8000" step="100" value="1200">
+          </label>
+        </div>
+        <div class="btn-row">
+          <button id="msReload" class="btn" type="button">重新读取</button>
           <button id="msSave" class="btn btn-accent" type="button">保存设置</button>
         </div>
         <p class="hint" id="msHint">保存后立即生效，不重启；越界值会自动夹紧并提示。</p>
@@ -494,13 +499,13 @@
         </dl>
       </section>
 
-      <section class="card" data-card-id="compaction-archive" data-card-label="压缩归档">
+      <section class="card card-wide" data-card-id="compaction-archive" data-card-label="压缩归档">
         <header class="card-head">
           <i class="sq" aria-hidden="true"></i>
           <b>ARCHIVE</b><span class="zh">/ 压缩归档</span>
           <span class="r" id="caStatus">读取中</span>
         </header>
-        <div class="btn-row ca-actions">
+        <div class="btn-row">
           <button id="caRefresh" class="btn" type="button">刷新</button>
         </div>
         <table class="log-table ca-table">
@@ -530,8 +535,8 @@
           </label>
         </div>
         <p class="hint" id="recallHint">交付按事件计数：每轮最多投放多少个整事件（1–20，默认 12），保存后立即生效。干净事件交付路径不再按字符截断——件数与长件分层才是预算；字符预算只对旧的逐句路径生效。同库同题的命中率：5k→76.5%　10k→85.9%　14k→88.2%　20k→90.6%　40k→97.6%。</p>
-        <div class="card-actions">
-          <button id="recallSave" class="primary-button" type="button">保存</button>
+        <div class="btn-row">
+          <button id="recallSave" class="btn btn-accent" type="button">保存</button>
         </div>
       </section>
 
@@ -561,8 +566,8 @@
           <label class="field"><span>每句目标字数</span><input id="lengthTarget" type="number" min="1" max="200" value="10"></label>
           <label class="field"><span>上限字数</span><input id="lengthMax" type="number" min="2" max="400" value="30"></label>
         </div>
-        <div class="card-actions">
-          <button id="expressionSave" class="primary-button" type="button">保存表达</button>
+        <div class="btn-row">
+          <button id="expressionSave" class="btn btn-accent" type="button">保存表达</button>
         </div>
       </section>
 
@@ -574,9 +579,9 @@
         </header>
         <div class="advanced-row">
           <div class="data-inline"><span>出口清洗</span><b id="sanitizeReplyText">—</b></div>
-          <div class="card-actions">
-            <button id="resetLayout" class="ghost-button" type="button">恢复默认布局</button>
-            <button id="clearDraft" class="ghost-button" type="button">清空本地草稿</button>
+          <div class="btn-row">
+            <button id="resetLayout" class="btn" type="button">恢复默认布局</button>
+            <button id="clearDraft" class="btn" type="button">清空本地草稿</button>
           </div>
         </div>
         <p class="hint" id="dataDirText">数据目录：宿主托管</p>
@@ -600,9 +605,9 @@
         </header>
         <p class="group-title">时间线（逐条，免费）</p>
         <div class="data-list" id="ovList" style="max-height:220px;overflow:auto"></div>
-        <div class="card-actions">
-          <button id="ovTimeline" class="ghost-button" type="button">刷新时间线</button>
-          <button id="ovBuild" class="primary-button" type="button">重算归纳</button>
+        <div class="btn-row">
+          <button id="ovTimeline" class="btn" type="button">刷新时间线</button>
+          <button id="ovBuild" class="btn btn-accent" type="button">重算归纳</button>
         </div>
         <p class="group-title">归纳（模型写，按需）</p>
         <pre id="ovText" class="ms-result" style="white-space:pre-wrap;max-height:320px;overflow:auto"></pre>

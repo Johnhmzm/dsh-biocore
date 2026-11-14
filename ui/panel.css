@@ -234,16 +234,29 @@ body:not([data-tab="dashboard"]) .body [data-card-id] { flex: none; }
 
 /* ----------------------------------------------------------------- card --- */
 
+/* 唯一的卡片定义：深色底 + 1px 描边 + 10px 圆角 + 16px 内边距。
+ * 设置页与看板共用同一个 .card；看板沿用原来的紧凑密度与斜切角，
+ * 由下面那条 :where() 覆盖（特异性等同 .card，手机端媒体查询仍能再覆盖）。 */
 .card,
 .strip {
   position: relative;
   display: flex;
   flex-direction: column;
   min-height: 0;
-  padding: 10px 12px;
+  min-width: 0;
+  padding: 16px;
   background: var(--panel);
   border: 1px solid var(--line);
+  border-radius: 10px;
   box-shadow: var(--shadow-card);
+}
+
+/* 看板：保持原观感（10/12 内边距、直角斜切、无圆角）。
+ * 整条选择器包在 :where() 里，特异性等同 .card，后面的媒体查询仍可按原位覆盖。 */
+:where(body[data-tab="dashboard"]) .card,
+:where(body[data-tab="dashboard"]) .strip {
+  padding: 10px 12px;
+  border-radius: 0;
   clip-path: polygon(0 0, calc(100% - 14px) 0, 100% 14px, 100% 100%, 14px 100%, 0 calc(100% - 14px));
 }
 .card::before,
@@ -381,58 +394,103 @@ body:not([data-tab="dashboard"]) .body [data-card-id] { flex: none; }
 .data-row b { color: var(--ink); font-weight: 400; }
 
 .hint { margin-top: 6px; font-size: 9.5px; letter-spacing: .08em; color: var(--ink3); }
-.group-title { margin: 12px 0 4px; font-size: 9px; letter-spacing: .22em; color: var(--ink2); }
+/* 卡片内小标题：统一橙色小字 */
+.group-title { margin: 12px 0 6px; font-size: 10px; letter-spacing: .18em; color: var(--orange); }
 .group-title:first-of-type { margin-top: 2px; }
 
 /* --------------------------------------------------------------- forms --- */
 
-.field-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px 12px; margin-top: 4px; }
-.field { display: grid; gap: 4px; min-width: 0; }
-.field span { font-size: 9px; letter-spacing: .16em; color: var(--ink3); }
+/* 字段行：标签固定 110px，控件拿走剩下的全部宽度。
+ * 用 minmax(0, 1fr) 而不是 1fr —— 这一步就是不压扁的关键。 */
+.field-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 10px;
+  margin-top: 8px;
+  min-width: 0;
+}
+.field {
+  display: grid;
+  grid-template-columns: 110px minmax(0, 1fr);
+  align-items: center;
+  column-gap: 12px;
+  row-gap: 10px;
+  min-width: 0;
+  margin: 0;
+}
+.field > span:first-child {
+  font-size: 11.5px;
+  line-height: 1.35;
+  color: var(--ink3);
+  overflow-wrap: anywhere;
+}
 .field input, .field select, .field textarea {
   width: 100%;
+  min-width: 0;
+  height: 32px;
+  box-sizing: border-box;
   background: var(--panel2);
   border: 1px solid var(--line2);
+  border-radius: 6px;
   color: var(--ink);
   font: inherit;
   font-size: 11.5px;
-  padding: 5px 8px;
-  min-width: 0;
+  padding: 0 8px;
 }
+.field textarea { height: auto; min-height: 96px; padding: 8px; line-height: 1.5; resize: vertical; }
 .field input:focus, .field select:focus, .field textarea:focus {
   outline: none; border-color: var(--orange);
 }
-.field-block { margin-top: 6px; }
+.field-block { margin-top: 8px; }
 .persona-text { resize: vertical; min-height: 96px; line-height: 1.5; }
 
-.card-actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 10px; }
-.primary-button {
-  padding: 5px 12px;
-  background: var(--orange);
-  border: 1px solid var(--orange);
-  color: #fff;
-  font-size: 10.5px; letter-spacing: .14em;
-  transition: background var(--t), border-color var(--t), opacity var(--t);
-}
-.primary-button:hover { background: var(--orange2); border-color: var(--orange2); }
-.primary-button:disabled { opacity: .55; cursor: default; }
-.ghost-button {
-  padding: 5px 12px;
+/* 按钮：高 32、最小宽 96、12px 字、描边样式；不做实心色块。 */
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: 32px;
+  min-width: 96px;
+  padding: 0 14px;
+  box-sizing: border-box;
   border: 1px solid var(--line2);
+  border-radius: 6px;
+  background: transparent;
   color: var(--ink2);
-  font-size: 10.5px; letter-spacing: .14em;
-  transition: color var(--t), border-color var(--t);
+  font-size: 12px;
+  letter-spacing: .08em;
+  white-space: nowrap;
+  transition: color var(--t), border-color var(--t), background var(--t), opacity var(--t);
 }
-.ghost-button:hover { color: var(--ink); border-color: var(--orange); }
+.btn:hover { color: var(--ink); border-color: var(--orange); }
+.btn:disabled { opacity: .55; cursor: default; }
+.btn-accent { border-color: var(--orange); color: var(--orange); }
+.btn-accent:hover { color: var(--orange2); border-color: var(--orange2); }
+.btn-row {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  align-items: center;
+  gap: 12px;
+  margin-top: 14px;
+}
+.advanced-row .btn-row { margin-top: 0; }
 
+/* 开关行：整行 32 高，勾选框 flex:none 靠右，文字不再和它重叠。 */
 .switch-row {
-  display: flex; align-items: center; justify-content: space-between; gap: 12px;
-  padding: 7px 0; border-bottom: 1px solid var(--line);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-height: 32px;
+  padding: 4px 0;
+  margin: 0;
+  border-bottom: 1px solid var(--line);
 }
 .switch-row:last-child { border-bottom: 0; }
-.switch-text { display: grid; gap: 1px; min-width: 0; }
-.switch-label { font-size: 11.5px; color: var(--ink); }
-.switch-desc { font-size: 9.5px; letter-spacing: .04em; color: var(--ink3); }
+.switch-text { display: grid; gap: 2px; min-width: 0; }
+.switch-label { font-size: 11.5px; line-height: 1.3; color: var(--ink); }
+.switch-desc { font-size: 9.5px; line-height: 1.3; letter-spacing: .04em; color: var(--ink3); }
 .switch-group { margin: 10px 0 2px; font-size: 9px; letter-spacing: .22em; color: var(--ink3); }
 .switch-group:first-child { margin-top: 0; }
 
@@ -697,86 +755,54 @@ body.layout-editing [data-card-id].dragging { outline: 1px dashed var(--orange);
   * { transition: none !important; }
 }
 
-/* 记忆设置（面板专用）：密钥行与结果行，复用现有变量与间距 */
-.ms-key-row { display: flex; gap: 8px; align-items: center; }
+/* ------------------------------------------------- 组件适配（仅此一处） --- */
+
+/* 密钥行：输入框拿走剩余宽度，按钮固定宽度，不再各写一套。 */
+.ms-key-row { display: flex; gap: 8px; align-items: center; min-width: 0; }
 .ms-key-row input { flex: 1 1 auto; }
-.ms-key-row .ghost-button { flex: 0 0 auto; }
-.ms-result { font-variant-numeric: tabular-nums; color: var(--muted, #8a8f98); }
-.ms-result[data-ok="false"] { color: var(--danger, #d9534f); }
+.ms-key-row .btn { flex: 0 0 auto; }
+.ms-result { font-variant-numeric: tabular-nums; color: var(--ink2); }
+.ms-result[data-ok="false"] { color: var(--danger); }
 [data-card-id="memory-settings"] .group-title { margin-top: 14px; }
 
-/* ---- 设置页排版（B1-B8，新作用域，不改看板现有类） ---- */
+/* ------------------------------------------------- 设置页：多列流式布局 --- */
+/* 卡片按列自上而下排，列内紧挨，不会被同一行最高的那张撑出空白。
+ * 前提：容器必须是 block，且高度必须是 auto —— 一旦是定高（flex:1 撑出来的），
+ * 多列就会把放不下的内容挤到右侧新列里，被 overflow 裁掉（之前 1680x800 就是这么丢卡的）。 */
 body[data-tab='settings'] .body {
+  display: block;
+  columns: 3 400px;
+  column-gap: 24px;
+  flex: none;
+  height: auto;
+  min-height: 0;
+  overflow: visible;
+  width: 100%;
   max-width: 1720px;
   margin: 0 auto;
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(400px, 1fr));
-  gap: 24px;
-  align-items: start;
+  padding: 18px 20px 28px;
 }
+/* 定高滚动交给 .main；顶部工具条吸顶，不随页面滚走。 */
+body[data-tab='settings'] .main { overflow-y: auto; }
+body[data-tab='settings'] .top { position: sticky; top: 0; z-index: 6; }
+
+body[data-tab='settings'] .body > .stack { display: contents; }
 body[data-tab='settings'] .card {
-  margin: 0;
+  height: auto;
   min-width: 0;
+  margin: 0 0 24px;
+  break-inside: avoid;
+  -webkit-column-break-inside: avoid;
 }
-/* 宽表格跨满所有列 */
-body[data-tab='settings'] .card-wide,
-body[data-tab='settings'] .card[data-card-id='compaction-archive'] {
-  grid-column: 1 / -1;
+/* 表格类卡片跨满所有列 */
+body[data-tab='settings'] .card-wide { column-span: all; break-inside: auto; }
+/* 统一卡片标题：橙色小字（看板是唯一例外，标题保持原色） */
+body:not([data-tab='dashboard']) .card-head b { color: var(--orange); }
+
+/* 窄屏：一列到底，别让 400px 的列把窗口撑出横向滚动。 */
+@media (max-width: 899px) {
+  body[data-tab='settings'] .body {
+    columns: 1;
+    padding: 10px 10px calc(72px + env(safe-area-inset-bottom, 0px));
+  }
 }
-/* 字段：标签窄一点，控件拿到剩余宽度（minmax(0,1fr) 才不会被压扁） */
-body[data-tab='settings'] .field-grid { grid-template-columns: 1fr; min-width: 0; }
-body[data-tab='settings'] .field,
-body[data-tab='settings'] .field-grid > .field {
-  display: grid;
-  grid-template-columns: 110px minmax(0, 1fr);
-  align-items: center;
-  column-gap: 10px;
-  row-gap: 10px;
-  min-width: 0;
-}
-body[data-tab='settings'] .card-wide .field-grid,
-body[data-tab='settings'] .card[data-card-id='compaction-archive'] .field-grid {
-  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
-}
-/* 输入控件：占满自己的格子，数字框也不例外 */
-body[data-tab='settings'] input:not([type='checkbox']):not([type='radio']),
-body[data-tab='settings'] select,
-body[data-tab='settings'] textarea {
-  width: 100%;
-  min-width: 0;
-  box-sizing: border-box;
-  height: 32px;
-}
-body[data-tab='settings'] input[type='number'] { width: 100%; min-width: 0; }
-body[data-tab='settings'] .card {
-  background: var(--panel, #12130f);
-  border: 1px solid var(--line, #2a2b22);
-  border-radius: 10px;
-  padding: 16px;
-  margin: 0;
-}
-body[data-tab='settings'] .group-title, body[data-tab='settings'] .za-group-title {
-  color: var(--accent, #d98a2b);
-  font-size: 12px;
-  letter-spacing: .06em;
-  margin: 12px 0 8px;
-}
-/* 标签文字：不换行，超出省略，避免把控件挤掉 */
-body[data-tab='settings'] .field-grid > .field > span,
-body[data-tab='settings'] .field > span {
-  color: var(--muted, #8b8d7f); font-size: 12px; line-height: 32px;
-  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
-}
-.btn-row { display: flex; justify-content: flex-end; align-items: center; gap: 12px; margin: 24px 0 12px; }
-.btn-row.ca-actions { justify-content: flex-start; margin: 0 0 12px; }
-.btn {
-  height: 32px; min-width: 96px; padding: 0 14px; box-sizing: border-box;
-  border: 1px solid var(--line, #2a2b22); border-radius: 6px;
-  background: #1a1b16; color: var(--text, #d7d8cd); font-size: 12px; cursor: pointer;
-}
-.btn:hover { border-color: var(--accent, #d98a2b); }
-.btn-accent { border-color: var(--accent, #d98a2b); color: #f0c07a; }
-body[data-tab='settings'] .switch-row { display: flex; align-items: center; justify-content: space-between;
-  gap: 12px; line-height: 32px; padding: 0; }
-body[data-tab='settings'] .switch-row input[type='checkbox'] { margin: 0; align-self: center; }
-body[data-tab='settings'] .ms-row { display: flex; align-items: center; gap: 12px; line-height: 32px; margin: 0 0 12px; }
