@@ -867,14 +867,22 @@ body[data-tab='settings'] .field textarea {
 }
 body[data-tab='settings'] .field textarea { height: auto; min-height: 96px; padding: 8px 10px; }
 
-/* 开关行 */
-body[data-tab='settings'] .switch-row { min-height: 36px; padding: 4px 0; }
+/* 开关行：压到 30 高，行间 6，别一行占掉四十像素 */
+body[data-tab='settings'] .switch-row { min-height: 30px; padding: 2px 0; margin: 0 0 6px; line-height: 1.25; }
 body[data-tab='settings'] .switch-label { font-size: 12.5px; }
 body[data-tab='settings'] .switch-desc { font-size: 11px; }
 
 /* 按钮：32 高、最小宽 92 */
 body[data-tab='settings'] .btn { height: 32px; min-width: 92px; padding: 0 12px; font-size: 12px; letter-spacing: .02em; }
 body[data-tab='settings'] .btn-sm { height: 28px; min-width: 64px; padding: 0 8px; font-size: 11px; }
+
+/* 卡片整体收紧：内边距 14、标题下 10、分组 12、动作区 12、字段行距 8 */
+body[data-tab='settings'] .card { padding: 14px 14px 12px; }
+body[data-tab='settings'] .card-head { margin-bottom: 10px; }
+body[data-tab='settings'] .field-grid { gap: 8px; }
+body[data-tab='settings'] .field { row-gap: 8px; }
+body[data-tab='settings'] .card > .group-title { margin-top: 12px; padding-top: 10px; }
+body[data-tab='settings'] .card > .btn-row { margin-top: 12px; padding-top: 10px; }
 
 /* 说明文字 */
 body[data-tab='settings'] .hint,
