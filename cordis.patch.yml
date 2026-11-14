@@ -10,8 +10,8 @@
         memoryEnabled: true
         # Standalone session/event capture listener (off: capture happens in core turn_start/end)
         memoryCaptureEnabled: false
-        # 压缩记录补扫：session/event 的 compaction/summary 在 web 拓扑下会丢，
-        # 所以每个 turn/start 从会话日志补一次（每会话 60 秒一次、fire-and-forget）。
+        # 压缩记录落库：主路径每个回合从会话对象的事件表取（毫秒级、不节流），
+        # 拿不到才退回解压会话日志（60 秒节流）。全程 fire-and-forget。
         compactionScan: true
         injectMaxChars: 420
         hourlyCap: 20
