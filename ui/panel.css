@@ -928,12 +928,8 @@ body[data-tab='tools'] .btn {
 }
 body[data-tab='tools'] .btn:hover { border-color: var(--orange); color: #f0c07a; }
 body[data-tab='tools'] .btn-accent { border-color: var(--orange); color: #f0c07a; }
-
-
-/* ---- 设置 / 工具页容器：单一网格，永不溢出、永不重叠 --------------------
- * 之前同时存在 display:flex（竖排）与列宽/多列规则，卡片既会挤成一行又会溢出。
- * 这里统一成 auto-fill 网格：按可用宽度决定列数，卡片高度各自独立。 */
-body:is([data-tab='settings'], [data-tab='tools']) .body {
+/* ---- 工具页容器（保持不变）------------------------------------------------ */
+body[data-tab='tools'] .body {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(340px, 1fr));
   grid-auto-rows: min-content;
@@ -944,111 +940,167 @@ body:is([data-tab='settings'], [data-tab='tools']) .body {
   overflow-y: auto;
   padding: 12px 14px 28px;
 }
-body:is([data-tab='settings'], [data-tab='tools']) .body > .stack { display: contents; }
-body:is([data-tab='settings'], [data-tab='tools']) .body > .stack > [data-card-id],
-body:is([data-tab='settings'], [data-tab='tools']) .body > [data-card-id] {
-  min-width: 0;
-  margin: 0;
-  break-inside: auto;
-}
+body[data-tab='tools'] .body > .stack { display: contents; }
+body[data-tab='tools'] .body > [data-card-id] { min-width: 0; height: auto; margin: 0; }
 
-
-
-/* ---- 设置页：小方块（参照 AstrBot 的设置页）-------------------------------
- * 每个设置项是一块小方块：标签在上、控件在下；一行按宽度自动排几块。 */
-body[data-tab='settings'] .field-grid,
-body[data-tab='settings'] .field-grid.two {
+/* ============================================================================
+ * 配置页（重写）：顶部一排方块索引 + 下方单块内容面板
+ * 索引块 96×104、等宽等高、可换行；点块在下方展开该分类面板，再点收起。
+ * 只用 body[data-tab='settings'] 作用域，其余四页不受影响。
+ * ========================================================================== */
+body[data-tab='settings'] .main { overflow-y: auto; }
+body[data-tab='settings'] .top { position: sticky; top: 0; z-index: 6; }
+body[data-tab='settings'] .body {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
-  gap: 8px;
-  min-width: 0;
+  grid-template-columns: repeat(auto-fill, 96px);
+  grid-auto-rows: min-content;
+  align-items: start;
+  align-content: start;
+  justify-content: start;
+  gap: 10px;
+  width: 100%;
+  max-width: 1680px;
+  margin: 0 auto;
+  padding: 12px 16px 28px;
+  overflow-x: hidden;
 }
+body[data-tab='settings'] .body > .stack { display: contents; }
+body[data-tab='settings'] .body > .stack > [data-card-id],
+body[data-tab='settings'] .body > [data-card-id] { min-width: 0; margin: 0; }
+
+/* 索引方块 */
+body[data-tab='settings'] .card {
+  order: 1;
+  width: 96px;
+  height: 104px;
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  justify-content: flex-start;
+  gap: 6px;
+  padding: 10px 8px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  box-shadow: none;
+  overflow: hidden;
+  cursor: pointer;
+  transition: border-color .12s ease, background .12s ease;
+}
+body[data-tab='settings'] .card:hover { border-color: var(--line2); }
+body[data-tab='settings'] .card-head {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+  margin: 0;
+}
+body[data-tab='settings'] .card-head .sq {
+  width: 18px;
+  height: 18px;
+  margin: 0 0 4px;
+  background: transparent;
+  border: 1px solid var(--line2);
+  border-radius: 3px;
+}
+body[data-tab='settings'] .card-head b { font-size: 10px; letter-spacing: .08em; color: var(--ink2); white-space: normal; }
+body[data-tab='settings'] .card-head .zh { font-size: 9.5px; letter-spacing: 0; line-height: 1.3; color: var(--ink3); white-space: normal; }
+body[data-tab='settings'] .card-head .r { display: none; }
+
+/* 收起：只留卡头 */
+body[data-tab='settings'] .card:not(.open) > *:not(.card-head) { display: none; }
+
+/* 展开：内容面板（占满整行，排到索引行之后） */
+body[data-tab='settings'] .card.open {
+  order: 2;
+  grid-column: 1 / -1;
+  align-items: stretch;   /* 内容面板撑满，字段才能横向排成小格 */
+  width: auto;
+  height: auto;
+  padding: 12px 14px;
+  border-color: var(--orange);
+  background: var(--panel);
+  overflow: visible;
+  cursor: default;
+}
+body[data-tab='settings'] .card.open > .card-head {
+  flex-direction: row;
+  align-items: center;
+  gap: 8px;
+  margin: 0 0 10px;
+}
+body[data-tab='settings'] .card.open > .card-head .sq { width: 5px; height: 5px; margin: 0; border: 0; border-radius: 0; background: var(--orange); }
+body[data-tab='settings'] .card.open > .card-head b { font-size: 10px; letter-spacing: .18em; }
+body[data-tab='settings'] .card.open > .card-head .zh { font-size: 10px; }
+body[data-tab='settings'] .card.open > .card-head .r { display: block; margin-left: auto; font-size: 9.5px; letter-spacing: .1em; }
+
+/* 面板内：分组标题 / 小格字段 / 开关 / 按钮 */
+body[data-tab='settings'] .group-title {
+  margin: 12px 0 6px;
+  padding-top: 10px;
+  border-top: 1px solid var(--line);
+  font-size: 10.5px;
+  letter-spacing: .1em;
+  color: var(--orange);
+}
+body[data-tab='settings'] .card-head + .group-title { margin-top: 0; padding-top: 0; border-top: 0; }
+body[data-tab='settings'] .hint { margin: 6px 0 0; font-size: 10px; }
+body[data-tab='settings'] .field-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 8px; min-width: 0; }
+body[data-tab='settings'] .field-grid > .field-wide { grid-column: 1 / -1; }
 body[data-tab='settings'] .field {
   display: flex;
   flex-direction: column;
   justify-content: center;
   gap: 4px;
   min-width: 0;
-  min-height: 58px;
-  padding: 7px 8px;
+  min-height: 56px;
+  padding: 6px 8px;
   box-sizing: border-box;
-  border: 1px solid var(--line2);
+  border: 1px solid var(--line);
   border-radius: 4px;
   background: var(--panel2);
 }
-body[data-tab='settings'] .field > span:first-child {
-  font-size: 10.5px;
-  line-height: 1.2;
-  color: var(--ink3);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
+body[data-tab='settings'] .field > span:first-child { font-size: 10px; line-height: 1.2; color: var(--ink3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 body[data-tab='settings'] .field input,
-body[data-tab='settings'] .field select {
-  height: 26px;
-  font-size: 11.5px;
-  border-radius: 3px;
-}
-body[data-tab='settings'] .field textarea { min-height: 96px; }
-body[data-tab='settings'] .field-wide { grid-column: 1 / -1; }
-/* ---- 设置页：方块 + 点击展开 (唯一一套) ------------------------------
- * 收起：132×104 方块，卡头两行（英文 / 中文），右侧状态隐藏；
- * 展开：.open 后占满整行、高度自适应，内容回来（不用 display:revert）。
- * 只作用于 body[data-tab='settings']。 */
-body[data-tab='settings'] .body {
-  grid-template-columns: repeat(auto-fill, minmax(132px, 1fr));
-  gap: 10px;
-}
-body[data-tab='settings'] .card {
-  height: 104px;
-  padding: 10px;
-  overflow: hidden;
-  cursor: pointer;
-  transition: border-color .15s ease;
-}
-body[data-tab='settings'] .card:hover { border-color: var(--orange); }
-body[data-tab='settings'] .card > .card-head {
-  flex-wrap: wrap;
-  align-items: flex-start;
-  gap: 4px;
-  margin: 0;
-}
-body[data-tab='settings'] .card > .card-head b,
-body[data-tab='settings'] .card > .card-head .zh {
-  font-size: 10px;
-  line-height: 1.35;
-  letter-spacing: .08em;
-  white-space: normal;
-}
-body[data-tab='settings'] .card > .card-head .r { display: none; }
-/* 收起状态只隐藏一次：除了卡头，其余全藏 */
-body[data-tab='settings'] .card:not(.open) > *:not(.card-head) { display: none; }
-/* 展开 */
-body[data-tab='settings'] .card.open {
-  grid-column: 1 / -1;
-  height: auto;
-  overflow: visible;
-  cursor: default;
-}
-body[data-tab='settings'] .card.open > .card-head { margin-bottom: 8px; }
-body[data-tab='settings'] .card.open > .card-head .r { display: block; }
-
-
-/* 展开后：卡内按列排，按钮行贴在卡片底部内侧 */
-body[data-tab='settings'] .card.open {
+body[data-tab='settings'] .field select { width: 100%; min-width: 0; height: 24px; box-sizing: border-box; font-size: 11px; padding: 0 6px; border-radius: 4px; }
+body[data-tab='settings'] .field textarea { width: 100%; min-height: 96px; padding: 6px; font-size: 11px; border-radius: 4px; resize: vertical; }
+body[data-tab='settings'] .field-block { margin-top: 0; }
+body[data-tab='settings'] .switch-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; min-height: 26px; margin: 0 0 2px; }
+body[data-tab='settings'] .switch-label { font-size: 11px; }
+body[data-tab='settings'] .switch-desc { font-size: 10px; color: var(--ink3); }
+body[data-tab='settings'] .switch-row input[type='checkbox'] { flex: none; margin: 0; }
+body[data-tab='settings'] .btn-row {
   display: flex;
-  flex-direction: column;
-}
-body[data-tab='settings'] .card.open > .btn-row {
-  margin-top: 10px;
+  justify-content: flex-end;
+  align-items: center;
+  gap: 6px;
+  margin: 12px 0 0;
   padding-top: 10px;
   border-top: 1px solid var(--line);
-  justify-content: flex-end;
 }
-/* 收起时：标签居中，方块里不要留一大片空 */
-body[data-tab='settings'] .card:not(.open) {
-  align-items: flex-start;
-  justify-content: flex-start;
+body[data-tab='settings'] .btn {
+  height: 24px;
+  min-width: 40px;
+  padding: 0 8px;
+  box-sizing: border-box;
+  font-size: 10.5px;
+  letter-spacing: .02em;
+  border-radius: 4px;
+  border: 1px solid var(--line);
+  background: #1b1d20;
+  color: var(--ink);
+  cursor: pointer;
 }
+body[data-tab='settings'] .btn:hover { border-color: var(--orange); color: #f0c07a; }
+body[data-tab='settings'] .btn-accent { border-color: var(--orange); color: #f0c07a; }
+body[data-tab='settings'] .btn-sm { height: 22px; min-width: 36px; padding: 0 6px; font-size: 10px; }
+body[data-tab='settings'] .ms-key-row { display: flex; gap: 6px; align-items: center; min-width: 0; }
+body[data-tab='settings'] .ms-result { font-size: 10px; color: var(--ink3); }
+body[data-tab='settings'] .state-note { font-size: 10.5px; color: var(--ink3); }
+body[data-tab='settings'] .table-scroll { max-height: 220px; overflow-y: auto; }
 
+/* 窄屏：索引块换行即可，无需改列数 */
+@media (max-width: 899px) {
+  body[data-tab='settings'] .body { padding: 10px 10px calc(72px + env(safe-area-inset-bottom, 0px)); }
+}

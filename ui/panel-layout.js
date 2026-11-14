@@ -264,6 +264,11 @@
       // 一次只展开一个：先收起其它方块（照 AstrBot 那排方块的做法）
       var open = document.querySelectorAll('body[data-tab="settings"] .card.open')
       for (var i = 0; i < open.length; i += 1) open[i].classList.remove('open')
+      // 同时只开一块：先关掉其它已展开的面板
+      var opened = document.querySelectorAll('.card.open')
+      for (var k = 0; k < opened.length; k += 1) {
+        if (opened[k] !== card) opened[k].classList.remove('open')
+      }
       card.classList.add('open')
       return
     }
