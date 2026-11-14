@@ -59,6 +59,7 @@ import logging
 import math
 import os
 import re
+import sqlite3
 import sys
 import time
 from pathlib import Path
@@ -1493,6 +1494,138 @@ def scan_compactions(session_id, store, payload=None):
         return {"ok": False, "reason": "scan_failed", "scanned": 0,
                 "inserted": 0, "skipped": 0, "log": "",
                 "detail": str(exc)[:150]}
+
+
+# ---------------------------------------------------------------- compaction index
+COMPACTION_INDEX_HEADER = '【压缩目录】'
+COMPACTION_INDEX_SOURCE = 'biocore-index'
+# 目录里最多放几行（一行一件 / 一行一条取样）；再多也没人读，还会撑大摘要。
+COMPACTION_INDEX_LINES = 12
+
+
+def _index_clock(stamp):
+    """epoch 秒 -> 本地 HH:MM（目录里的时间列）。"""
+    try:
+        return time.strftime('%H:%M', time.localtime(float(stamp)))
+    except Exception:
+        return '--:--'
+
+
+def _first_line(text, limit=40):
+    """条目正文的第一行（压掉换行与多余空白），只用于粗目录。"""
+    for line in str(text or '').splitlines():
+        line = _WS.sub(' ', line).strip()
+        if line:
+            return line[:max(1, int(limit))]
+    return ''
+
+
+def _index_conn(root, session_id):
+    """只读打开 memory.db：压缩目录不该在召回库上写任何东西。"""
+    from biocore_memory.store import sql_store as _sql
+    path = _sql.db_path(root, session_id)
+    if not path.is_file():
+        return None
+    try:
+        conn = sqlite3.connect(path.as_uri() + '?mode=ro', uri=True, timeout=5.0)
+        conn.execute('PRAGMA busy_timeout=5000')
+        return conn
+    except Exception:
+        return None
+
+
+def _index_from_events(conn, start, end, limit):
+    """库里已有的事件摘要：一行一件（overview 是总结层写的 30 字摘要）。"""
+    try:
+        rows = conn.execute(
+            "SELECT overview, closed_ts FROM events"
+            " WHERE COALESCE(overview, '') <> '' AND closed_ts > 0"
+            " ORDER BY closed_ts").fetchall()
+    except Exception:
+        return []
+    picked = [(float(ts), str(ov).strip()) for ov, ts in rows
+              if start <= float(ts) <= end]
+    return ['%s %s' % (_index_clock(ts), overview[:60]) for ts, overview in picked[:limit]]
+
+
+def _index_from_entries(conn, start, end, limit):
+    """没有事件摘要时的粗目录：按时间均匀取样，每行一个条目首行。"""
+    try:
+        rows = conn.execute(
+            "SELECT ts, role, text FROM entries WHERE ts BETWEEN ? AND ?"
+            " AND COALESCE(deleted, 0) = 0 ORDER BY ts", (float(start), float(end))).fetchall()
+    except Exception:
+        return [], 0
+    if not rows:
+        return [], 0
+    step = max(1, len(rows) // max(1, int(limit)))
+    lines = []
+    for ts, _role, text in rows[::step][:limit]:
+        head = _first_line(text)
+        if head:
+            lines.append('%s 「%s」' % (_index_clock(ts), head))
+    return lines, len(rows)
+
+
+def compaction_index(session_id, store, payload=None):
+    """压缩后的目录：把库内已有的摘要/条目整理成一行一件的文本（0 次模型调用）。
+
+    这是"我们的压缩产物"：不调模型、不写库、只读。信息只来自 memory store：
+      - 有事件摘要 -> 一行一件（时间 + 30 字概览）；
+      - 没有事件摘要 -> 条目首行取样（粗目录，仍然是库里的原文，不搬全文）；
+      - 库里什么都没有 -> 只有覆盖区间与条数。
+    正文一个字都不改写：摘要行是库里已有字段的拼接，压缩日志里记的 provider 是
+    biocore-index，事后能一眼看出这份摘要是谁产的。
+    """
+    data = payload if isinstance(payload, dict) else {}
+    root = _store_root(store)
+    if root is None:
+        return {"ok": False, "reason": "no_store"}
+    sid = sanitize_session_id(session_id)
+    start = _num(data.get("start_ts"), 0.0)
+    end = _num(data.get("end_ts"), start)
+    if start <= 0:
+        return {"ok": False, "reason": "no_span"}
+    if end < start:
+        start, end = end, start
+    messages = int(_num(data.get("messages"), 0)) or 0
+    roles = data.get("roles") if isinstance(data.get("roles"), dict) else {}
+    user = int(_num(roles.get("user"), 0)) or 0
+    assistant = int(_num(roles.get("assistant"), 0)) or 0
+    limit = int(_num(data.get("limit"), COMPACTION_INDEX_LINES)) or COMPACTION_INDEX_LINES
+    limit = max(1, min(limit, 40))
+
+    lines, source, total = [], "span", 0
+    conn = _index_conn(root, sid)
+    if conn is not None:
+        try:
+            lines = _index_from_events(conn, start, end, limit)
+            if lines:
+                source = "events"
+                total = len(lines)
+            else:
+                lines, total = _index_from_entries(conn, start, end, limit)
+                source = "entries" if lines else "span"
+        except Exception as exc:
+            logger.warning("[compaction-index] 读库失败：%s: %s",
+                           type(exc).__name__, str(exc)[:120])
+        finally:
+            conn.close()
+
+    span = "%s–%s" % (_index_clock(start), _index_clock(end))
+    head = "%s覆盖 %s，共 %d 条消息" % (COMPACTION_INDEX_HEADER, span, messages)
+    role_note = ("（我 %d / 她 %d）" % (user, assistant)) if (user or assistant) else ""
+    if source == "events":
+        head += "%s → %d 件事" % (role_note, total)
+    elif source == "entries":
+        head += "%s（库内暂无事件摘要，按条目首行取样 %d 条 / 共 %d 条）" % (
+            role_note, len(lines), total)
+    else:
+        head += "%s（库内暂无对应记录）" % role_note
+    text = "\n".join([head] + ["- " + line for line in lines])
+    return {"ok": True, "text": text, "source": source, "lines": len(lines),
+            "messages": messages, "span": {"start_ts": start, "end_ts": end},
+            "provider": COMPACTION_INDEX_SOURCE, "session_id": sid}
 
 
 # ---------------------------------------------------------------- governance
@@ -10363,6 +10496,12 @@ def dispatch(action, payload=None):
             if not session_id:
                 return bad("missing session_id")
             return record_compaction(session_id, store, data)
+        if action == "compaction_index":
+            # 压缩产物：库内已有摘要拼成目录（只读、不调模型）
+            session_id = str(data.get("session_id") or "").strip()
+            if not session_id:
+                return bad("missing session_id")
+            return compaction_index(session_id, store, data)
         if action == "compaction_scan":
             # 事件丢了就从会话日志补：同一套幂等落库，只是触发时机不同
             session_id = str(data.get("session_id") or "").strip()
