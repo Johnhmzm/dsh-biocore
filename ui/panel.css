@@ -247,7 +247,8 @@ body:not([data-tab="dashboard"]) .body [data-card-id] { flex: none; }
   padding: 16px;
   background: var(--panel);
   border: 1px solid var(--line);
-  border-radius: 10px;
+  /* 直角：与看板的斜切语言一致，全站卡片不再有圆角 */
+  border-radius: 0;
   box-shadow: var(--shadow-card);
 }
 
@@ -697,7 +698,7 @@ body.layout-editing [data-card-id].dragging { outline: 1px dashed var(--orange);
   gap: 6px;
   padding: 10px 12px;
   border: 1px solid var(--line, #2a2a2a);
-  border-radius: 8px;
+  border-radius: 0;
 }
 .trace-card .trace-title { font-weight: 600; }
 .trace-card .trace-body { font-size: 12px; line-height: 1.5; opacity: 0.85; }
@@ -799,7 +800,7 @@ body[data-tab='settings'] .card {
   margin: 0;
   padding: 12px 14px;
   min-width: 0;
-  border-radius: 8px;
+  border-radius: 0;
 }
 body[data-tab='settings'] .card-wide { grid-column: 1 / -1; }
 
@@ -982,7 +983,7 @@ body[data-tab='settings'] .card {
   padding: 10px 8px;
   background: var(--panel);
   border: 1px solid var(--line);
-  border-radius: 8px;
+  border-radius: 0;
   box-shadow: none;
   overflow: hidden;
   cursor: pointer;
