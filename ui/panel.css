@@ -767,39 +767,6 @@ body.layout-editing [data-card-id].dragging { outline: 1px dashed var(--orange);
 .ms-result[data-ok="false"] { color: var(--danger); }
 [data-card-id="memory-settings"] .group-title { margin-top: 14px; }
 
-/* ------------------------------------------------- 设置页：多列流式布局 --- */
-/* 卡片按列自上而下排，列内紧挨，不会被同一行最高的那张撑出空白。
- * 前提：容器必须是 block，且高度必须是 auto —— 一旦是定高（flex:1 撑出来的），
- * 多列就会把放不下的内容挤到右侧新列里，被 overflow 裁掉（之前 1680x800 就是这么丢卡的）。 */
-body[data-tab='settings'] .body {
-  /* 用网格而不是多列：格子按可用宽度自动决定能放几张，永远不会超出右边界。
-   * 多列一旦算宽了就整块溢出，被裁掉（用户在 1680 下看到第三列被切）。 */
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(360px, 1fr));
-  align-items: start;
-  gap: 24px;
-  flex: none;
-  height: auto;
-  min-height: 0;
-  overflow: visible;
-  width: 100%;
-  max-width: 1720px;
-  margin: 0 auto;
-  padding: 12px 16px 28px;
-}
-/* 定高滚动交给 .main；顶部工具条吸顶，不随页面滚走。 */
-body[data-tab='settings'] .main { overflow-y: auto; }
-body[data-tab='settings'] .top { position: sticky; top: 0; z-index: 6; }
-
-body[data-tab='settings'] .body > .stack { display: contents; }
-body[data-tab='settings'] .card {
-  height: auto;
-  min-width: 0;
-  margin: 0;
-}
-/* 表格类卡片跨满所有列 */
-body[data-tab='settings'] .card-wide { column-span: all; break-inside: auto; }
-
 /* 窄屏：一列到底，别让 400px 的列把窗口撑出横向滚动。 */
 @media (max-width: 899px) {
   body[data-tab='settings'] .body {
@@ -808,84 +775,138 @@ body[data-tab='settings'] .card-wide { column-span: all; break-inside: auto; }
   }
 }
 
-/* 压缩归档：不再跨满整行，做成一张普通卡片；表格列宽钉死、表体内部滚动 */
-body[data-tab='settings'] .table-scroll { max-height: 240px; overflow-y: auto; }
-body[data-tab='settings'] .ca-table th:nth-child(1) { width: 108px; }
-body[data-tab='settings'] .ca-table th:nth-child(2) { width: 56px; }
-body[data-tab='settings'] .ca-table th:nth-child(3) { width: 64px; }
-body[data-tab='settings'] .ca-table th:nth-child(4) { width: 88px; }
-body[data-tab='settings'] .ca-table td { padding: 3px 4px; font-size: 11px; }
-body[data-tab='settings'] .ca-table th { padding: 4px 4px; }
-body[data-tab='settings'] .ca-table .btn { height: 22px; min-width: 54px; padding: 0 6px; font-size: 10.5px; border-radius: 4px; }
 
-/* ---- 卡内两列：短字段并排（标签 88 + 控件），长值独占一行 ---- */
-body[data-tab='settings'] .field-grid.two { grid-template-columns: repeat(2, minmax(0, 1fr)); column-gap: 16px; }
-body[data-tab='settings'] .field-grid > .field-wide { grid-column: 1 / -1; }
-body[data-tab='settings'] .field-grid.two > .field:not(.field-wide) { grid-template-columns: 88px minmax(0, 1fr); }
+/* ============================================================================
+ * 设置页（重写版）—— 只这一套规则，不再叠加历史补丁。
+ * 密度基准：与看板一致（10px 大写标题 / 30px 控件 / 12px 正文）。
+ * ========================================================================== */
 
-/* ---- 卡内分组：组与组之间 1px + 20px，别糊在一起 ---- */
-body[data-tab='settings'] .card > .group-title {
-  margin: 20px 0 8px;
-  padding-top: 18px;
+body[data-tab='settings'] .body {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(360px, 1fr));
+  gap: 14px;
+  align-items: start;
+  max-width: 1680px;
+  margin: 0 auto;
+  padding: 14px 16px 32px;
+  overflow: visible;
+}
+body[data-tab='settings'] .body > .stack { display: contents; }
+body[data-tab='settings'] .main { overflow-y: auto; }
+body[data-tab='settings'] .top { position: sticky; top: 0; z-index: 6; }
+
+body[data-tab='settings'] .card {
+  margin: 0;
+  padding: 12px 14px;
+  min-width: 0;
+  border-radius: 8px;
+}
+body[data-tab='settings'] .card-wide { grid-column: 1 / -1; }
+
+body[data-tab='settings'] .card-head { margin-bottom: 8px; gap: 7px; }
+body[data-tab='settings'] .card-head b { font-size: 10px; letter-spacing: .16em; color: var(--ink2); }
+body[data-tab='settings'] .card-head .zh { font-size: 10px; letter-spacing: .1em; color: var(--ink3); }
+body[data-tab='settings'] .card-head .r { font-size: 9.5px; letter-spacing: .1em; color: var(--ink3); }
+
+body[data-tab='settings'] .group-title {
+  font-size: 10.5px;
+  letter-spacing: .1em;
+  color: var(--orange);
+  margin: 12px 0 8px;
+  padding-top: 12px;
   border-top: 1px solid var(--line);
 }
-body[data-tab='settings'] .card > .card-head + .group-title {
-  margin-top: 0;
-  padding-top: 0;
-  border-top: 0;
+body[data-tab='settings'] .card-head + .group-title { margin-top: 4px; padding-top: 0; border-top: 0; }
+
+body[data-tab='settings'] .field-grid { display: grid; grid-template-columns: minmax(0, 1fr); gap: 8px; min-width: 0; }
+body[data-tab='settings'] .field-grid.two { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 8px 14px; }
+body[data-tab='settings'] .field {
+  display: grid;
+  grid-template-columns: 104px minmax(0, 1fr);
+  align-items: center;
+  column-gap: 10px;
+  min-width: 0;
 }
-
-/* ---- 动作区：与内容隔开（1px + 16px） ---- */
-body[data-tab='settings'] .card > .btn-row {
-  margin-top: 18px;
-  padding-top: 16px;
-  border-top: 1px solid var(--line);
-  justify-content: flex-end;
+body[data-tab='settings'] .field-wide { grid-column: 1 / -1; }
+body[data-tab='settings'] .field > span:first-child {
+  font-size: 11.5px;
+  line-height: 1.25;
+  color: var(--ink3);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
-
-/* ---- 压缩归档：会话列 140 / 操作列 72，按钮 22 高，表体 240 内部滚动 ---- */
-body[data-tab='settings'] .ca-table th:nth-child(1) { width: 140px; }
-body[data-tab='settings'] .ca-table th:nth-child(4) { width: 96px; }
-body[data-tab='settings'] .ca-table th:nth-child(5) { width: 72px; }
-/* ======================================================================
- * 设置页 = 看板那一套（终端皮肤），只把可控件的字号放宽一档便于阅读。
- * 全部限定在 body[data-tab='settings']；看板一行不动。
- * ==================================================================== */
-/* 卡片标题：与看板完全同款（9.5px 大写 + .24em 字距） */
-body[data-tab='settings'] .card-head { gap: 8px; margin-bottom: 8px; }
-body[data-tab='settings'] .card-head .sq { width: 5px; height: 5px; }
-body[data-tab='settings'] .card-head b { font-size: 9.5px; letter-spacing: .24em; color: var(--ink2); }
-body[data-tab='settings'] .card-head .zh { font-size: 9.5px; letter-spacing: .12em; }
-body[data-tab='settings'] .card-head .r { font-size: 9px; letter-spacing: .14em; }
-
-/* 字段：与看板同密度——标签 11.5，控件 32 高 / 11.5px */
-body[data-tab='settings'] .field > span:first-child { font-size: 11.5px; line-height: 1.3; }
 body[data-tab='settings'] .field input,
 body[data-tab='settings'] .field select,
 body[data-tab='settings'] .field textarea {
-  height: 32px;
-  font-size: 11.5px;
+  width: 100%;
+  min-width: 0;
+  height: 30px;
+  box-sizing: border-box;
+  font-size: 12px;
   padding: 0 8px;
+  border-radius: 5px;
 }
-body[data-tab='settings'] .field textarea { height: auto; min-height: 96px; padding: 8px 10px; }
+body[data-tab='settings'] .field textarea { height: auto; min-height: 96px; padding: 8px; line-height: 1.5; }
 
-/* 开关行：看板密度（24 高、行间 4） */
-body[data-tab='settings'] .switch-row { min-height: 24px; padding: 1px 0; margin: 0 0 4px; line-height: 1.2; }
-body[data-tab='settings'] .switch-label { font-size: 11.5px; }
-body[data-tab='settings'] .switch-desc { font-size: 10px; }
+body[data-tab='settings'] .switch-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  min-height: 26px;
+  margin: 0 0 2px;
+}
+body[data-tab='settings'] .switch-text { min-width: 0; }
+body[data-tab='settings'] .switch-label { font-size: 11.5px; line-height: 1.3; }
+body[data-tab='settings'] .switch-desc { font-size: 10px; line-height: 1.3; color: var(--ink3); }
+body[data-tab='settings'] .switch-row input[type='checkbox'] { flex: none; margin: 0; }
 
-/* 按钮：32 高、最小宽 92 */
-body[data-tab='settings'] .btn { height: 32px; min-width: 92px; padding: 0 12px; font-size: 12px; letter-spacing: .02em; }
-body[data-tab='settings'] .btn-sm { height: 28px; min-width: 64px; padding: 0 8px; font-size: 11px; }
+body[data-tab='settings'] .btn-row {
+  display: flex;
+  justify-content: flex-end;
+  align-items: center;
+  gap: 8px;
+  margin: 12px 0 0;
+  padding-top: 10px;
+  border-top: 1px solid var(--line);
+}
+body[data-tab='settings'] .btn-row.ca-actions { justify-content: flex-start; }
+body[data-tab='settings'] .btn {
+  height: 28px;
+  min-width: 84px;
+  padding: 0 12px;
+  box-sizing: border-box;
+  font-size: 11.5px;
+  letter-spacing: .02em;
+  border-radius: 5px;
+  border: 1px solid var(--line);
+  background: #1b1d20;
+  color: var(--ink);
+  cursor: pointer;
+}
+body[data-tab='settings'] .btn:hover { border-color: var(--orange); color: #f0c07a; }
+body[data-tab='settings'] .btn-accent { border-color: var(--orange); color: #f0c07a; }
+body[data-tab='settings'] .btn-sm { height: 24px; min-width: 60px; padding: 0 8px; font-size: 10.5px; }
 
-/* 卡片与看板同密度：内边距 10/12、标题下 8、分组 8、动作区 8、行距 6 */
-body[data-tab='settings'] .card { padding: 10px 12px; }
-body[data-tab='settings'] .field-grid { gap: 6px; }
-body[data-tab='settings'] .field { row-gap: 6px; }
-body[data-tab='settings'] .card > .group-title { margin-top: 8px; padding-top: 6px; }
-body[data-tab='settings'] .card > .btn-row { margin-top: 8px; padding-top: 6px; }
-
-/* 说明文字 */
 body[data-tab='settings'] .hint,
 body[data-tab='settings'] .state-note,
-body[data-tab='settings'] .ms-result { font-size: 11px; line-height: 1.5; }
+body[data-tab='settings'] .ms-result { font-size: 10.5px; line-height: 1.5; color: var(--ink3); }
+
+body[data-tab='settings'] .ms-key-row { display: flex; gap: 6px; align-items: center; }
+body[data-tab='settings'] .ms-key-row input { flex: 1 1 auto; min-width: 0; }
+
+body[data-tab='settings'] .table-scroll { max-height: 220px; overflow-y: auto; }
+body[data-tab='settings'] .ca-table th:nth-child(1) { width: 132px; }
+body[data-tab='settings'] .ca-table th:nth-child(2) { width: 56px; }
+body[data-tab='settings'] .ca-table th:nth-child(3) { width: 64px; }
+body[data-tab='settings'] .ca-table th:nth-child(4) { width: 84px; }
+body[data-tab='settings'] .ca-table th:nth-child(5) { width: 64px; }
+body[data-tab='settings'] .ca-table td { padding: 4px; font-size: 11px; }
+body[data-tab='settings'] .ca-table .btn { height: 22px; min-width: 52px; padding: 0 6px; font-size: 10.5px; }
+
+@media (max-width: 1099px) {
+  body[data-tab='settings'] .body { grid-template-columns: minmax(0, 1fr); gap: 10px; }
+  body[data-tab='settings'] .field-grid.two { grid-template-columns: minmax(0, 1fr); }
+}
+
