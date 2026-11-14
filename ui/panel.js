@@ -1958,6 +1958,14 @@
     if (clean) clean.checked = Number(s.event_delivery_clean_on || 0) === 1
     var mode = $('msEventTextMode'); if (mode) mode.value = s.event_text_mode || 'raw'
     var longc = $('msLongEventChars'); if (longc && s.long_event_chars != null) longc.value = String(s.long_event_chars)
+    var iw = $('msInjectWait')
+    if (iw && s.inject_wait_ms != null) iw.value = String(s.inject_wait_ms)
+    var it = $('msInjectTtl')
+    if (it && s.inject_ttl_ms != null) it.value = String(s.inject_ttl_ms)
+    var ctok = $('msCompactTokens')
+    if (ctok && s.compaction_threshold_tokens != null) ctok.value = String(s.compaction_threshold_tokens)
+    var cwin = $('msCompactWindow')
+    if (cwin && s.compaction_context_window != null) cwin.value = String(s.compaction_context_window)
   }
 
   function msFillStatus(status) {
@@ -2026,6 +2034,12 @@
         event_delivery_clean_on: ($('msEventDeliveryClean') || {}).checked ? 1 : 0,
         event_text_mode: (($('msEventTextMode') || {}).value) || 'raw',
         long_event_chars: num('msLongEventChars', 1200),
+        // 召回等待：0 = 一直等到召回完成（用户要求先等再答）；TTL 只对同一句提问生效
+        inject_wait_ms: Math.max(0, Math.round(num('msInjectWait', 10000))),
+        inject_ttl_ms: Math.max(0, Math.round(num('msInjectTtl', 15000))),
+        // 压缩阈值：0 表示关；保存即写进 core_config.json 的 recall.*，下一次压缩检查就生效
+        compaction_threshold_tokens: Math.max(0, Math.round(num('msCompactTokens', 0))),
+        compaction_context_window: Math.max(0, Math.round(num('msCompactWindow', 0))),
       },
     }
   }

@@ -41,6 +41,15 @@ SETTINGS_SPEC = {
     # 交付用原文还是总结：raw / summary / auto（字符串白名单）
     'event_text_mode': ('str', ('raw', 'summary', 'auto')),
     'long_event_chars': ('int', 200, 8000),
+    # 压缩阈值（用户可改，不靠改 YAML）：绝对 token 门槛 / 窗口比例 / 窗口兜底。
+    # 0 一律表示"关"：0/0 时退回到官方 YAML 的 thresholdRatio（与本文件无关）。
+    'compaction_threshold_tokens': ('int', 0, 2000000),
+    'compaction_threshold_ratio': ('float', 0.0, 0.95),
+    'compaction_context_window': ('int', 0, 4000000),
+    # 记忆注入等召回的上限（毫秒）：0 = 一直等到召回完成；缺省 10000（先等再答）
+    'inject_wait_ms': ('int', 0, 60000),
+    # 缓存有效期（毫秒）：同一句提问在 TTL 内直接复用，不重新召回，缺省 15000
+    'inject_ttl_ms': ('int', 0, 600000),
 }
 
 # 设置名 -> recall 段里的键（detail_shape 是面板自己的开关，不进 recall）
@@ -55,6 +64,11 @@ RECALL_KEYS = {
     'event_delivery_clean_on': 'recall.event_delivery_clean_on',
     'event_text_mode': 'recall.event_text_mode',
     'long_event_chars': 'recall.long_event_chars',
+    'compaction_threshold_tokens': 'recall.compaction_threshold_tokens',
+    'compaction_threshold_ratio': 'recall.compaction_threshold_ratio',
+    'compaction_context_window': 'recall.compaction_context_window',
+    'inject_wait_ms': 'recall.inject_wait_ms',
+    'inject_ttl_ms': 'recall.inject_ttl_ms',
 }
 
 

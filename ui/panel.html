@@ -441,6 +441,26 @@
             <input id="msPortraitTop" type="number" min="1" max="50" step="1" value="8">
           </label>
         </div>
+        <p class="group-title">召回等待</p>
+        <div class="field-grid">
+          <label class="field"><span>等待上限（ms）</span>
+            <input id="msInjectWait" type="number" min="0" max="60000" step="1000" value="10000">
+            <small class="field-hint">0 = 一直等到召回完成</small>
+          </label>
+          <label class="field"><span>缓存有效期（ms）</span>
+            <input id="msInjectTtl" type="number" min="0" max="600000" step="1000" value="15000">
+            <small class="field-hint">同一句提问在这之内直接复用</small>
+          </label>
+        </div>
+        <p class="group-title">压缩阈值</p>
+        <div class="field-grid">
+          <label class="field"><span>阈值 token（0=关）</span>
+            <input id="msCompactTokens" type="number" min="0" max="2000000" step="1000" value="0">
+          </label>
+          <label class="field"><span>上下文窗口（0=用适配器）</span>
+            <input id="msCompactWindow" type="number" min="0" max="4000000" step="1000" value="0">
+          </label>
+        </div>
         <label class="ms-row"><span>相关门槛</span>
           <input id="msRelevantFloor" type="number" min="0" max="1" step="0.05" value="0.2">
         </label>
