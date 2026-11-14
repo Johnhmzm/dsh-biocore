@@ -12,6 +12,8 @@
   - 幂等：同一块第二次跑不新增行、不改内容（块键由成员身份+文本决定）。
   - 失败降级：原文照留、登记 attempts+1、打一行 warn（带异常类型），绝不阻塞 turn_end。
   - 重试：同一块最多 3 次，退避 1m / 10m / 1h，超限标 failed。
+  - 结算按事件边界：pending 切出 >=2 件才结算第一件，1 件继续攒；
+    pending >=30 行或距上次结算 >12 小时则强制结算第一件（settle_batch）。
 
 状态只放 SQL 表 `event_consolidation`（写入只走 SQL 是硬规矩；状态与计数同源）。
 """
@@ -33,6 +35,10 @@ STATUS_FAILED = 'failed'
 CODE_NO_SUMMARIZER = 'no_summarizer'
 _CACHE_SUBDIR = ('cache', 'summary')
 CODE_AWAITING = 'awaiting_summary'
+# 结算按事件边界走：切出 >=2 件才结算第一件，只切出 1 件就继续攒。
+# 兜底两个：pending 攒到 30 行，或距上次结算超过 12 小时 → 强制结算第一件。
+FALLBACK_ROWS = 30
+FALLBACK_SECONDS = 12 * 3600.0
 
 DDL = (
     'CREATE TABLE IF NOT EXISTS event_consolidation ('
@@ -86,6 +92,63 @@ def pending_rows(entries, events):
     return rows
 
 
+def _last_settled_ts(entries, events):
+    """上一次结算到的时间：已结算行里最新的 ts；还没结算过就是 None。"""
+    settled = settled_end(events)
+    if settled <= 0:
+        return None
+    times = []
+    for index, row in enumerate(entries or []):
+        if isinstance(row, dict) and _turn(row, index) <= settled:
+            times.append(float(row.get('ts') or 0.0))
+    return max(times) if times else None
+
+
+def fallback_due(rows, entries=None, events=None, now=None):
+    """兜底判据：pending 行数 >= 30，或距上次结算 > 12 小时。
+
+    还没结算过时，从最早一条待结算行起算——等的是"这批行攒了多久"。
+    """
+    rows = [row for row in (rows or []) if isinstance(row, dict)]
+    if len(rows) >= FALLBACK_ROWS:
+        return True
+    if not rows:
+        return False
+    stamp = float(now if now is not None else time.time())
+    last = _last_settled_ts(entries, events)
+    if last is None:
+        last = min(float(row.get('ts') or 0.0) for row in rows)
+    if last <= 0.0:
+        return True
+    return (stamp - last) > FALLBACK_SECONDS
+
+
+def settle_batch(rows, entries=None, events=None, now=None):
+    """按事件边界挑这一轮要结算的行：返回 (要结算的行, 原因)。
+
+    切出 >=2 件 → 只结算第一件（groups[0]），其余留到下一轮；
+    只切出 1 件 → 跳过（继续攒）；兜底到期 → 强制结算第一件。
+    原因：'boundary' | 'fallback' | 'accumulating' | 'empty'。
+    """
+    rows = [row for row in (rows or []) if isinstance(row, dict)]
+    if not rows:
+        return [], 'empty'
+    try:
+        from biocore_memory.recall import event_delivery as _ED
+        groups = [group for group in (_ED._segment(rows) or []) if group]
+    except Exception as exc:
+        logger.warning('[consolidate] 事件边界切分失败，按整批处理：%s: %s',
+                       type(exc).__name__, str(exc)[:120])
+        groups = [rows]
+    if not groups:
+        return [], 'empty'
+    if len(groups) >= 2:
+        return list(groups[0]), 'boundary'
+    if fallback_due(rows, entries=entries, events=events, now=now):
+        return list(groups[0]), 'fallback'
+    return [], 'accumulating'
+
+
 def block_key(session_id, rows):
     """块键：会话 + 成员身份（id/turn/ts/text）。同一批行永远同一个键。"""
     digest = hashlib.sha256()
@@ -101,7 +164,7 @@ def block_key(session_id, rows):
 def _block_content(rows, day):
     """缓存键的内容部分：日期 + 成员原文（与 _ask 用的完全同一份）。"""
     body = '\n'.join(str(row.get('text') or '') for row in rows or [])
-    return '%s\n%s' % (str(day or ''), body)
+    return 'claims-v2|%s\n%s' % (str(day or ''), body)
 
 
 def _cache_probe(db_path, rows, day, model):
@@ -138,10 +201,66 @@ def _ask(summarizer, rows, day, cache_dir=None, model=''):
         cached, spent = False, 0.0
     else:
         got = _cache.call(summarizer, prompt, cache_dir, model,
-                          content='%s\n%s' % (str(day or ''), body))
+                          content='claims-v2|%s\n%s' % (str(day or ''), body))
         answer, cached, spent = got['text'], got['cached'], got['ms']
     overview, claims = _claims.parse_claims(answer, day=day)
-    return overview, claims, {'cached': bool(cached), 'ms': spent}
+    ev_summary = _claims.parse_event_summary(answer)
+    return overview, claims, ev_summary, {'cached': bool(cached), 'ms': spent}
+
+
+def _event_summary(summarizer, rows, cache_dir=None, model='', limit=300):
+    """一件一段 <=300 字的中文总结；走缓存，失败返回 None（不写半截）。"""
+    if summarizer is None or not rows:
+        return None
+    body = chr(10).join(str(r.get('text') or '') for r in rows if str(r.get('text') or '').strip())
+    if not body.strip():
+        return None
+    prompt = ('下面是同一件事的全部原文。请写一段不超过 ' + str(limit) + ' 字的中文总结：'
+              '第三方视角，只写原文里明确出现的事实，不推测、不评价、不升华，'
+              '不写"总之""这说明"这类收尾句。原文：' + chr(10) + body)
+    try:
+        if cache_dir:
+            from biocore_memory.store import summary_cache as _cache
+            text = _cache.call(summarizer, prompt, str(cache_dir), str(model or ''),
+                               content='sum:%s' % body)['text']
+        else:
+            text = summarizer(prompt)
+    except Exception:
+        return None
+    text = str(text or '').strip()
+    return text[:limit] if text else None
+
+
+def _segment_summaries(summarizer, rows, long_chars=None, cache_dir=None, model=''):
+    """长件逐段要一句小结；任一段失败或条数不符 → 返回 None（整体丢弃）。"""
+    if summarizer is None:
+        return None
+    try:
+        from biocore_memory.recall import event_delivery as _ED
+        segs = _ED._segments(rows, long_chars or _ED.LONG_EVENT_CHARS_DEFAULT)
+    except Exception:
+        return None
+    if len(segs) <= 1:
+        return None
+    out = []
+    for k, seg in enumerate(segs, 1):
+        body = chr(10).join(str(r.get('text') or '') for r in seg)[:1200]
+        prompt = ('这是同一件事的第 %d/%d 段。请用一句不超过 40 字的中文概括这一段，'
+                  '只写这一段的内容，不要编造，不要合并其它段。原文：%s' % (k, len(segs), body))
+        try:
+            if cache_dir:
+                from biocore_memory.store import summary_cache as _cache
+                text = _cache.call(summarizer, prompt, str(cache_dir), str(model or ''),
+                                   content='seg:%s' % body)['text']
+            else:
+                text = summarizer(prompt)
+        except Exception:
+            return None
+        text = str(text or '').strip()[:40]
+        if not text:
+            return None
+        out.append(text)
+    return out if len(out) == len(segs) else None
 
 
 def _day_of(rows):
@@ -202,7 +321,8 @@ def _existing_ordinals(conn, day):
         return []
 
 
-def _commit_event(conn, session_id, key, rows, events, overview, claims, day, stamp):
+def _commit_event(conn, session_id, key, rows, events, overview, claims, day, stamp,
+                 seg_sums=None, ev_summary=None):
     """写事件本体 + 四层行。day/ordinal 本地算（不看模型），thread 留空。"""
     from pathlib import Path
     from biocore_memory.event import fourlayer
@@ -216,6 +336,13 @@ def _commit_event(conn, session_id, key, rows, events, overview, claims, day, st
              'members': [str(row.get('id') or '') for row in rows],
              'text': '\n'.join(str(row.get('text') or '') for row in rows),
              'overview': str(overview or '').strip(),
+             'segment_summaries': [str(x) for x in (seg_sums or [])],
+             'summary': str(ev_summary or '').strip(),
+             'code': 'AM%04d' % (len([e for e in (events or []) if isinstance(e, dict)]) + 1),
+             'span': ('%s ~ %s' % (
+                 time.strftime('%Y-%m-%d %H:%M', time.localtime(min(float(r.get('ts') or 0.0) for r in rows))),
+                 time.strftime('%Y-%m-%d %H:%M', time.localtime(max(float(r.get('ts') or 0.0) for r in rows)))
+             )) if rows else '',
              'thread': '',
              'claims': [dict(item, turn=max(turns) if turns else 0)
                         for item in (claims or [])],
@@ -244,7 +371,7 @@ def _commit_event(conn, session_id, key, rows, events, overview, claims, day, st
                      ' VALUES (?,?,?,?,?,?)',
                      [(s['event_id'], s['sentence_index'], s['turn'], s['ts'],
                        s['speaker'], s['text']) for s in mapping['sentences']])
-    return {'event_id': event['event_id'], 'ordinal': mapping['ordinal']}
+    return {'event_id': event['event_id'], 'ordinal': mapping['ordinal'], 'event': event}
 
 
 def _portrait_on(db_path):
@@ -320,14 +447,19 @@ def _record_failure(conn, key, session_id, rows, state, exc, stamp,
             'block_key': key}
 
 
-def run(db_path, session_id, entries, events, summarizer=True, now=None, model=''):
+def run(db_path, session_id, entries, events, summarizer=True, now=None, model='',
+        rows=None):
     """登记一个待总结块；返回报告。
 
     关着的时候**什么都不做**（不建表、不写行）——这是缺省 0 的证据面。
     `summarizer` 只用来决定 code（有没有人接活），这里绝不调用它。
+
+    `rows` 显式给了就只结算这一组（事件边界由调用方用 settle_batch 切好）；
+    不给就是"所有待结算行"（回填工具沿用的旧口径）。
     """
     stamp = float(now if now is not None else time.time())
-    rows = pending_rows(entries, events)
+    # 边界由调用方定：给了 rows 就不再自己全量取 pending
+    rows = list(rows) if rows is not None else pending_rows(entries, events)
     if not rows:
         return {'enabled': True, 'pending': 0, 'recorded': 0}
     key = block_key(session_id, rows)
@@ -371,11 +503,15 @@ def run(db_path, session_id, entries, events, summarizer=True, now=None, model='
             from pathlib import Path as _Path
             root_dir = _Path(str(db_path)).parents[2]
             cache_dir = root_dir.joinpath(*_CACHE_SUBDIR)
-            overview, claims, cache_info = _ask(summarizer, rows, day,
+            overview, claims, ev_summary, cache_info = _ask(summarizer, rows, day,
                                                 cache_dir=cache_dir,
                                                 model=str(model or ''))
+            seg_sums = _segment_summaries(summarizer, rows, cache_dir=cache_dir, model=str(model or ''))
+            if seg_sums is None:
+                logger.warning('[consolidate] 分段小结跳过（失败或段数不符），块 %s', key[:12])
             written = _commit_event(conn, session_id, key, rows, events,
-                                    overview, claims, day, stamp)
+                                    overview, claims, day, stamp, seg_sums=seg_sums,
+                                    ev_summary=ev_summary)
             _write_state(conn, key, session_id, STATUS_RECORDED, '', 0, stamp, stamp,
                          stamp + BACKOFF_S[0], len(rows), min(turns), max(turns),
                          day, ordinal=written['ordinal'], overview=overview,

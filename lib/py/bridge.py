@@ -410,6 +410,24 @@ def _memory_tool(argv):
     return _emit({"ok": inner_ok, "result": flat})
 
 
+def _compaction_record(argv):
+    """DSH 官方压缩的摘要：只转发。
+
+    判定、建表、幂等、时间窗全在 biocore_runtime.pipeline.record_compaction /
+    biocore_memory.event.compaction_record；这里连正文都不碰，避免两处各裁一刀。
+    """
+    store = argv[1] if len(argv) > 1 else ""
+    session_id = argv[2] if len(argv) > 2 else ""
+    payload = _json_arg(argv[3] if len(argv) > 3 else "")
+    payload = dict(payload) if isinstance(payload, dict) else {}
+    payload.setdefault("store", store)
+    payload.setdefault("session_id", session_id)
+    result = _pipeline().dispatch("compaction_record", payload)
+    if not isinstance(result, dict):
+        return _emit({"ok": False, "reason": "compaction_failed"})
+    return _emit(result)
+
+
 def _runtime_prompt(argv):
     payload = _json_arg(argv[1] if len(argv) > 1 else "")
     return _emit(_pipeline().prompt_block(payload))
@@ -483,6 +501,8 @@ def main(argv):
             return _memory_inject(argv)
         if command == "memory_tool" and len(argv) >= 4:
             return _memory_tool(argv)
+        if command == "compaction_record" and len(argv) >= 3:
+            return _compaction_record(argv)
         if command == "runtime_prompt" and len(argv) >= 2:
             return _runtime_prompt(argv)
         if command == "runtime_gate" and len(argv) >= 2:

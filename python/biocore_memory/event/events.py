@@ -201,6 +201,12 @@ def build_events(entries, *, llm=None, flags=None, max_turns=15, trace=None, mer
     rows.sort(key=lambda e: (float(e.get('ts') or 0.0), _turn(e, 0)))
     for i, entry in enumerate(rows):
         entry['_idx'] = i
+    # 硬约束的前置：turn 若重复（老库整库 turn=0/None），同一"轮"会挂几百条，
+    # 单件上限就失效（实测出现过 195 句一件）。这里按 ts 行位重编号，保证唯一。
+    _turns = [_turn(entry, i) for i, entry in enumerate(rows)]
+    if len(set(_turns)) < len(_turns):
+        for i, entry in enumerate(rows):
+            entry['turn'] = i + 1
     if llm is not None:
         prompt = ('下面是一段对话，每行是“轮号|角色|文本”。请按“一件事”切分事件，通常 3–15 轮，'
                   '同一件事跨轮不要拆开。只输出 JSON 数组：[{"start": 轮号, "end": 轮号}]，不要解释。\n\n'

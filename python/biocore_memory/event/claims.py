@@ -49,12 +49,27 @@ def claims_prompt(event, known=None, day=None, threads=None):
         "十、一条消息里可能包含好几个可以被追问的事实（时间、数量、地点、人名、约定、偏好、"
         "先后变化），每一个都要单独抽成一条，不要合并、不要只抽主题、不要因为“看起来琐碎”而省略；"
         "宁可多抽，不可漏抽，同一段最多 12 条。\n"
-        "只输出 JSON：{\"overview\": \"...30字以内\", \"claims\": "
+        "十一、overview 30 字以内，只写发生了什么（谁·什么·什么值），"
+        "不评价、不推测、不升华，不写“总之”“这说明”这类收尾句；\n"
+        "只输出 JSON：{\"overview\": \"...30字以内\", \"summary\": \"<=300字的一段客观总结\", \"claims\": "
         "[{\"subject\": \"...\", \"attr\": \"...\", \"value\": \"...\", "
         "\"status\": \"current\", \"source\": \"direct\", \"entity\": \"...\", \"thread\": \"...\", \"note\": \"\"}]}"
         % (_known_lines(known), _known_lines(threads), str(day or ""),
            str(event.get("text") or "").strip())
     )
+
+
+def parse_event_summary(raw, limit=300):
+    """从同一次回答里取 <=300 字的事件总结；读不到就返回空串（不抛）。"""
+    try:
+        from . import json_tolerant as _jt
+        data = _jt.loads(raw, prefer="{")
+    except Exception:
+        return ""
+    if not isinstance(data, dict):
+        return ""
+    text = str(data.get("summary") or "").strip()
+    return text[:limit]
 
 
 class ParseError(ValueError):

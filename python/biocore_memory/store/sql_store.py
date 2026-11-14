@@ -892,9 +892,10 @@ def save_event_state(root, session_id, seen, events, global_state, open_buf):
         existing = {}
         try:
             for row in conn.execute(
-                    "SELECT id, start, end, overview, length(text) FROM events").fetchall():
+                    "SELECT id, start, end, overview, length(text), length(payload)"
+                    " FROM events").fetchall():
                 existing[str(row[0])] = (int(row[1] or 0), int(row[2] or 0),
-                                         str(row[3] or ""), int(row[4] or 0))
+                                         str(row[3] or ""), int(row[4] or 0), int(row[5] or 0))
         except Exception:
             existing = {}
         for (eid,) in conn.execute("SELECT id FROM events").fetchall():
@@ -903,9 +904,10 @@ def save_event_state(root, session_id, seen, events, global_state, open_buf):
         for ev in events or []:
             if not isinstance(ev, dict):
                 continue
+            _payload = json.dumps(_event_payload(ev), ensure_ascii=False)
             key = (str(ev.get("event_id") or ""), int(ev.get("start") or 0),
                    int(ev.get("end") or 0), str(ev.get("overview") or ""),
-                   len(str(ev.get("text") or "")))
+                   len(str(ev.get("text") or "")), len(_payload))
             if existing.get(key[0]) == key[1:]:
                 continue
             conn.execute(
@@ -917,7 +919,7 @@ def save_event_state(root, session_id, seen, events, global_state, open_buf):
                 (str(ev.get("event_id") or ""), int(ev.get("start") or 0),
                  int(ev.get("end") or 0), str(ev.get("overview") or ""),
                  str(ev.get("text") or ""), float(ev.get("closed_ts") or 0.0),
-                 json.dumps(_event_payload(ev), ensure_ascii=False),
+                 _payload,
                  pack_vector(ev.get("vector"))))
         conn.execute(
             "INSERT INTO event_state (session,seen,global_state,open_buf,updated)"

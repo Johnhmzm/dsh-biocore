@@ -19,7 +19,8 @@ logger = logging.getLogger(__name__)
 # the core may not carry word lists (tests/test_core_contract.py), so only the
 # machine-readable fields stay here.
 SPECS = {
-    'event_preset': (8, 1, 20),
+    # 切分硬上限生效后（中位 3 句/件），8 件只覆盖约 6k 字，缺省调到 12
+    'event_preset': (12, 1, 20),
     'window': (1, 0, 2),
     'relevant_cos': (0.4, 0.0, 1.0),
     'close_chars': (2000, 200, 8000),
@@ -44,8 +45,15 @@ SPECS = {
     'event_delivery_clean_on': (0, 0, 1),
     # 交付用原文还是总结：raw（缺省）/ summary / auto（按时间分档）
     'event_text_mode': ('raw', ('raw', 'summary', 'auto')),
+    # 超长事件的分段阈值（交付层与沉淀层共用）
+    'long_event_chars': (1200, 200, 8000),
     # 长：事件结算后顺手落一条画像（内容由总结层给，记忆侧只落盘），缺省关
     'portrait_on': (0, 0, 1),
+    # 压缩挂回：命中的 ts 落在某条官方压缩的时间窗里时，附一次那次的摘要。
+    # 缺省开——库里没有压缩记录时它一个字符都不会动（判定不了就不挂）。
+    'compaction_on': (1, 0, 1),
+    # 一次挂回最多附多少字的压缩摘要（超了按行边界裁，不切句子）
+    'compaction_chars': (3000, 200, 12000),
 }
 
 # Deliberately NOT consumed yet (2026-11-13 decision, option b): neither value
@@ -73,6 +81,9 @@ ENV_NAMES = {
     'relevant_floor': 'BIOCORE_RELEVANT_FLOOR',
     'event_delivery_clean_on': 'BIOCORE_EVENT_DELIVERY_CLEAN',
     'event_text_mode': 'BIOCORE_EVENT_TEXT_MODE',
+    'long_event_chars': 'BIOCORE_LONG_EVENT_CHARS',
+    'compaction_on': 'BIOCORE_COMPACTION_ON',
+    'compaction_chars': 'BIOCORE_COMPACTION_CHARS',
 }
 
 

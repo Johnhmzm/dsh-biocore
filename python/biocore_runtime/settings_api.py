@@ -40,6 +40,7 @@ SETTINGS_SPEC = {
     'event_delivery_clean_on': ('int', 0, 1),
     # 交付用原文还是总结：raw / summary / auto（字符串白名单）
     'event_text_mode': ('str', ('raw', 'summary', 'auto')),
+    'long_event_chars': ('int', 200, 8000),
 }
 
 # 设置名 -> recall 段里的键（detail_shape 是面板自己的开关，不进 recall）
@@ -53,6 +54,7 @@ RECALL_KEYS = {
     'relevant_floor': 'recall.relevant_floor',
     'event_delivery_clean_on': 'recall.event_delivery_clean_on',
     'event_text_mode': 'recall.event_text_mode',
+    'long_event_chars': 'recall.long_event_chars',
 }
 
 

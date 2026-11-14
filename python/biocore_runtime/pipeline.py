@@ -152,118 +152,8 @@ SENTENCE_RERANK_POOL = int(os.environ.get("BIOCORE_SENTENCE_RERANK_POOL") or 60)
 
 EVENT_SCORE_W_MAX = 0.9
 EVENT_SCORE_W_REST = 0.1
-# 事件分口径：
-#   max       = 该事件里最高那句的余弦（默认；P01/P16/P20 实测 top10 = 98.6/97.5/80.3，
-#               是所有聚合形式的上界，见 docs/EVENT-SCORING-20261112.md）
-#   mean      = 0.9×最佳句 + 0.1×其余句均值（旧）
-#   countrank = 0.7×最佳句 + 0.3×句数名次
-#   lse       = 平滑最大值（保留为对照，实测三集 top1 远低于 max）
-EVENT_SCORE_MODE = str(os.environ.get("BIOCORE_EVENT_SCORE") or "max").strip().lower()
-EVENT_SCORE_BETA = float(os.environ.get("BIOCORE_EVENT_BETA") or 2.0)
-# β 的目标函数选 NDCG@10（保头部名次），不是似然：见 docs 里 P01/P16/P20 的对照
-BETA_GRID = [0.5 + 0.1 * i for i in range(0, 56)]
-BETA_SAMPLES = "beta_samples.jsonl"
-
-
-def _ndcg_at_k(order, target, k=10):
-    try:
-        rank = order.index(target) + 1
-    except ValueError:
-        return 0.0
-    return 1.0 / math.log2(rank + 1) if rank <= k else 0.0
-
-
-BETA_CONFIG = "event_beta.json"
-
-
-def _event_beta(store=None):
-    """当前 β：环境变量优先，其次自动重估值，最后默认 2.0。"""
-    override = str(os.environ.get("BIOCORE_EVENT_BETA") or "").strip()
-    if override:
-        try:
-            return float(override)
-        except Exception:
-            pass
-    try:
-        path = os.path.join(_store_data_dir(store), BETA_CONFIG)
-        with open(path, encoding="utf-8") as fh:
-            value = float(json.load(fh).get("beta") or 0.0)
-        if 0.3 <= value <= 8.0:
-            return value
-    except Exception:
-        pass
-    return float(EVENT_SCORE_BETA)
-
-
-def _save_beta(store, beta, samples):
-    try:
-        path = os.path.join(_store_data_dir(store), BETA_CONFIG)
-        with open(path, "w", encoding="utf-8") as fh:
-            json.dump({"beta": round(float(beta), 4), "samples": int(samples),
-                       "updated_ts": round(time.time(), 3)}, fh)
-        return True
-    except Exception as exc:
-        logger.warning("[beta] 写入失败：%s", str(exc)[:100])
-        return False
-
-
-def record_beta_sample(store, session_id, scores_by_event, target_event):
-    """记一条样本：这次提问的答案是哪个事件，以及各事件的句子分。"""
-    if not target_event or not isinstance(scores_by_event, dict) or not scores_by_event:
-        return False
-    try:
-        path = os.path.join(_store_data_dir(store), BETA_SAMPLES)
-        row = {"session_id": str(session_id), "target": str(target_event),
-               "scores": {str(k): [round(float(x), 4) for x in v]
-                          for k, v in scores_by_event.items()}}
-        with open(path, "a", encoding="utf-8") as fh:
-            fh.write(json.dumps(row, ensure_ascii=False) + chr(10))
-        return True
-    except Exception as exc:
-        logger.warning("[beta] 记录失败：%s", str(exc)[:100])
-        return False
-
-
-def tune_beta(store, session_id=None, limit=400, k=10):
-    """在已记录的样本上按 NDCG@10 重估 β；返回 (beta, 样本数, 提升)。"""
-    path = os.path.join(_store_data_dir(store), BETA_SAMPLES)
-    if not os.path.exists(path):
-        return None, 0, 0.0
-    rows = []
-    try:
-        with open(path, encoding="utf-8") as fh:
-            for line in fh:
-                try:
-                    row = json.loads(line)
-                except Exception:
-                    continue
-                if session_id and str(row.get("session_id")) != str(session_id):
-                    continue
-                if row.get("target") in (row.get("scores") or {}):
-                    rows.append(row)
-    except Exception:
-        return None, 0, 0.0
-    rows = rows[-int(limit or 400):]
-    if len(rows) < 20:
-        return None, len(rows), 0.0
-    def score_at(beta):
-        total = 0.0
-        for row in rows:
-            sc = {}
-            for key, vals in (row.get("scores") or {}).items():
-                try:
-                    sc[key] = (1.0 / beta) * math.log(sum(math.exp(beta * x) for x in vals))
-                except Exception:
-                    sc[key] = max(vals) if vals else 0.0
-            order = sorted(sc, key=lambda kk: -sc[kk])
-            total += _ndcg_at_k(order, row["target"], k=k)
-        return total / len(rows)
-    best_beta, best = None, -1.0
-    for beta in BETA_GRID:
-        value = score_at(beta)
-        if value > best:
-            best_beta, best = beta, value
-    return best_beta, len(rows), best
+# 事件分口径固定为 max：该事件里最高那句的余弦（P01/P16/P20 实测 top10 = 98.6/97.5/80.3，
+# 是所有聚合形式的上界，见 docs/EVENT-SCORING-20261112.md 与 docs/ARCHIVE-LSE.md）。
 EVENT_SCORE_W_COUNT = float(os.environ.get("BIOCORE_EVENT_COUNT_W") or 0.3)
 EVENT_RELEVANT_COS = float(os.environ.get("BIOCORE_EVENT_RELEVANT") or 0.4)
 # 该参数目前没有消费点（全仓 grep 只有本行与等值性测试）：出口 _recall_param('relevant_cos')
@@ -1541,6 +1431,32 @@ def capture(session_id, role, text, store, config=None):
         # same incremental path as injection; new entries only
         _event_layer_block(session_id, store, "", 0, summarizer=summarizer)
     return {"ok": True, "decision": decision, "entry": entry, "position": position}
+
+
+def record_compaction(session_id, store, payload=None):
+    """收下 DSH 官方压缩的一条摘要，落 memory.db 的 compactions 表。
+
+    摘要正文是官方压缩产出的：这里只收下，不调模型、不改写一个字、不重排。
+    表是 append-only 的（只在 INSERT/SELECT），同 compaction_id 重写幂等，
+    时间窗的判定规则写在 biocore_memory.event.compaction_record 的模块头。
+    store 的 json 模式不影响这里：压缩记录是独立的追加归档，始终进 SQL 表。
+    """
+    sid = sanitize_session_id(session_id)
+    root = _store_root(store)
+    if root is None:
+        return {"ok": False, "reason": "no_store"}
+    data = payload if isinstance(payload, dict) else {}
+    now = data.get("now")
+    stamp = float(now) if isinstance(now, (int, float)) else time.time()
+    try:
+        from biocore_memory.event import compaction_record as _cr
+        out = _cr.record(_cr.db_path(root, sid), sid, data, now=stamp)
+    except Exception as exc:
+        logger.warning("[compaction] 写入失败：%s: %s",
+                       type(exc).__name__, str(exc)[:150])
+        return {"ok": False, "reason": "record_failed",
+                "detail": str(exc)[:150]}
+    return dict({"ok": True}, **out)
 
 
 # ---------------------------------------------------------------- governance
@@ -4499,10 +4415,10 @@ def _sentence_recall_block(store, session_id, query, entries, events, payload=No
     # 打分 / 分组 / 排序搬进 biocore_memory.recall.scoring（纯函数）：权重、模式、
     # β 与相对门槛都从外面传进去，模块里不读环境、不写文件（lse 的快照交回这里落盘）。
     _lse_snapshot = _recall_scoring.score_events(
-        grouped, order, scored, _relative_cut, mode=EVENT_SCORE_MODE,
+        grouped, order, scored, _relative_cut,
         w_max=EVENT_SCORE_W_MAX, w_rest=EVENT_SCORE_W_REST,
         w_count=EVENT_SCORE_W_COUNT,
-        beta_fn=(lambda: _event_beta(store)))
+        )
     if _lse_snapshot is not None:
         try:
             _p = os.path.join(_store_data_dir(store), "last_event_scores.json")
@@ -4530,12 +4446,45 @@ def _sentence_recall_block(store, session_id, query, entries, events, payload=No
                 if _cand:
                     _clean_qv = list(_cand)
                     break
+            # 每件在沉淀时写过 摘要/总结/分段小结/编码/跨度：挂到成员行上，交付侧才有东西可取
+            try:
+                _meta_by_id = {}
+                for _ev in (events or []):
+                    if not isinstance(_ev, dict):
+                        continue
+                    _meta = {'summary': str(_ev.get('summary') or '').strip(),
+                             'code': str(_ev.get('code') or '').strip(),
+                             'span': str(_ev.get('span') or '').strip(),
+                             'segments': list(_ev.get('segment_summaries') or [])}
+                    if not (_meta['summary'] or _meta['code'] or _meta['segments']):
+                        continue
+                    for _mid in (_ev.get('members') or []):
+                        _meta_by_id[str(_mid)] = _meta
+                if _meta_by_id:
+                    for _row in pool or []:
+                        if not isinstance(_row, dict):
+                            continue
+                        _m = _meta_by_id.get(str(_row.get('id') or ''))
+                        if not _m:
+                            continue
+                        if _m['summary']:
+                            _row['event_summary'] = _m['summary']
+                        if _m['code']:
+                            _row['event_code'] = _m['code']
+                        if _m['span']:
+                            _row['event_span'] = _m['span']
+                        if _m['segments']:
+                            _row['segment_summaries'] = _m['segments']
+            except Exception:
+                pass
+            # 不给字符预算：picked 件全部交付，event_preset 才是唯一的预算。
             _clean = _ED.deliver_events(
                 pool, _clean_qv,
                 preset=int(event_preset(store, payload)),
                 floor=float(_recall_param('relevant_floor', store, payload)),
                 now=now,
-                text_mode=_recall_param('event_text_mode', store, payload))
+                text_mode=_recall_param('event_text_mode', store, payload),
+                long_chars=int(_recall_param('long_event_chars', store, payload)))
             if _clean is not None:
                 logger.info('[delivery] clean mode=%s picked=%s shown=%s chars=%s',
                             _clean.get('mode'), _clean.get('picked'),
@@ -4656,7 +4605,7 @@ def _sentence_recall_block(store, session_id, query, entries, events, payload=No
 # 这里保留同名常量只为兼容旧调用点与等值性测试。
 EVENT_PRESET_MIN = 1
 EVENT_PRESET_MAX = 20
-EVENT_PRESET_DEFAULT = 8
+EVENT_PRESET_DEFAULT = 12
 
 # ── 召回参数的运行期出口 ────────────────────────────────────────────
 # ACTUAL-TASKS 30：这些值以前是 import 期常量，改配置必须重启才生效。
@@ -4669,7 +4618,10 @@ _RECALL_PARAM_CONST = {
     'pool': SENTENCE_RERANK_POOL, 'seed_k': SENTENCE_SEED_K,
     'relevant_floor': 0.20,
     'event_delivery_clean_on': 0,
+    'event_score_mode': 'max',
+    'event_beta': 2.0,
     'event_text_mode': 'raw',
+    'long_event_chars': 1200,
 }
 
 
@@ -5523,6 +5475,103 @@ def _body_values_healthy(body):
         return False
 
 
+COMPACTION_HEADER = "【压缩摘要】"
+
+
+def _hit_stamps(store, session_id, ids):
+    """命中条目的 ts（秒）。取不到 ts 的条目直接不算——判定不了就不挂。"""
+    wanted = set(str(x) for x in (ids or []) if str(x).strip())
+    if not wanted:
+        return []
+    out = []
+    try:
+        for row in _visible(load_memory(store, session_id).get("entries")):
+            if not isinstance(row, dict):
+                continue
+            if str(row.get("id") or "") not in wanted:
+                continue
+            stamp = _num(row.get("ts"), 0.0)
+            if stamp > 0:
+                out.append(stamp)
+    except Exception:
+        return []
+    return out
+
+
+def _compaction_attach(store, session_id, stamps, payload=None):
+    """命中的 ts 落在哪条压缩记录的时间窗里，就把那条摘要附一次。
+
+    判定全在 biocore_memory.event.compaction_record：窗口缺边（判定不了）的记录
+    不参与，所以"事件 ts 无法判定"时一个字符都不附。同一条压缩记录只附一次，
+    正文原样交付（按行边界裁到 recall.compaction_chars，绝不切句子）。
+    """
+    if not stamps:
+        return None
+    if not int(_recall_param("compaction_on", store, payload) or 0):
+        return None
+    root = _store_root(store)
+    if root is None:
+        return None
+    sid = sanitize_session_id(session_id)
+    try:
+        from biocore_memory.event import compaction_record as _cr
+        db = _cr.db_path(root, sid)
+        usable = _cr.windows(db, sid)
+    except Exception as exc:
+        logger.warning("[compaction] 读失败，本轮不挂：%s: %s",
+                       type(exc).__name__, str(exc)[:120])
+        return None
+    if not usable:
+        return None
+    picked, seen = [], set()
+    for stamp in stamps:
+        for row in usable:
+            if not (float(row["window_start"]) < stamp <= float(row["window_end"])):
+                continue
+            key = str(row.get("compaction_id") or "")
+            if key in seen:
+                continue
+            seen.add(key)
+            picked.append(row)
+    if not picked:
+        return None
+    picked.sort(key=lambda row: float(row.get("window_end") or 0.0))
+    bodies = [str(row.get("text") or "").strip() for row in picked]
+    bodies = [body for body in bodies if body]
+    if not bodies:
+        return None
+    cap = int(_recall_param("compaction_chars", store, payload) or 0)
+    body = _trim_lines((chr(10) + chr(10)).join(bodies), cap)
+    return {"text": COMPACTION_HEADER + chr(10) + body,
+            "ids": [str(row.get("compaction_id") or "") for row in picked],
+            "compactions": len(picked)}
+
+
+def _attach_compactions(session_id, store, block, payload=None):
+    """把压缩摘要接到已组装好的召回块上；接不上就原样返回 None。
+
+    块可能已经带了 <UNTRUSTED_MEMORY> 边界：摘要同样是历史原文的派生，
+    所以接在**边界里面**（一个边界，一个真源），而不是在闭标记之后另起一段。
+    """
+    core = block if isinstance(block, dict) else {}
+    stamps = _hit_stamps(store, session_id, core.get("ids"))
+    section = _compaction_attach(store, session_id, stamps, payload=payload)
+    if not section:
+        return None
+    text = str(core.get("text") or "")
+    add = section["text"]
+    if UNTRUSTED_CLOSE in text:
+        head, _, tail = text.rpartition(UNTRUSTED_CLOSE)
+        merged = head.rstrip() + chr(10) + chr(10) + add + chr(10) + UNTRUSTED_CLOSE + tail
+    elif text.strip():
+        merged = text.rstrip() + chr(10) + chr(10) + add
+    else:
+        merged = add
+    return dict(core, text=merged, chars=len(merged),
+                compaction=section["compactions"],
+                compaction_ids=section["ids"])
+
+
 def inject_block(session_id, store, max_chars=None, top_k=TOP_K,
                  query="", mode="query", rerank_config=None, now=None,
                  include_superseded=False, payload=None, as_of=None):
@@ -5542,6 +5591,15 @@ def inject_block(session_id, store, max_chars=None, top_k=TOP_K,
         mode=mode, rerank_config=rerank_config, now=now,
         include_superseded=include_superseded, payload=payload, as_of=as_of,
         scope=_scope)
+    # 压缩挂回：命中条目的 ts 落在某条官方压缩的时间窗里时，把那次摘要附一次。
+    # 放在交付口（而不是各条分支里）是因为交付路径有六七条；接不上就不动块。
+    try:
+        _attached = _attach_compactions(session_id, store, _core, payload=payload)
+        if _attached:
+            _core = _attached
+    except Exception as exc:
+        logger.warning("[compaction] 挂回跳过：%s: %s",
+                       type(exc).__name__, str(exc)[:120])
     # 交付即取用：统一在这里写回 hits/last_used，所有交付路径都覆盖（range /
     # event_rank / 句子 / 片段 / point_expand / cover / recent 回退）。
     _mark_block_access(store, session_id, _core, query=query, scope=_scope)
@@ -8636,7 +8694,9 @@ def _run_turn_end_consolidate(store, session_id, payload=None):
     """
     try:
         from biocore_memory.event import runtime_consolidate as _rc
-        if not _rc.enabled(payload, store):
+        # 开关以配置为准（core_config.json 的 recall.consolidate_on），env 只作覆盖；
+        # 旧写法 _rc.enabled(payload, store) 只读 payload/env，读不到配置文件里的开关。
+        if int(_recall_param('consolidate_on', store, payload) or 0) != 1:
             return {"enabled": False}
         root = _store_root(store)
         if root is None:
@@ -8652,8 +8712,23 @@ def _run_turn_end_consolidate(store, session_id, payload=None):
             _model = str(_block.get("model") or "")
         except Exception:
             _model = ""
-        return _rc.run(db_path, session_id, entries, events,
-                       summarizer=summarizer, now=time.time(), model=_model)
+        # 沉按事件边界结算：pending 切出 >=2 件才结算第一件，只切出 1 件就继续攒；
+        # 行数 >=30 或距上次结算 >12 小时兜底强制。字数不参与，事件数才是预算。
+        stamp = time.time()
+        _pending = _rc.pending_rows(entries, events)
+        _batch, _why = _rc.settle_batch(_pending, entries=entries, events=events,
+                                        now=stamp)
+        if not _batch:
+            return {"enabled": True, "pending": len(_pending), "settled": 0,
+                    "settle": _why}
+        _report = dict(_rc.run(db_path, session_id, entries, events,
+                               summarizer=summarizer, now=stamp, model=_model,
+                               rows=_batch) or {})
+        # pending/settled/remaining 都按"切分那一刻"的口径报，便于复现下一轮
+        _report.update({"pending": len(_pending), "settled": len(_batch),
+                        "remaining": len(_pending) - len(_batch),
+                        "settle": _why})
+        return _report
     except Exception as exc:
         logger.warning("[consolidate] turn_end 登记跳过：%s: %s",
                        type(exc).__name__, str(exc)[:120])
@@ -9177,31 +9252,6 @@ def _infer_target_event(store, session_id, reply_text):
         return ""
 
 
-def _maybe_tune_beta(store, session_id, data):
-    """每累计 20 条样本重估一次 β，并用指数平滑吸收，避免抖动。"""
-    try:
-        path = os.path.join(_store_data_dir(store), BETA_SAMPLES)
-        if not os.path.exists(path):
-            return None
-        count = 0
-        with open(path, encoding="utf-8") as fh:
-            for line in fh:
-                if line.strip():
-                    count += 1
-        if count < 20 or count % 20 != 0:
-            return None
-        beta_new, samples, score = tune_beta(store, limit=400)
-        if not beta_new:
-            return None
-        current = _event_beta(store)
-        smoothed = 0.9 * current + 0.1 * float(beta_new)
-        _save_beta(store, smoothed, samples)
-        return {"beta": round(smoothed, 4), "fit": beta_new,
-                "samples": samples, "ndcg10": round(score, 4)}
-    except Exception as exc:
-        logger.warning("[beta] 重估失败：%s", str(exc)[:120])
-        return None
-
 
 def dispatch(action, payload=None):
     """One CLI action -> JSON-safe result (never raises)."""
@@ -9520,27 +9570,8 @@ def dispatch(action, payload=None):
                         "trace": None, "trace_file": "", "disabled": True,
                         "reason": "core_disabled"}
             raw_assistant = clean_text(data.get("assistant_text"))
-            # β 自适应：从这次回复推断"答案来自哪个事件"，记一条样本，
-            # 每 20 条重估一次并指数平滑 —— 数据涨了参数跟着涨。
             try:
-                if EVENT_SCORE_MODE == "lse" and raw_assistant:
-                    _lp = os.path.join(_store_data_dir(store), "last_event_scores.json")
-                    _snap = {}
-                    if os.path.exists(_lp):
-                        with open(_lp, encoding="utf-8") as _fh:
-                            _snap = json.load(_fh).get("scores") or {}
-                    _tgt = _infer_target_event(store, session_id, raw_assistant)
-                    if _snap and _tgt:
-                        record_beta_sample(store, session_id, _snap, _tgt)
-                        _tuned = _maybe_tune_beta(store, session_id, data)
-                        if _tuned:
-                            logger.info("[beta] 重估 beta=%.3f (fit=%.2f, n=%d, ndcg10=%.3f)",
-                                        _tuned["beta"], _tuned["fit"], _tuned["samples"], _tuned["ndcg10"])
-            except Exception as _be:
-                logger.warning("[beta] 跳过：%s", str(_be)[:120])
-            # the brain grades the exchange; the body only consumes the number
-            try:
-                if _require_feature(store, BODY_SWITCH_KEY, data):
+               if _require_feature(store, BODY_SWITCH_KEY, data):
                     from biocore_runtime import mindbase_bridge as _mbj
                     _jcfg = _load_runtime_config(store) or {}
                     _grade = _mbj.judge_exchange(
@@ -10084,6 +10115,9 @@ def dispatch(action, payload=None):
                                top_n=data.get("top_n"),
                                depth=data.get("depth"),
                                mode=data.get("mode"))
+        if action == "overview":
+            return _session_overview(store, data.get("session_id") or data.get("session") or "",
+                                     data)
         if action == "trace":
             session_id = str(data.get("session_id") or "").strip()
             if not session_id:
@@ -10287,6 +10321,12 @@ def dispatch(action, payload=None):
             return {"ok": True, "best": out.get("best"),
                     "fitness": out.get("fitness"),
                     "history": out.get("history")}
+        if action == "compaction_record":
+            # DSH 官方压缩的摘要：只收下、落库（append-only），不调模型
+            session_id = str(data.get("session_id") or "").strip()
+            if not session_id:
+                return bad("missing session_id")
+            return record_compaction(session_id, store, data)
         if action == "configure":
             return configure(data)
         return {"ok": False, "reason": "unknown_action", "action": action}
@@ -10435,3 +10475,102 @@ def q_note_choice(store, session_id, action, payload=None):
     table["__last__"] = {"action": str(action), "context": q_context(payload),
                          "ts": round(time.time(), 3)}
     return _q_save(store, session_id, table)
+
+def _session_overview(store, session_id, payload=None):
+    """会话总览分两块：timeline（逐条追加，免费）与 digest（模型归纳，按需重算）。
+
+    timeline 来自已存事件的摘要（每件一行：编码｜日期｜30 字），零模型调用；
+    digest 是模型对全部原文写的 <=800 字归纳，按「会话 + 条数 + 最后一条 ts + 模型」缓存，
+    条数变了就标 stale，等面板点「重算归纳」才花钱。
+    """
+    sid = str(session_id or '').strip()
+    if not sid:
+        return {'ok': False, 'reason': 'missing_session_id'}
+    try:
+        state = _load_event_state(store, sid) or {}
+        events = [e for e in (state.get('events') or [])
+                  if isinstance(e, dict) and str(e.get('overview') or '').strip()]
+    except Exception as exc:
+        return {'ok': False, 'reason': 'load_failed', 'detail': str(exc)[:120]}
+    events.sort(key=lambda e: (str(e.get('day') or ''), int(e.get('start') or 0)))
+    def _ev_date(ev):
+        day = str(ev.get('day') or '').strip()
+        if day:
+            return day
+        for row in (ev.get('entries') or []):
+            try:
+                return time.strftime('%Y-%m-%d', time.localtime(float(row.get('ts') or 0.0)))
+            except Exception:
+                continue
+        return ''
+    timeline = [{'code': 'AM%04d' % index,
+                 'date': _ev_date(ev),
+                 'overview': str(ev.get('overview') or '')[:30]}
+                for index, ev in enumerate(events, 1)]
+    mode = str((payload or {}).get('mode') or 'both').strip().lower()
+    if mode == 'timeline':
+        return {'ok': True, 'timeline': timeline, 'count': len(timeline), 'cached': True}
+    try:
+        entries = [r for r in load_memory(store, sid).get('entries') or []
+                   if isinstance(r, dict) and str(r.get('text') or '').strip()]
+    except Exception:
+        entries = []
+    if not entries:
+        return {'ok': False, 'reason': 'no_entries', 'timeline': timeline, 'count': len(timeline)}
+    entries.sort(key=lambda r: float(r.get('ts') or 0.0))
+    model = ''
+    try:
+        model = str((_load_runtime_config(store).get('summarizer') or {}).get('model') or '')
+    except Exception:
+        pass
+    import hashlib as _hashlib
+    key = _hashlib.sha1(('%s|%d|%s|%s' % (sid, len(entries),
+                                          str(entries[-1].get('ts') or 0.0), model)).encode('utf-8')).hexdigest()
+    cache_dir = os.path.join(_store_data_dir(store), 'cache', 'overview')
+    cache_path = os.path.join(cache_dir, 'digest-' + key + '.json')
+    digest = None
+    if os.path.exists(cache_path):
+        try:
+            with open(cache_path, 'r', encoding='utf-8') as fh:
+                digest = json.load(fh)
+        except Exception:
+            digest = None
+    if digest is None and mode == 'digest':
+        lines = []
+        for row in entries:
+            try:
+                when = time.strftime('%Y-%m-%d %H:%M', time.localtime(float(row.get('ts') or 0.0)))
+            except Exception:
+                when = '?'
+            lines.append('%s｜%s｜%s' % (when, str(row.get('role') or ''),
+                                         str(row.get('text') or '').replace(chr(10), ' ')))
+        body = chr(10).join(lines)
+        try:
+            summ = summarizer_from_config(store, payload)
+        except Exception as exc:
+            return {'ok': False, 'reason': 'no_summarizer', 'detail': str(exc)[:120],
+                    'timeline': timeline, 'count': len(timeline)}
+        prompt = ('下面是同一段关系的全部记忆原文，按时间顺序（YYYY-MM-DD HH:MM｜角色｜内容）。' + chr(10)
+                  + '请写一份会话总览：1) 主要主题；2) 按时间演变的脉络（哪些结论被推翻、被什么取代）；'
+                  + '3) 最终确定的结论或决定；4) 仍未解决的问题。' + chr(10)
+                  + '只写原文里明确出现的事实，不推测、不评价、不升华；整体不超过 800 字。' + chr(10) + chr(10)
+                  + '原文：' + chr(10) + body)
+        try:
+            text = str(summ(prompt) or '').strip()
+        except Exception as exc:
+            return {'ok': False, 'reason': 'summarizer_failed', 'detail': str(exc)[:120],
+                    'timeline': timeline, 'count': len(timeline)}
+        if not text:
+            return {'ok': False, 'reason': 'empty_summary', 'timeline': timeline, 'count': len(timeline)}
+        digest = {'text': text, 'chars': len(text), 'based_on': len(entries),
+                  'generated_at': time.time()}
+        try:
+            os.makedirs(cache_dir, exist_ok=True)
+            with open(cache_path, 'w', encoding='utf-8') as fh:
+                json.dump(digest, fh, ensure_ascii=False)
+        except Exception:
+            pass
+    stale = bool(digest) and int(digest.get('based_on') or 0) < len(entries)
+    return {'ok': True, 'timeline': timeline, 'count': len(timeline),
+            'digest': digest, 'stale': stale,
+            'cached': bool(digest and int(digest.get('based_on') or 0) == len(entries))}

@@ -18,7 +18,6 @@ from . import channels as _ch
 
 TOP_GLOBAL = 40          # lines above this rank feed the in_top40 tie-breaker
 MODE_MAX = 'max'
-MODE_LSE = 'lse'
 MODE_COUNTRANK = 'countrank'
 
 
@@ -153,18 +152,6 @@ def score_events(grouped, order, scored, rel_cut, mode=MODE_MAX,
             values = [v for v, _r in bucket['rows']]
             bucket['score'] = round(max(values) if values else 0.0, 6)
         return None
-    if mode == MODE_LSE:
-        beta = float(beta_fn()) if callable(beta_fn) else 0.0
-        for key in order:
-            bucket = grouped[key]
-            values = [v for v, _r in bucket['rows']]
-            try:
-                bucket['score'] = round((1.0 / beta)
-                                        * math.log(sum(math.exp(beta * v) for v in values)), 6)
-            except Exception:
-                bucket['score'] = round(max(values) if values else 0.0, 6)
-        return {str(key): [round(float(sv), 4) for sv, _r in grouped[key]['rows']]
-                for key in grouped}
     if mode == MODE_COUNTRANK:
         by_count = sorted(order, key=lambda k: -grouped[k]['relevant'])
         rank_of, last_count, rank = {}, None, 0
