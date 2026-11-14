@@ -709,20 +709,19 @@ body.layout-editing [data-card-id].dragging { outline: 1px dashed var(--orange);
 body[data-tab='settings'] .body {
   max-width: 1720px;
   margin: 0 auto;
-  columns: 3 420px;
-  column-gap: 24px;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(400px, 1fr));
+  gap: 24px;
+  align-items: start;
 }
-/* 多列流式：卡片不被拆开、彼此紧挨着，不留同高空白 */
 body[data-tab='settings'] .card {
-  break-inside: avoid;
-  margin: 0 0 24px;
+  margin: 0;
   min-width: 0;
 }
 /* 宽表格跨满所有列 */
 body[data-tab='settings'] .card-wide,
 body[data-tab='settings'] .card[data-card-id='compaction-archive'] {
-  column-span: all;
-  break-inside: auto;
+  grid-column: 1 / -1;
 }
 /* 字段：标签窄一点，控件拿到剩余宽度（minmax(0,1fr) 才不会被压扁） */
 body[data-tab='settings'] .field-grid { grid-template-columns: 1fr; min-width: 0; }
