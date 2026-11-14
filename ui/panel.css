@@ -771,7 +771,7 @@ body.layout-editing [data-card-id].dragging { outline: 1px dashed var(--orange);
  * 多列就会把放不下的内容挤到右侧新列里，被 overflow 裁掉（之前 1680x800 就是这么丢卡的）。 */
 body[data-tab='settings'] .body {
   display: block;
-  columns: 3 400px;
+  columns: 4 360px;
   column-gap: 24px;
   flex: none;
   height: auto;
@@ -907,3 +907,7 @@ body[data-tab='settings'] .ms-result { font-size: 12.5px; line-height: 1.55; }
 /* 只读状态表（data-list）跟着放大，别在 44 高的控件旁边显得很小 */
 body[data-tab='settings'] .data-list dt { font-size: 12px; }
 body[data-tab='settings'] .data-list dd { font-size: 13px; }
+/* 卡片变窄后：短字段能两列就两列，放不下自动退回一列，控件不被压成 70px */
+body[data-tab='settings'] .field-grid.two { grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); }
+@media (max-width: 1499px) { body[data-tab='settings'] .body { columns: 3 360px; } }
+@media (max-width: 1099px) { body[data-tab='settings'] .body { columns: 2 340px; } }
