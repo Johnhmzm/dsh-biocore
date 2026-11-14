@@ -772,9 +772,12 @@ body.layout-editing [data-card-id].dragging { outline: 1px dashed var(--orange);
  * 前提：容器必须是 block，且高度必须是 auto —— 一旦是定高（flex:1 撑出来的），
  * 多列就会把放不下的内容挤到右侧新列里，被 overflow 裁掉（之前 1680x800 就是这么丢卡的）。 */
 body[data-tab='settings'] .body {
-  display: block;
-  columns: 3 400px;
-  column-gap: 24px;
+  /* 用网格而不是多列：格子按可用宽度自动决定能放几张，永远不会超出右边界。
+   * 多列一旦算宽了就整块溢出，被裁掉（用户在 1680 下看到第三列被切）。 */
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(360px, 1fr));
+  align-items: start;
+  gap: 24px;
   flex: none;
   height: auto;
   min-height: 0;
@@ -792,9 +795,7 @@ body[data-tab='settings'] .body > .stack { display: contents; }
 body[data-tab='settings'] .card {
   height: auto;
   min-width: 0;
-  margin: 0 0 24px;
-  break-inside: avoid;
-  -webkit-column-break-inside: avoid;
+  margin: 0;
 }
 /* 表格类卡片跨满所有列 */
 body[data-tab='settings'] .card-wide { column-span: all; break-inside: auto; }
