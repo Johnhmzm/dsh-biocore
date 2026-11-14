@@ -771,16 +771,16 @@ body.layout-editing [data-card-id].dragging { outline: 1px dashed var(--orange);
  * 多列就会把放不下的内容挤到右侧新列里，被 overflow 裁掉（之前 1680x800 就是这么丢卡的）。 */
 body[data-tab='settings'] .body {
   display: block;
-  columns: 3 400px;
+  columns: 2 480px;
   column-gap: 24px;
   flex: none;
   height: auto;
   min-height: 0;
   overflow: visible;
   width: 100%;
-  max-width: 1720px;
-  margin: 0 auto;
-  padding: 18px 20px 28px;
+  max-width: 1280px;
+  margin: 12px auto 28px;
+  padding: 0;
 }
 /* 定高滚动交给 .main；顶部工具条吸顶，不随页面滚走。 */
 body[data-tab='settings'] .main { overflow-y: auto; }
