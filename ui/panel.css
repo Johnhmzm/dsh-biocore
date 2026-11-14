@@ -706,7 +706,21 @@ body.layout-editing [data-card-id].dragging { outline: 1px dashed var(--orange);
 [data-card-id="memory-settings"] .group-title { margin-top: 14px; }
 
 /* ---- 设置页排版（B1-B8，新作用域，不改看板现有类） ---- */
-body[data-tab='settings'] .body { max-width: 1080px; margin: 0 auto; }
+body[data-tab='settings'] .body {
+  max-width: 1720px;
+  margin: 0 auto;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(420px, 1fr));
+  gap: 24px;
+  align-items: start;
+}
+/* 宽卡片（表格类）跨满整行 */
+body[data-tab='settings'] .card-wide,
+body[data-tab='settings'] .card[data-card-id='compaction-archive'] { grid-column: 1 / -1; }
+/* 卡片内默认单列字段；宽卡片才用两列 */
+body[data-tab='settings'] .field-grid { grid-template-columns: 1fr; }
+body[data-tab='settings'] .card-wide .field-grid,
+body[data-tab='settings'] .card[data-card-id='compaction-archive'] .field-grid { grid-template-columns: 1fr 1fr; }
 body[data-tab='settings'] .card {
   background: var(--panel, #12130f);
   border: 1px solid var(--line, #2a2b22);
