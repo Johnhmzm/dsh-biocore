@@ -2329,6 +2329,24 @@
     loadMemorySettings()
   }
 
+  /* 拆分卡片后：新卡片的保存按钮复用原处理器（点一下 = 保存整组设置） */
+  function bindSplitSaves() {
+    var pairs = [
+      ['rerankSave', 'modelSave'],
+      ['summarizerSave', 'modelSave'],
+      ['msSave2', 'msSave'],
+    ]
+    for (var i = 0; i < pairs.length; i += 1) {
+      var extra = $(pairs[i][0])
+      var primary = $(pairs[i][1])
+      if (!extra || !primary) continue
+      extra.addEventListener('click', function (event) {
+        var target = $(event.currentTarget.getAttribute('data-mirror'))
+        if (target) target.click()
+      })
+      extra.setAttribute('data-mirror', pairs[i][1])
+    }
+  }
   function boot() {
     watchTheme()
     renderVersions()
@@ -2339,6 +2357,7 @@
 
     if (layoutApi && layoutApi.TAB_GROUPS[INITIAL_TAB]) activeTab = INITIAL_TAB
     initLayout()
+    bindSplitSaves()
     bindAdvanced()
     bindPersona()
     loadPersona()

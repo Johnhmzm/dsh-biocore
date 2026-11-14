@@ -816,3 +816,33 @@ body[data-tab='settings'] .ca-table th:nth-child(4) { width: 88px; }
 body[data-tab='settings'] .ca-table td { padding: 3px 4px; font-size: 11px; }
 body[data-tab='settings'] .ca-table th { padding: 4px 4px; }
 body[data-tab='settings'] .ca-table .btn { height: 22px; min-width: 54px; padding: 0 6px; font-size: 10.5px; border-radius: 4px; }
+
+/* ---- 卡内两列：短字段并排（标签 88 + 控件），长值独占一行 ---- */
+body[data-tab='settings'] .field-grid.two { grid-template-columns: repeat(2, minmax(0, 1fr)); column-gap: 16px; }
+body[data-tab='settings'] .field-grid > .field-wide { grid-column: 1 / -1; }
+body[data-tab='settings'] .field-grid.two > .field:not(.field-wide) { grid-template-columns: 88px minmax(0, 1fr); }
+
+/* ---- 卡内分组：组与组之间 1px + 20px，别糊在一起 ---- */
+body[data-tab='settings'] .card > .group-title {
+  margin: 20px 0 8px;
+  padding-top: 18px;
+  border-top: 1px solid var(--line);
+}
+body[data-tab='settings'] .card > .card-head + .group-title {
+  margin-top: 0;
+  padding-top: 0;
+  border-top: 0;
+}
+
+/* ---- 动作区：与内容隔开（1px + 16px） ---- */
+body[data-tab='settings'] .card > .btn-row {
+  margin-top: 18px;
+  padding-top: 16px;
+  border-top: 1px solid var(--line);
+  justify-content: flex-end;
+}
+
+/* ---- 压缩归档：会话列 140 / 操作列 72，按钮 22 高，表体 240 内部滚动 ---- */
+body[data-tab='settings'] .ca-table th:nth-child(1) { width: 140px; }
+body[data-tab='settings'] .ca-table th:nth-child(4) { width: 96px; }
+body[data-tab='settings'] .ca-table th:nth-child(5) { width: 72px; }
