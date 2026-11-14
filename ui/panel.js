@@ -229,13 +229,6 @@
     return '焦虑型'
   }
 
-  function memoryKind(text) {
-    var value = String(text || '')
-    if (/(喜欢|爱|讨厌|偏好|习惯|最怕|想要|想吃)/.test(value)) return '偏好'
-    if (/(答应|约好|说好|明天|后天|记得|见面|一起|会去)/.test(value)) return '约定'
-    return '事实'
-  }
-
   function clockOf(ts) {
     var number = Number(ts)
     if (!Number.isFinite(number) || number <= 0) return DASH
@@ -336,14 +329,28 @@
     setText('interoNote', 'Δ ' + delta + ' · ' + (over ? '张力已进阈值区' : '未触发干预阈值'))
   }
 
+  /** 角色的中文写法：真人用户是"我"，模型是"您"。 */
+  function roleLabel(role) {
+    var value = String(role || '').toLowerCase()
+    if (value === 'user') return '我'
+    if (value === 'assistant') return '您'
+    return DASH
+  }
+
   function memoryRow(item) {
     var tr = document.createElement('tr')
     var time = document.createElement('td')
     time.className = 't num'
     time.textContent = clockOf(item.ts)
-    var kind = document.createElement('td')
-    kind.className = 'tag'
-    kind.textContent = memoryKind(item.text)
+    // 摘要列：库里给的局部摘要；没有就是"未总结"，不猜类型
+    var summary = document.createElement('td')
+    summary.className = 'tag'
+    var summaryText = String(item.summary || '').trim()
+    summary.textContent = summaryText ? summaryText.slice(0, 40) : '未总结'
+    summary.title = summaryText || '这条还没有总结'
+    var role = document.createElement('td')
+    role.className = 'c'
+    role.textContent = roleLabel(item.role)
     var body = document.createElement('td')
     body.className = 'c'
     body.textContent = String(item.text || DASH)
@@ -352,7 +359,8 @@
     weight.className = 'n num'
     weight.textContent = weightOf(item.score)
     tr.appendChild(time)
-    tr.appendChild(kind)
+    tr.appendChild(summary)
+    tr.appendChild(role)
     tr.appendChild(body)
     tr.appendChild(weight)
     return tr
@@ -365,13 +373,36 @@
       var empty = document.createElement('tr')
       empty.className = 'is-empty'
       var cell = document.createElement('td')
-      cell.colSpan = 4
+      cell.colSpan = 5
       cell.textContent = DASH
       empty.appendChild(cell)
       tbody.appendChild(empty)
       return
     }
     for (var i = 0; i < rows.length; i += 1) tbody.appendChild(memoryRow(rows[i] || {}))
+  }
+
+  function mergeLabels(rows, labels) {
+    var out = []
+    var byTs = {}
+    for (var i = 0; i < (labels || []).length; i += 1) {
+      var label = labels[i] || {}
+      byTs[String(Math.round(Number(label.ts) * 1000))] = label
+    }
+    for (var j = 0; j < (rows || []).length; j += 1) {
+      var row = rows[j] || {}
+      var hit = byTs[String(Math.round(Number(row.ts) || 0))]
+      out.push(Object.assign({}, row, hit ? { summary: hit.summary, role: hit.role } : {}))
+    }
+    return out
+  }
+
+  /** 拉一次记忆摘要（面板表格用）；失败就静默，表格显示"未总结"。 */
+  function fetchMemoryLabels() {
+    return msAction('memory_labels', { limit: 60 }).then(function (out) {
+      var body = (out && out.body) || {}
+      return body.ok === true && Array.isArray(body.items) ? body.items : []
+    }).catch(function () { return [] })
   }
 
   function renderMemories(data) {
@@ -388,6 +419,14 @@
     setText('memoryHint', on ? '共 ' + total + ' 条' : DASH)
     fillMemoryBody($('memoryList'), rows.slice(0, LOG_ROWS))
     fillMemoryBody($('memoryListFull'), rows)
+    if (on && rows.length) {
+      fetchMemoryLabels().then(function (labels) {
+        if (!labels.length) return
+        var merged = mergeLabels(rows, labels)
+        fillMemoryBody($('memoryList'), merged.slice(0, LOG_ROWS))
+        fillMemoryBody($('memoryListFull'), merged)
+      })
+    }
   }
 
   function joinRelation(data) {
@@ -2003,6 +2042,7 @@
       msFillSettings(body.settings)
       msFillStatus(body.status)
       bindVectorButtons()
+      bindCompactionArchive()
       void msVectorCheck()
       setText('msStatus', '已载入')
     }).catch(function () { setText('msStatus', '读取失败 连不上宿主') })
@@ -2080,6 +2120,84 @@
       if (button) button.disabled = false
       return result
     })
+  }
+
+  /** 压缩归档：dry-run 拉一次，每行一个"补总结"按钮（点了才 apply）。 */
+  function caRow(row) {
+    var tr = document.createElement('tr')
+    var session = document.createElement('td')
+    session.className = 'c num'
+    session.textContent = String((row && row.session_id) || DASH).slice(0, 18)
+    session.title = String((row && row.session_id) || '')
+    var compactions = document.createElement('td')
+    compactions.className = 'n num'
+    compactions.textContent = String(Number((row && row.compactions) || 0))
+    var pending = document.createElement('td')
+    pending.className = 'n num'
+    pending.textContent = String(Number((row && row.pending) || 0))
+    var status = document.createElement('td')
+    status.className = 'c'
+    var done = Number((row && row.done) || 0)
+    var total = Number((row && row.compactions) || 0)
+    var pend = Number((row && row.pending) || 0)
+    status.textContent = pend === 0 && done >= total ? '已完成'
+      : (done > 0 ? '部分（已处理 ' + done + ' 段）' : '未处理')
+    var action = document.createElement('td')
+    action.className = 'n'
+    var button = document.createElement('button')
+    button.type = 'button'
+    button.className = 'btn'
+    button.textContent = '补总结'
+    button.disabled = pend === 0
+    button.addEventListener('click', function () {
+      button.disabled = true
+      button.textContent = '处理中…'
+      msAction('compaction_backfill', { apply: true, session: String(row.session_id || '') })
+        .then(function () { return loadCompactionArchive() })
+        .catch(function () { button.textContent = '失败'; button.disabled = false })
+    })
+    action.appendChild(button)
+    tr.appendChild(session)
+    tr.appendChild(compactions)
+    tr.appendChild(pending)
+    tr.appendChild(status)
+    tr.appendChild(action)
+    return tr
+  }
+
+  function loadCompactionArchive() {
+    var tbody = $('caList')
+    setText('caStatus', '读取中')
+    return msAction('compaction_backfill', {}).then(function (out) {
+      var body = (out && out.body) || {}
+      if (body.ok !== true) {
+        setText('caStatus', '读取失败 ' + (body.reason || body.code || out.status))
+        return body
+      }
+      var rows = Array.isArray(body.per_session) ? body.per_session : []
+      if (tbody) {
+        tbody.textContent = ''
+        if (!rows.length) {
+          var empty = document.createElement('tr')
+          empty.className = 'is-empty'
+          var cell = document.createElement('td')
+          cell.colSpan = 5
+          cell.textContent = '还没有压缩记录'
+          empty.appendChild(cell)
+          tbody.appendChild(empty)
+        } else {
+          for (var i = 0; i < rows.length; i += 1) tbody.appendChild(caRow(rows[i] || {}))
+        }
+      }
+      setText('caStatus', body.pending ? (body.pending + ' 段待处理') : '全部已处理')
+      return body
+    }).catch(function () { setText('caStatus', '连不上宿主'); return null })
+  }
+
+  function bindCompactionArchive() {
+    var refresh = $('caRefresh')
+    if (refresh) refresh.addEventListener('click', function () { void loadCompactionArchive() })
+    void loadCompactionArchive()
   }
 
   function msCollect() {

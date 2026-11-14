@@ -138,8 +138,8 @@
             <span class="r" id="logMeta">—</span>
           </header>
           <table class="log-table">
-            <thead><tr><th>TIME</th><th>TYPE</th><th>CONTENT</th><th class="ta-r">W</th></tr></thead>
-            <tbody id="memoryList"><tr class="is-empty"><td colspan="4">—</td></tr></tbody>
+            <thead><tr><th>TIME</th><th>摘要</th><th>角色</th><th>CONTENT</th><th class="ta-r">W</th></tr></thead>
+            <tbody id="memoryList"><tr class="is-empty"><td colspan="5">—</td></tr></tbody>
           </table>
         </section>
       </div>
@@ -256,8 +256,8 @@
           <span class="r" id="memoryHint">共 0 条</span>
         </header>
         <table class="log-table">
-          <thead><tr><th>TIME</th><th>TYPE</th><th>CONTENT</th><th class="ta-r">W</th></tr></thead>
-          <tbody id="memoryListFull"><tr class="is-empty"><td colspan="4">—</td></tr></tbody>
+          <thead><tr><th>TIME</th><th>摘要</th><th>角色</th><th>CONTENT</th><th class="ta-r">W</th></tr></thead>
+          <tbody id="memoryListFull"><tr class="is-empty"><td colspan="5">—</td></tr></tbody>
         </table>
       </section>
 
@@ -364,9 +364,9 @@
           </label>
         </div>
         <div class="card-actions">
-          <button id="modelSave" class="primary-button" type="button">保存设置</button>
-          <button id="modelTest" class="ghost-button" type="button">测试 Embedding</button>
-          <button id="rerankTest" class="ghost-button" type="button">测试 Rerank</button>
+          <button id="modelTest" class="btn" type="button">测试 Embedding</button>
+          <button id="rerankTest" class="btn" type="button">测试 Rerank</button>
+          <button id="modelSave" class="btn btn-accent" type="button">保存设置</button>
 <p class="group-title">总结模型</p>
         <div class="field-grid">
           <label class="field field-wide"><span>Base URL</span>
@@ -450,10 +450,10 @@
           <input id="msVectorBackfillOn" type="checkbox" checked>
         </label>
         <p class="ms-row" id="msVectorStatus">缺向量：—</p>
-        <div class="field-grid">
-          <button id="msVectorCheck" type="button" class="btn-ghost">体检</button>
-          <button id="msVectorBackfill" type="button" class="btn-ghost">补齐向量</button>
-          <button id="msUnitsBuild" type="button" class="btn-ghost">补建句子</button>
+        <div class="btn-row">
+          <button id="msVectorCheck" type="button" class="btn">体检</button>
+          <button id="msUnitsBuild" type="button" class="btn">补建句子</button>
+          <button id="msVectorBackfill" type="button" class="btn">补齐向量</button>
         </div>
         <p class="group-title">压缩阈值</p>
         <div class="field-grid">
@@ -464,7 +464,7 @@
             <input id="msCompactWindow" type="number" min="0" max="4000000" step="1000" value="0">
           </label>
         </div>
-        <label class="ms-row"><span>相关门槛</span>
+        <label class="field"><span>相关门槛</span>
           <input id="msRelevantFloor" type="number" min="0" max="1" step="0.05" value="0.2">
         </label>
         <label class="ms-row"><span>干净事件交付</span>
@@ -480,8 +480,8 @@
           <input id="msLongEventChars" type="number" min="200" max="8000" step="100" value="1200">
         </label>
         <div class="card-actions">
-<button id="msSave" class="primary-button" type="button">保存</button>
-          <button id="msReload" class="ghost-button" type="button">重新读取</button>
+<button id="msReload" class="btn" type="button">重新读取</button>
+          <button id="msSave" class="btn btn-accent" type="button">保存设置</button>
         </div>
         <p class="hint" id="msHint">保存后立即生效，不重启；越界值会自动夹紧并提示。</p>
 
@@ -492,6 +492,21 @@
           <div><dt>画像条数</dt><dd class="num" id="msPortrait">—</dd></div>
           <div><dt>访问日志今日</dt><dd class="num" id="msAccessToday">—</dd></div>
         </dl>
+      </section>
+
+      <section class="card" data-card-id="compaction-archive" data-card-label="压缩归档">
+        <header class="card-head">
+          <i class="sq" aria-hidden="true"></i>
+          <b>ARCHIVE</b><span class="zh">/ 压缩归档</span>
+          <span class="r" id="caStatus">读取中</span>
+        </header>
+        <div class="btn-row ca-actions">
+          <button id="caRefresh" class="btn" type="button">刷新</button>
+        </div>
+        <table class="log-table ca-table">
+          <thead><tr><th>会话</th><th>压缩次数</th><th>未成件段数</th><th>上次处理</th><th class="ta-r">操作</th></tr></thead>
+          <tbody id="caList"><tr class="is-empty"><td colspan="5">—</td></tr></tbody>
+        </table>
       </section>
 
       <section class="card" data-card-id="recall" data-card-label="召回注入">

@@ -704,3 +704,42 @@ body.layout-editing [data-card-id].dragging { outline: 1px dashed var(--orange);
 .ms-result { font-variant-numeric: tabular-nums; color: var(--muted, #8a8f98); }
 .ms-result[data-ok="false"] { color: var(--danger, #d9534f); }
 [data-card-id="memory-settings"] .group-title { margin-top: 14px; }
+
+/* ---- 设置页排版（B1-B8，新作用域，不改看板现有类） ---- */
+body[data-tab='settings'] .body { max-width: 1080px; margin: 0 auto; }
+body[data-tab='settings'] .card {
+  background: var(--panel, #12130f);
+  border: 1px solid var(--line, #2a2b22);
+  border-radius: 10px;
+  padding: 16px;
+  margin: 0;
+}
+body[data-tab='settings'] .group-title, body[data-tab='settings'] .za-group-title {
+  color: var(--accent, #d98a2b);
+  font-size: 12px;
+  letter-spacing: .06em;
+  margin: 12px 0 8px;
+}
+body[data-tab='settings'] .field-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+body[data-tab='settings'] .field-grid > .field { display: grid; grid-template-columns: 140px 1fr; align-items: center;
+  column-gap: 12px; row-gap: 12px; }
+body[data-tab='settings'] .field-grid > .field.field-wide { grid-column: 1 / -1; }
+body[data-tab='settings'] .field-grid > .field > span,
+body[data-tab='settings'] .field > span { color: var(--muted, #8b8d7f); font-size: 12px; line-height: 32px; }
+body[data-tab='settings'] .field-grid input, body[data-tab='settings'] .field-grid select,
+body[data-tab='settings'] .field input, body[data-tab='settings'] .field select {
+  height: 32px; min-width: 0; width: 100%; box-sizing: border-box; flex: 1;
+}
+.btn-row { display: flex; justify-content: flex-end; align-items: center; gap: 12px; margin: 24px 0 12px; }
+.btn-row.ca-actions { justify-content: flex-start; margin: 0 0 12px; }
+.btn {
+  height: 32px; min-width: 96px; padding: 0 14px; box-sizing: border-box;
+  border: 1px solid var(--line, #2a2b22); border-radius: 6px;
+  background: #1a1b16; color: var(--text, #d7d8cd); font-size: 12px; cursor: pointer;
+}
+.btn:hover { border-color: var(--accent, #d98a2b); }
+.btn-accent { border-color: var(--accent, #d98a2b); color: #f0c07a; }
+body[data-tab='settings'] .switch-row { display: flex; align-items: center; justify-content: space-between;
+  gap: 12px; line-height: 32px; padding: 0; }
+body[data-tab='settings'] .switch-row input[type='checkbox'] { margin: 0; align-self: center; }
+body[data-tab='settings'] .ms-row { display: flex; align-items: center; gap: 12px; line-height: 32px; margin: 0 0 12px; }

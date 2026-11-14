@@ -1731,6 +1731,144 @@ def _vector_top_up(store, session_id, limit=20):
         return None
 
 
+def memory_labels(store, session_id, limit=50):
+    """面板表格用：每条记忆 + 它的局部摘要（不许猜类型）。
+
+    摘要优先级：该条目所属事件的 segment_summaries（对应那一段）> 事件 overview >
+    "未总结"。role 原样给出，前端单独一列。
+    """
+    root = _store_root(store)
+    if root is None:
+        return {"ok": False, "reason": "no_store"}
+    sid = sanitize_session_id(session_id)
+    entries = _entry_map(store, sid)
+    by_entry_event, events = _events_index(store, sid)
+    rows = []
+    for entry_id, entry in entries.items():
+        event = by_entry_event.get(entry_id) or {}
+        segment = ""
+        try:
+            segments = event.get("segment_summaries") if isinstance(event, dict) else None
+            if isinstance(segments, dict):
+                segment = str(segments.get(entry_id) or "").strip()
+            elif isinstance(segments, list):
+                for item in segments:
+                    if isinstance(item, dict) and str(item.get("entry_id") or "") == entry_id:
+                        segment = str(item.get("summary") or "").strip()
+                        break
+        except Exception:
+            segment = ""
+        overview = str((event or {}).get("overview") or "").strip()
+        summary = segment or overview
+        rows.append({"id": entry_id, "ts": float(entry.get("ts") or 0.0),
+                     "role": str(entry.get("role") or "user"),
+                     "text": str(entry.get("text") or ""),
+                     "event_id": str((event or {}).get("event_id") or ""),
+                     "summary": summary or "未总结",
+                     "summary_source": ("segment" if segment
+                                        else ("event" if overview else "none"))})
+    rows.sort(key=lambda row: -row["ts"])
+    return {"ok": True, "items": rows[:max(1, int(limit or 50))],
+            "events": len(events), "total": len(rows)}
+
+
+def _backfill_state_path(store, session_id):
+    root = _store_root(store)
+    if root is None:
+        return None
+    try:
+        return _sql_store().db_path(root, sanitize_session_id(session_id)).parent /             "compaction_backfill.json"
+    except Exception:
+        return None
+
+
+def _load_backfill_state(store, session_id):
+    path = _backfill_state_path(store, session_id)
+    if path is None or not path.is_file():
+        return {"done": [], "partial": []}
+    try:
+        doc = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return {"done": [], "partial": []}
+    doc = doc if isinstance(doc, dict) else {}
+    return {"done": [str(x) for x in doc.get("done") or []],
+            "partial": [str(x) for x in doc.get("partial") or []]}
+
+
+def _save_backfill_state(store, session_id, state):
+    path = _backfill_state_path(store, session_id)
+    if path is None:
+        return False
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(state, ensure_ascii=False, indent=1), encoding="utf-8")
+        return True
+    except Exception:
+        return False
+
+
+def compaction_backfill(store, session=None, apply=False, limit=20):
+    """按压缩窗口补"沉"：把每个还没处理过的压缩段重新过一遍事件/总结/向量。
+
+    幂等靠 compaction_id 记账（<session>/compaction_backfill.json）；缺省 dry-run。
+    """
+    started = time.time()
+    root = _store_root(store)
+    if root is None:
+        return {"ok": False, "reason": "no_store"}
+    sessions = _sessions_of(store, session)
+    out = {"ok": True, "apply": bool(apply), "sessions": len(sessions),
+           "segments": 0, "pending": 0, "events": 0, "vectors": 0,
+           "skipped": 0, "per_session": [], "elapsed": 0.0}
+    from biocore_memory.event import compaction_record as _cr
+    for sid in sessions:
+        rows = _cr.load(_cr.db_path(root, sid), sid) or []
+        state = _load_backfill_state(store, sid)
+        done = set(state["done"]) | set(state["partial"])
+        pending = [row for row in rows
+                   if str(row.get("compaction_id") or "") not in done][:max(1, int(limit))]
+        entry = {"session_id": sid, "compactions": len(rows),
+                 "pending": len(pending), "done": len(done), "events": 0, "vectors": 0}
+        out["segments"] += len(rows)
+        out["pending"] += len(pending)
+        out["skipped"] += max(0, len(rows) - len(done) - len(pending))
+        if apply and pending:
+            summary_cfg = None
+            try:
+                cfg = _load_runtime_config(store) or {}
+                if isinstance(cfg.get("summarizer"), dict) and cfg["summarizer"].get("model"):
+                    summary_cfg = summarizer_from_config(store)
+            except Exception:
+                summary_cfg = None
+            for row in pending:
+                cid = str(row.get("compaction_id") or "")
+                try:
+                    # 这一段原文的事件化/总结：走既有的"沉"（事件层）入口
+                    block = _event_layer_block(sid, store, "", 0,
+                                               summarizer=summary_cfg,
+                                               event_delivery_clean_on=0) if summary_cfg else None
+                except Exception:
+                    block = None
+                built = 0
+                try:
+                    built = _ensure_units(store, sid, budget_seconds=UNIT_BUILD_SECONDS)
+                except Exception:
+                    built = 0
+                entry["vectors"] += int(built or 0)
+                out["vectors"] += int(built or 0)
+                if block:
+                    entry["events"] += 1
+                    out["events"] += 1
+                    done.add(cid)
+                else:
+                    state["partial"] = sorted(set(state["partial"] + [cid]))
+            state["done"] = sorted(done)
+            _save_backfill_state(store, sid, state)
+        out["per_session"].append(entry)
+    out["elapsed"] = round(time.time() - started, 2)
+    return out
+
+
 def units_build(store, session=None, limit=200, budget_seconds=None):
     """给已有条目补建句子与向量（幂等）：新建多少、跳过多少、耗时。"""
     started = time.time()
@@ -11570,6 +11708,12 @@ def dispatch(action, payload=None):
                 return bad("missing session_id")
             return memory_read(store, session_id, data.get("entry_id", data.get("id")),
                                data.get("event_id"))
+        if action == "memory_labels":
+            return memory_labels(store, data.get("session_id") or data.get("session") or "",
+                                 data.get("limit", 50))
+        if action == "compaction_backfill":
+            return compaction_backfill(store, data.get("session") or data.get("session_id"),
+                                       bool(data.get("apply")), data.get("limit", 20))
         if action == "units_build":
             return units_build(store, data.get("session") or data.get("session_id"),
                                data.get("limit", 200), data.get("budget_seconds"))
