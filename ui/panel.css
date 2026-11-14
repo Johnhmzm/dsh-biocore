@@ -252,12 +252,15 @@ body:not([data-tab="dashboard"]) .body [data-card-id] { flex: none; }
   box-shadow: var(--shadow-card);
 }
 
-/* 看板卡片：普通长方形（不再斜切四角、不再圆角） */
+/* 所有卡片统一成截图那种形制：直角 + 右上/左下两处 14px 斜切 */
+.card,
+.strip {
+  border-radius: 0;
+  clip-path: polygon(0 0, calc(100% - 14px) 0, 100% 14px, 100% 100%, 14px 100%, 0 calc(100% - 14px));
+}
 body[data-tab="dashboard"] .card,
 body[data-tab="dashboard"] .strip {
   padding: 10px 12px;
-  border-radius: 0;
-  clip-path: none;
 }
 .card::before,
 .strip::before {
