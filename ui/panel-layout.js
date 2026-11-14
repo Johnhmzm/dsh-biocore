@@ -45,8 +45,8 @@
 
     { id: 'metrics', tab: 'relation', label: '关系数值', col: 0 },
     { id: 'narrative', tab: 'relation', label: '叙事摘要', col: 0 },
+    { id: 'persona', tab: 'relation', label: '人设', col: 0 },
 
-    { id: 'persona', tab: 'settings', label: '人设', col: 0 },
     { id: 'model', tab: 'settings', label: 'API 设置', col: 0 },
     { id: 'memory-settings', tab: 'settings', label: '记忆设置', col: 0 },
     { id: 'memory-thresholds', tab: 'settings', label: '阈值与状态', col: 0 },
