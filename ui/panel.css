@@ -771,16 +771,16 @@ body.layout-editing [data-card-id].dragging { outline: 1px dashed var(--orange);
  * 多列就会把放不下的内容挤到右侧新列里，被 overflow 裁掉（之前 1680x800 就是这么丢卡的）。 */
 body[data-tab='settings'] .body {
   display: block;
-  columns: 2 480px;
+  columns: 3 400px;
   column-gap: 24px;
   flex: none;
   height: auto;
   min-height: 0;
   overflow: visible;
   width: 100%;
-  max-width: 1280px;
-  margin: 12px auto 28px;
-  padding: 0;
+  max-width: 1720px;
+  margin: 0 auto;
+  padding: 12px 16px 28px;
 }
 /* 定高滚动交给 .main；顶部工具条吸顶，不随页面滚走。 */
 body[data-tab='settings'] .main { overflow-y: auto; }
@@ -860,21 +860,21 @@ body[data-tab='settings'] .card { border-radius: 10px; }
 /* 标题条：15px 主标题 + 13px 中文 + 12px 状态 */
 body[data-tab='settings'] .card-head { gap: 10px; margin-bottom: 14px; }
 body[data-tab='settings'] .card-head .sq { width: 6px; height: 6px; }
-body[data-tab='settings'] .card-head b { font-size: 15px; font-weight: 600; letter-spacing: .02em; color: var(--ink); }
+body[data-tab='settings'] .card-head b { font-size: 14px; font-weight: 600; letter-spacing: .02em; color: var(--ink); }
 body[data-tab='settings'] .card-head .zh { font-size: 13px; letter-spacing: .02em; }
 body[data-tab='settings'] .card-head .r { font-size: 12px; letter-spacing: .04em; }
 
 /* 分组标题 13.5，分隔线保持 */
-body[data-tab='settings'] .group-title { font-size: 13.5px; letter-spacing: .02em; }
+body[data-tab='settings'] .group-title { font-size: 13px; letter-spacing: .02em; }
 
 /* 字段：标签 13.5，控件 44 高 / 14px / 圆角 8 */
 body[data-tab='settings'] .field { grid-template-columns: 112px minmax(0, 1fr); column-gap: 12px; }
 body[data-tab='settings'] .field-grid.two > .field:not(.field-wide) { grid-template-columns: 96px minmax(0, 1fr); }
-body[data-tab='settings'] .field > span:first-child { font-size: 13.5px; line-height: 1.3; }
+body[data-tab='settings'] .field > span:first-child { font-size: 13px; line-height: 1.3; }
 body[data-tab='settings'] .field input,
 body[data-tab='settings'] .field select,
 body[data-tab='settings'] .field textarea {
-  height: 44px;
+  height: 38px;
   font-size: 14px;
   border-radius: 8px;
   padding: 0 12px;
@@ -883,14 +883,14 @@ body[data-tab='settings'] .field textarea { height: auto; min-height: 112px; pad
 body[data-tab='settings'] .field-grid { gap: 12px 18px; }
 
 /* 开关行：44 高，文案跟上字号 */
-body[data-tab='settings'] .switch-row { min-height: 44px; padding: 6px 0; }
+body[data-tab='settings'] .switch-row { min-height: 38px; padding: 6px 0; }
 body[data-tab='settings'] .switch-label { font-size: 13.5px; }
 body[data-tab='settings'] .switch-desc { font-size: 12.5px; }
 
 /* 按钮：44 高 / 14px / 圆角 8 */
 body[data-tab='settings'] .btn {
-  height: 44px;
-  min-width: 104px;
+  height: 38px;
+  min-width: 96px;
   padding: 0 16px;
   border-radius: 8px;
   font-size: 14px;
