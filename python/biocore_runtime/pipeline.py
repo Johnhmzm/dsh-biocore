@@ -2151,17 +2151,92 @@ def _units_with_vectors(store, session_id):
         return []
     finally:
         conn.close()
+    store_api = _sql_store()
+    # 精度要从 meta 的 vector_dim 判：同一份 blob 按 4 字节读会得到 512 个垃圾值
+    try:
+        dim = int((_read_vector_meta(root, sanitize_session_id(session_id)) or {})
+                  .get("vector_dim") or 0)
+    except Exception:
+        dim = 0
     out = []
     for row in rows:
+        blob = row[3]
+        vector = None
         try:
-            vector = _sql_store().unpack_vector(row[3])
+            vector = store_api.unpack_vector(blob, dim) if dim else store_api.unpack_vector(blob)
         except Exception:
             vector = None
+        # 兜底：f16 被当 f32 解出来的向量范数接近 0，换半精度再解一次
+        if blob and (not vector or sum(float(x) * float(x) for x in vector) < 1e-6):
+            try:
+                half = store_api.unpack_vector(blob, len(blob) // 2)
+                if half and sum(float(x) * float(x) for x in half) > 1e-6:
+                    vector = half
+            except Exception:
+                pass
         if not vector:
             continue
         out.append({"id": str(row[0]), "entry_id": str(row[1] or ""),
                     "text": str(row[2] or ""), "vector": [float(x) for x in vector]})
     return out
+
+
+def _search_rerank_config(store):
+    """这个 store 的 rerank 配置（没配/没 key 就是 None）。"""
+    try:
+        _embed_cfg, rerank_cfg = _vector_space_config(store)
+    except Exception:
+        rerank_cfg = None
+    if not isinstance(rerank_cfg, dict):
+        return None
+    if not (rerank_cfg.get("enabled") or rerank_cfg.get("rerank_enabled")):
+        return None
+    if not (rerank_cfg.get("key") or rerank_cfg.get("api_key")):
+        return None
+    return rerank_cfg
+
+
+def _rerank_search_rows(query, rows, cfg, top_k):
+    """把候选句子交给 rerank 重排，取前 top_k。失败就退回原顺序（不报错）。"""
+    model = str((cfg or {}).get("model") or "")
+    if not rows:
+        return [], False, model
+    if not cfg:
+        return rows[:top_k], False, ""
+    if _rerank_mod is None:
+        return rows[:top_k], False, model
+    # rerank.py 收的是它自己的扁平键（rerank_enabled / rerank_base_url / …），
+    # 直接把 resolve_rerank_config 的形状传进去会被判成 disabled。
+    flat = {
+        "rerank_enabled": True,
+        "rerank_base_url": cfg.get("base_url") or "",
+        "rerank_model": cfg.get("model") or "",
+        "rerank_api_key": cfg.get("key") or cfg.get("api_key") or "",
+        "rerank_top_n": max(int(cfg.get("top_n") or 20), len(rows)),
+        "rerank_timeout": cfg.get("timeout") or 8.0,
+        "rerank_scoring": cfg.get("scoring") or "",
+    }
+    try:
+        ranked = _rerank_mod.rerank_documents(
+            query, [str(row.get("sentence") or "") for row in rows], flat) or []
+    except Exception as exc:
+        logger.warning("[search] rerank 失败，退回 embedding 排序：%s: %s",
+                       type(exc).__name__, str(exc)[:120])
+        return rows[:top_k], False, model
+    if not ranked:
+        return rows[:top_k], False, model
+    ordered = []
+    for item in ranked:
+        try:
+            index = int((item or {}).get("index", -1))
+        except Exception:
+            continue
+        if 0 <= index < len(rows) and rows[index] not in ordered:
+            ordered.append(rows[index])
+    for row in rows:
+        if row not in ordered:
+            ordered.append(row)
+    return ordered[:top_k], True, model
 
 
 def _pick_sentence(text, query, want_chars=200):
@@ -2216,6 +2291,13 @@ def memory_search(store, session_id, query, top_k=8, scope="all", include_contex
     entries = _entry_map(store, sid)
     by_entry_event, _events = _events_index(store, sid)
     results = []
+    # 候选池：先宽取（20 或 top_k×4 取大），门槛放宽到 0.10；不足再用字面匹配补
+    pool = max(20, limit * 4)
+    try:
+        floor = float(_recall_param("relevant_floor", store, None) or 0.0)
+    except Exception:
+        floor = 0.0
+    floor = max(0.10, floor)
     units = _units_with_vectors(store, sid)
     if units:
         vectors = _embed_texts(store, [text])
@@ -2223,7 +2305,7 @@ def memory_search(store, session_id, query, top_k=8, scope="all", include_contex
             scored = []
             for unit in units:
                 score = _cosine_list(vectors[0], unit["vector"])
-                if score <= 0:
+                if score < floor:
                     continue
                 scored.append((score, unit))
             scored.sort(key=lambda item: -item[0])
@@ -2239,9 +2321,10 @@ def memory_search(store, session_id, query, top_k=8, scope="all", include_contex
                     "entry_id": unit["entry_id"],
                     "event_id": str((event or {}).get("event_id") or ""),
                     "_ts": float(entry.get("ts") or 0.0),
+                    "match": "embedding",
                 })
-    if not results:
-        # 没有句子向量：条目召回 + 逐句挑最贴的（结构与上面完全一致）
+    if len(results) < pool:
+        # 候选不足：条目召回 + 逐句挑最贴的补进来（标 match='lexical'）
         picked = []
         try:
             _embed_cfg, rerank_cfg = _vector_space_config(store)
@@ -2271,6 +2354,7 @@ def memory_search(store, session_id, query, top_k=8, scope="all", include_contex
                 "entry_id": entry_id,
                 "event_id": str((event or {}).get("event_id") or ""),
                 "_ts": float(entry.get("ts") or 0.0),
+                "match": "lexical",
             })
     # 只留"不在当前上下文里"的：早于压缩边界（或 include_context 全要）
     # 同一件事只占一行：多句命中同一事件就合并（留分最高那句 + hits_in_event）。
@@ -2290,10 +2374,18 @@ def memory_search(store, session_id, query, top_k=8, scope="all", include_contex
         seen_keys[key] = len(merged)
         merged.append(row)
     merged.sort(key=lambda row: row.get("date") or "", reverse=True)
-    out = {"ok": True, "query": text, "count": len(merged), "results": merged[:limit],
-           "layer": "sentence", "context_cutoff": _search_date(cutoff) if cutoff else ""}
+    # 先宽取候选，再 rerank，最后才截 top_k
+    rerank_cfg = _search_rerank_config(store)
+    ranked, reranked, rerank_model = _rerank_search_rows(text, merged, rerank_cfg, limit)
+    out = {"ok": True, "query": text, "count": len(ranked), "results": ranked,
+           "layer": "sentence", "context_cutoff": _search_date(cutoff) if cutoff else "",
+           "candidates": len(merged), "rerank": bool(reranked),
+           "rerank_model": rerank_model}
     if cut_reason == "recent_fallback":
         out["reason"] = "recent_fallback"
+    elif not ranked:
+        # 边界之外确实没东西命中：与"没有压缩记录"区分开
+        out["reason"] = "no_match"
     return out
 
 
@@ -9847,8 +9939,27 @@ def configure(payload):
     data_dir = data.get("data_dir")
     if not data_dir:
         data_dir = _store_data_dir(store) if store else None
-    doc = {key: value for key, value in data.items()
-           if key not in ("store", "data_dir")}
+    incoming = {key: value for key, value in data.items()
+                if key not in ("store", "data_dir")}
+    # 合并写：payload 里没有的块（embedding / rerank / summarizer / persona_text …）
+    # 原样保留。以前是整份覆盖，于是"只改面板字段"的一次保存会把 embedding 抹成空串。
+    existing = {}
+    if data_dir is not None:
+        try:
+            path = Path(data_dir) / CORE_CONFIG_FILE
+            if path.is_file():
+                loaded = json.loads(path.read_text(encoding="utf-8"))
+                if isinstance(loaded, dict):
+                    existing = loaded
+        except Exception:
+            existing = {}
+    doc = dict(existing)
+    for key, value in incoming.items():
+        if key == "recall" and isinstance(value, dict) and isinstance(doc.get("recall"), dict):
+            # recall 段逐键合并：面板只改其中几项，别把其它参数一起冲掉
+            doc["recall"] = dict(doc["recall"], **value)
+        else:
+            doc[key] = value
     doc["updated_at"] = round(time.time(), 3)
     doc = sanitize_config(doc)
     if data_dir is not None:

@@ -129,7 +129,10 @@ def resolve_embedding_config(config=None):
         "provider": str(merged.get("provider") or "openai").strip().lower(),
         "base_url": str(merged.get("base_url") or "").strip().rstrip("/"),
         "model": str(merged.get("model") or "").strip(),
-        "key": str(merged.get("key") or ""),
+        # 面板/桥写的是 api_key（与 summarizer 段一致），这里两种都认：
+        # 只认 key 时，从 profile 的 core_config.json 读出来的 key 是空串 -> http_401
+        "key": str(merged.get("key") or merged.get("api_key")
+                   or merged.get("apiKey") or ""),
         "dim": int(_num(merged.get("dim"), EMBED_DEFAULTS["dim"])),
         "normalize": _as_bool(merged.get("normalize"), False),
         "batch_size": max(1, min(512, int(_num(merged.get("batch_size"), 32)))),
@@ -151,14 +154,19 @@ def resolve_rerank_config(config=None):
     aliases = {"rerank_enabled": "enabled", "rerank_base_url": "base_url",
                "rerank_model": "model", "rerank_api_key": "key",
                "rerank_scoring": "scoring", "rerank_top_n": "top_n",
-               "rerank_timeout": "timeout"}
+               "rerank_timeout": "timeout",
+               # 面板/桥写的是 rerank.api_key（与 embedding 段同一套键名）：
+               # 只认 key 时这里解析出空串 -> rerank 永远"没配"
+               "api_key": "key", "apiKey": "key"}
     for key, value in data.items():
         merged[aliases.get(key, key)] = value
     out = {
         "provider": str(merged.get("provider") or "openai").strip().lower(),
         "base_url": str(merged.get("base_url") or "").strip().rstrip("/"),
         "model": str(merged.get("model") or "").strip(),
-        "key": str(merged.get("key") or ""),
+        # 面板/桥在 rerank 段里写的是 api_key：两种键名都认（与 embedding 段一致）
+        "key": str(merged.get("key") or merged.get("api_key")
+                   or merged.get("apiKey") or ""),
         "scoring": str(merged.get("scoring") or "").strip().lower(),
         "top_n": max(1, min(1000, int(_num(merged.get("top_n"), 20)))),
         "timeout": max(0.1, min(120.0, _num(merged.get("timeout"), 8.0))),

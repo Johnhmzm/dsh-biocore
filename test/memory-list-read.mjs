@@ -37,13 +37,16 @@ try {
     assert.equal(value.count, 2)
     const first = value.results[0]
     assert.deepEqual(Object.keys(first).sort(),
-      ['date', 'entry_id', 'event_id', 'event_summary', 'hits_in_event', 'role', 'sentence'])
+      ['date', 'entry_id', 'event_id', 'event_summary', 'hits_in_event', 'match',
+        'rerank', 'rerank_model', 'role', 'sentence'])
     assert.equal(first.sentence.length, SENTENCE_LIMIT, '句子截到 200 字')
     assert.equal(first.event_summary.length, 40, '事件摘要截到 40 字')
     assert.equal(first.hits_in_event, 3)
     assert.equal(value.results[1].event_id, '', '没有事件时 event_id 为空')
     const schemaKeys = Object.keys(spec.output.schema.properties.results.items.properties).sort()
-    assert.deepEqual(schemaKeys, ['date', 'entry_id', 'event_id', 'event_summary', 'hits_in_event', 'role', 'sentence'])
+    assert.deepEqual(schemaKeys,
+      ['date', 'entry_id', 'event_id', 'event_summary', 'hits_in_event', 'match',
+        'rerank', 'rerank_model', 'role', 'sentence'])
     ok('search：句子级六字段 + hits_in_event，句子 200 字、事件摘要 40 字')
   }
 
