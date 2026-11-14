@@ -8,6 +8,7 @@ Commands:
   default                          -> {"ok": true, "state": <adapter.default_state()>}
   ensure <state_file> [profile]    -> lazy-create / apply persona baselines
   turn <state_file> <text> [profile] -> one_turn + persona application + summary
+  compaction_scan <store> <session_id> [json] -> 会话日志补扫压缩记录（幂等）
   persona_compile <json> <md>      -> compile stdin persona text -> AstrBot profile
 
 Nothing in dsh_adapter is imported for its side effects and no adapter file is
@@ -428,6 +429,24 @@ def _compaction_record(argv):
     return _emit(result)
 
 
+def _compaction_scan(argv):
+    """会话日志补扫：与 compaction_record 同形，判定/幂等/时间窗都在 pipeline 侧。
+
+    事件投递在 web/desktop 拓扑下不可靠，所以补扫读日志；这里只转发，
+    连日志正文都不碰（否则两处各裁一刀，逐字比对就废了）。
+    """
+    store = argv[1] if len(argv) > 1 else ""
+    session_id = argv[2] if len(argv) > 2 else ""
+    payload = _json_arg(argv[3] if len(argv) > 3 else "")
+    payload = dict(payload) if isinstance(payload, dict) else {}
+    payload.setdefault("store", store)
+    payload.setdefault("session_id", session_id)
+    result = _pipeline().dispatch("compaction_scan", payload)
+    if not isinstance(result, dict):
+        return _emit({"ok": False, "reason": "scan_failed"})
+    return _emit(result)
+
+
 def _runtime_prompt(argv):
     payload = _json_arg(argv[1] if len(argv) > 1 else "")
     return _emit(_pipeline().prompt_block(payload))
@@ -503,6 +522,8 @@ def main(argv):
             return _memory_tool(argv)
         if command == "compaction_record" and len(argv) >= 3:
             return _compaction_record(argv)
+        if command == "compaction_scan" and len(argv) >= 3:
+            return _compaction_scan(argv)
         if command == "runtime_prompt" and len(argv) >= 2:
             return _runtime_prompt(argv)
         if command == "runtime_gate" and len(argv) >= 2:

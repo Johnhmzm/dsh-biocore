@@ -1459,6 +1459,42 @@ def record_compaction(session_id, store, payload=None):
     return dict({"ok": True}, **out)
 
 
+def scan_compactions(session_id, store, payload=None):
+    """补扫一条会话日志里的压缩记录：事件投递不可靠时的兜底。
+
+    只做三件事：定位日志（~/.dsh/sessions/*/session-<id>/session.v4.jsonl.zstd）、
+    抽 compaction/summary、按 compaction_id 幂等补录。正文与时间窗的判定仍然只在
+    biocore_memory.event.compaction_record 一处；找不到日志返回 ok=false，不抛。
+
+    落库目录默认与 record/recall 同一套归一（sanitize，保留 session- 前缀）：
+    写进 recall 不读的目录等于没写。要与历史回填对齐时传 store_session_id=<裸 id>。
+    """
+    raw = str(session_id or "").strip()
+    if not raw:
+        return {"ok": False, "reason": "no_session", "scanned": 0,
+                "inserted": 0, "skipped": 0, "log": ""}
+    root = _store_root(store)
+    if root is None:
+        return {"ok": False, "reason": "no_store", "scanned": 0,
+                "inserted": 0, "skipped": 0, "log": ""}
+    data = payload if isinstance(payload, dict) else {}
+    now = data.get("now")
+    stamp = float(now) if isinstance(now, (int, float)) else None
+    override = str(data.get("store_session_id") or "").strip() or None
+    try:
+        from biocore_memory.event import compaction_log as _cl
+        return _cl.scan(raw, root,
+                        root=data.get("sessions_root") or None,
+                        store_session_id_override=override,
+                        now=stamp)
+    except Exception as exc:
+        logger.warning("[compaction] 补扫失败：%s: %s",
+                       type(exc).__name__, str(exc)[:150])
+        return {"ok": False, "reason": "scan_failed", "scanned": 0,
+                "inserted": 0, "skipped": 0, "log": "",
+                "detail": str(exc)[:150]}
+
+
 # ---------------------------------------------------------------- governance
 def _concepts_of(text):
     if _governance is None:
@@ -10327,6 +10363,12 @@ def dispatch(action, payload=None):
             if not session_id:
                 return bad("missing session_id")
             return record_compaction(session_id, store, data)
+        if action == "compaction_scan":
+            # 事件丢了就从会话日志补：同一套幂等落库，只是触发时机不同
+            session_id = str(data.get("session_id") or "").strip()
+            if not session_id:
+                return bad("missing session_id")
+            return scan_compactions(session_id, store, data)
         if action == "configure":
             return configure(data)
         return {"ok": False, "reason": "unknown_action", "action": action}
