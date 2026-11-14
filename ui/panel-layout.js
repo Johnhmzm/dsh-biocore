@@ -249,3 +249,16 @@
   root.BioCorePanelLayout = api
 })(typeof window !== 'undefined' ? window
   : (typeof globalThis !== 'undefined' ? globalThis : this));
+
+
+  // 设置页：点方块展开／收起
+  document.addEventListener('click', function (event) {
+    var target = event.target
+    if (!target.closest) return
+    var head = target.closest('body[data-tab="settings"] .sec .sec-head')
+    if (!head) return
+    var sec = head.closest('.sec')
+    if (!sec) return
+    sec.classList.toggle('open')
+  }, true)
+

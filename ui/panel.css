@@ -994,3 +994,31 @@ body[data-tab='settings'] .field select {
 body[data-tab='settings'] .field textarea { min-height: 96px; }
 body[data-tab='settings'] .field-wide { grid-column: 1 / -1; }
 
+
+
+/* ---- 设置页：小方块索引，点开才展开 --------------------------------------
+ * 收起时是一块方块（只有卡头）；点一下 .open，整张卡占满一行并显示内容。 */
+body[data-tab='settings'] .body {
+  grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
+  gap: 10px;
+}
+body[data-tab='settings'] .sec {
+  height: 108px;
+  padding: 10px 10px 8px;
+  overflow: hidden;
+  cursor: pointer;
+  transition: border-color .15s, background .15s;
+}
+body[data-tab='settings'] .sec:hover { border-color: var(--orange); }
+body[data-tab='settings'] .sec > *:not(.sec-head) { display: none; }
+body[data-tab='settings'] .sec.open {
+  grid-column: 1 / -1;
+  height: auto;
+  overflow: visible;
+  cursor: default;
+}
+body[data-tab='settings'] .sec.open > *:not(.sec-head) { display: revert; }
+body[data-tab='settings'] .sec.open > .btn-row { display: flex; }
+body[data-tab='settings'] .sec.open > .field-grid { display: grid; }
+body[data-tab='settings'] .sec.open > .table-scroll { display: block; }
+
