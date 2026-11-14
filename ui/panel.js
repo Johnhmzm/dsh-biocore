@@ -1827,6 +1827,60 @@
   /* ------------------------------------------------------------------ boot --- */
 
 
+
+  /* --- 会话总览：时间线免费、归纳按需 --- */
+  function ovRenderTimeline(rows) {
+    var box = $('ovList')
+    if (!box) return
+    box.innerHTML = ''
+    var list = rows || []
+    for (var i = list.length - 1; i >= 0 && i >= list.length - 60; i -= 1) {
+      var row = list[i]
+      var line = document.createElement('div')
+      line.textContent = (row.date || '') + ' ' + (row.overview || '')
+      box.appendChild(line)
+    }
+    if (!list.length) box.textContent = '还没有事件'
+  }
+
+  function ovTimeline() {
+    if (!SESSION) { setText('ovStatus', '没有会话'); return }
+    setText('ovStatus', '读取时间线…')
+    msAction('overview', { session_id: SESSION, mode: 'timeline' }).then(function (res) {
+      var body = res.body || {}
+      if (body.ok !== true) { setText('ovStatus', body.reason || '读取失败'); return }
+      ovRenderTimeline(body.timeline)
+      setText('ovStatus', (body.count || 0) + ' 条')
+    }).catch(function () { setText('ovStatus', '读取失败') })
+  }
+
+  function ovBuild() {
+    if (!SESSION) { setText('ovStatus', '没有会话'); return }
+    var button = $('ovBuild')
+    if (button) button.disabled = true
+    setText('ovStatus', '生成中…（约 10 秒）')
+    msAction('overview', { session_id: SESSION, mode: 'digest' }).then(function (res) {
+      var body = res.body || {}
+      if (button) button.disabled = false
+      if (body.ok !== true) { setText('ovStatus', body.reason || '生成失败'); return }
+      ovRenderTimeline(body.timeline)
+      var dg = body.digest || {}
+      var pre = $('ovText')
+      if (pre) pre.textContent = dg.text || ''
+      var when = dg.generated_at ? new Date(dg.generated_at * 1000).toLocaleString() : '—'
+      setText('ovStatus', (dg.chars || 0) + ' 字 · 基于 ' + (dg.based_on || 0) + ' 条 · ' + when
+        + (body.stale ? ' · 已过期' : ''))
+    }).catch(function () {
+      if (button) button.disabled = false
+      setText('ovStatus', '生成失败')
+    })
+  }
+
+  var ovTimelineBtn = $('ovTimeline')
+  if (ovTimelineBtn) ovTimelineBtn.addEventListener('click', ovTimeline)
+  var ovBuildBtn = $('ovBuild')
+  if (ovBuildBtn) ovBuildBtn.addEventListener('click', ovBuild)
+
   /* --- 记忆设置（新增）：只调 /api/biocore/action，白名单内三个动作 ------------- */
 
   var MS_TARGETS = {

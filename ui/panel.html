@@ -554,6 +554,21 @@
         <div class="trace-list" id="traceList"><p class="state-note">还没有记录</p></div>
       </section>
 
+      <section class="card" data-card-id="overview" data-card-label="会话总览">
+        <header class="card-head">
+          <i class="sq" aria-hidden="true"></i>
+          <b>OVERVIEW</b><span class="zh">/ 会话总览</span>
+          <span class="r" id="ovStatus">未生成</span>
+        </header>
+        <p class="group-title">时间线（逐条，免费）</p>
+        <div class="data-list" id="ovList" style="max-height:220px;overflow:auto"></div>
+        <div class="card-actions">
+          <button id="ovTimeline" class="ghost-button" type="button">刷新时间线</button>
+          <button id="ovBuild" class="primary-button" type="button">重算归纳</button>
+        </div>
+        <p class="group-title">归纳（模型写，按需）</p>
+        <pre id="ovText" class="ms-result" style="white-space:pre-wrap;max-height:320px;overflow:auto"></pre>
+      </section>
       <section class="card" data-card-id="runtime" data-card-label="运行时">
         <header class="card-head">
           <i class="sq" aria-hidden="true"></i>

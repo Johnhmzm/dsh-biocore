@@ -53,6 +53,7 @@
     { id: 'expression', tab: 'settings', label: '表达', col: 0 },
     { id: 'advanced', tab: 'settings', label: '维护', col: 0 },
 
+    { id: 'overview', tab: 'tools', label: '会话总览', col: 0 },
     { id: 'trace', tab: 'tools', label: '这一轮为什么', col: 0 },
     { id: 'runtime', tab: 'tools', label: '运行时', col: 0 },
     { id: 'diagnostics', tab: 'tools', label: '诊断', col: 0 },
