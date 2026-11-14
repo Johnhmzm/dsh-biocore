@@ -880,13 +880,14 @@ body[data-tab='settings'] .btn {
   font-size: 10.5px;
   letter-spacing: .02em;
   border-radius: 4px;
-  border: 1px solid var(--line);
-  background: #1b1d20;
-  color: var(--ink);
+  /* 用主题变量，别写死深色底——浅色主题下写死就会变成"黑方块，字看不见" */
+  border: 1px solid var(--line2);
+  background: var(--panel2);
+  color: var(--ink2);
   cursor: pointer;
 }
-body[data-tab='settings'] .btn:hover { border-color: var(--orange); color: #f0c07a; }
-body[data-tab='settings'] .btn-accent { border-color: var(--orange); color: #f0c07a; }
+body[data-tab='settings'] .btn:hover { border-color: var(--orange); color: var(--ink); }
+body[data-tab='settings'] .btn-accent { border-color: var(--orange); color: var(--orange); background: transparent; }
 body[data-tab='settings'] .btn-sm { height: 22px; min-width: 36px; padding: 0 6px; font-size: 10px; border-radius: 4px; }
 
 body[data-tab='settings'] .hint,
