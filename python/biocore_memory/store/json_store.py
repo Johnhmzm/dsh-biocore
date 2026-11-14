@@ -80,7 +80,11 @@ class MemoryStore:
     def save(self, path=None):
         target = Path(path) if path else self.path
         if target is None:
-            raise ValueError("store has no path")
+            # 只读视图（pipeline 的 _inject_engine 用 doc 造的就是它）：没有位置可写，
+            # 不落盘也不算失败。以前这里抛 ValueError，召回在"需要写回一次"的库上
+            # 直接炸掉（实测：store has no path）。
+            self._dirty = 0
+            return None
         target.parent.mkdir(parents=True, exist_ok=True)
         tmp = target.with_suffix(target.suffix + ".tmp")
         tmp.write_text(json.dumps(self.doc, ensure_ascii=False, indent=1),

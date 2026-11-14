@@ -1853,6 +1853,144 @@ def vectors_backfill(store, session=None, limit=200):
     return out
 
 
+def _search_date(stamp):
+    """搜索结果的日期列：本地 'YYYY-MM-DD HH:MM'；拿不到就空串。"""
+    try:
+        value = float(stamp)
+    except Exception:
+        return ''
+    if value <= 0:
+        return ''
+    try:
+        return time.strftime('%Y-%m-%d %H:%M', time.localtime(value))
+    except Exception:
+        return ''
+
+
+def _bigrams(text):
+    """字符二元组：中文没有空格，用二元组当"词"做兜底匹配。"""
+    cleaned = re.sub(r'\s+', '', str(text or ''))
+    return {cleaned[index:index + 2] for index in range(max(0, len(cleaned) - 1))}
+
+
+def _lexical_rows(store, session_id, query, limit):
+    """召回没给结果时的兜底：按字符二元组重合排，重合相同看时间（新在前）。
+
+    只在 engine.recall 一条都没返回时用（老库没有向量、或查询与条目没有语义命中），
+    仍然是 0 次模型调用；它与召回同序输出，工具结果不因缺向量而空手。
+    """
+    try:
+        entries = _visible(_scoped_load(store, session_id, None).get("entries"))
+    except Exception:
+        return []
+    wanted = _bigrams(query)
+    if not entries or not wanted:
+        return []
+    scored = []
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        overlap = len(wanted & _bigrams(entry.get('text')))
+        if overlap <= 0:
+            continue
+        scored.append((overlap, float(entry.get('ts') or 0.0), entry))
+    scored.sort(key=lambda item: (-item[0], -item[1]))
+    return [entry for _score, _ts, entry in scored[:max(1, int(limit))]]
+
+
+def _search_compactions(store, session_id, query, top_k):
+    """压缩记录按向量直配：query 向量 vs compactions.vector（没有向量就跳过）。"""
+    root = _store_root(store)
+    if root is None:
+        return []
+    sid = sanitize_session_id(session_id)
+    try:
+        from biocore_memory.event import compaction_record as _cr
+        rows = [row for row in _cr.with_vectors(_cr.db_path(root, sid), sid)
+                if str(row.get('text') or '').strip()]
+    except Exception:
+        return []
+    if not rows:
+        return []
+    vectors = _embed_texts(store, [query])
+    if not vectors:
+        return []
+    scored = []
+    for row in rows:
+        score = _cosine_list(vectors[0], row.get('vector') or [])
+        if score <= 0:
+            continue
+        scored.append((score, row))
+    scored.sort(key=lambda item: -item[0])
+    out = []
+    for score, row in scored[:top_k]:
+        out.append({'date': _search_date(row.get('window_end')), 'role': 'compaction',
+                    'text': str(row.get('text') or '')[:400], 'kind': 'compaction',
+                    'ts': float(row.get('window_end') or 0.0)})
+    return out
+
+
+def memory_search(store, session_id, query, top_k=8, scope='all'):
+    """模型可见的记忆检索：给出日期、角色与原文（截断 400 字）。
+
+    排序复用注入那条路（engine.recall + rerank + 句子重排），压缩记录走向量直配；
+    两个来源合并后按时间新在前。0 次 chat 调用（最多一次 embedding）。
+    """
+    root = _store_root(store)
+    if root is None:
+        return {"ok": False, "reason": "no_store"}
+    sid = sanitize_session_id(session_id)
+    text = clean_text(query, 2000)
+    if not text:
+        return {"ok": False, "reason": "query_required"}
+    try:
+        limit = int(top_k)
+    except Exception:
+        limit = 8
+    limit = max(1, min(20, limit))
+    scope = str(scope or 'all').strip().lower()
+    if scope not in ('all', 'text', 'compaction'):
+        scope = 'all'
+
+    results = []
+    if scope in ('all', 'text'):
+        try:
+            _embed_cfg, rerank_cfg = _vector_space_config(store)
+        except Exception:
+            rerank_cfg = None
+        picked = []
+        try:
+            # budget 是 token 预算，不是条数：给足（否则短条数会被预算剪空），
+            # 真正的条数在合并之后按 limit 截断。
+            picked = _query_entries(store, sid, text, max(20000, limit * 2000),
+                                    rerank_cfg) or []
+        except Exception as exc:
+            logger.warning("[search] 条目检索失败：%s: %s", type(exc).__name__, str(exc)[:120])
+            picked = []
+        if not picked:
+            # 召回空手（老库没向量 / 查询与条目没有语义命中 / engine 写路径报错）：
+            # 用字符二元组兜底，工具永远不因缺向量而空手。
+            picked = _lexical_rows(store, sid, text, limit)
+        for entry in picked[:max(limit * 4, limit)]:
+            if not isinstance(entry, dict):
+                continue
+            results.append({'date': _search_date(entry.get('ts')),
+                            'role': str(entry.get('role') or ''),
+                            'text': str(entry.get('text') or '')[:400],
+                            'kind': 'entry',
+                            'ts': float(entry.get('ts') or 0.0)})
+    if scope in ('all', 'compaction'):
+        results.extend(_search_compactions(store, sid, text, limit))
+
+    # 新在前：同一个日期粒度下 kind 不重要，稳定排序靠 ts
+    results.sort(key=lambda row: -(row.get('ts') or 0.0))
+    results = results[:limit]
+    for row in results:
+        row.pop('ts', None)
+    return {"ok": True, "query": text, "scope": scope, "count": len(results),
+            "results": results}
+
+
 # ---------------------------------------------------------------- governance
 def _concepts_of(text):
     if _governance is None:
@@ -10771,6 +10909,13 @@ def dispatch(action, payload=None):
             if not session_id:
                 return bad("missing session_id")
             return record_compaction(session_id, store, data)
+        if action == "memory_search":
+            session_id = str(data.get("session_id") or "").strip()
+            if not session_id:
+                return bad("missing session_id")
+            return memory_search(store, session_id, data.get("query"),
+                                 data.get("top_k", data.get("limit", 8)),
+                                 data.get("scope") or "all")
         if action == "vectors_check":
             return vectors_check(store, data.get("session") or data.get("session_id"))
         if action == "vectors_backfill":

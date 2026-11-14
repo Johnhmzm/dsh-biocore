@@ -10,6 +10,7 @@ Commands:
   turn <state_file> <text> [profile] -> one_turn + persona application + summary
   compaction_scan <store> <session_id> [json] -> 会话日志补扫压缩记录（幂等）
   compaction_index <store> <session_id> [json] -> 压缩目录（只读、0 次模型调用）
+  memory_search <store> <session_id> [json] -> 模型可见的记忆检索（0 次 chat 调用）
   persona_compile <json> <md>      -> compile stdin persona text -> AstrBot profile
 
 Nothing in dsh_adapter is imported for its side effects and no adapter file is
@@ -448,6 +449,20 @@ def _compaction_scan(argv):
     return _emit(result)
 
 
+def _memory_search(argv):
+    """模型可见的记忆检索：检索/排序全在 pipeline，Node 只搬运 JSON。"""
+    store = argv[1] if len(argv) > 1 else ""
+    session_id = argv[2] if len(argv) > 2 else ""
+    payload = _json_arg(argv[3] if len(argv) > 3 else "")
+    payload = dict(payload) if isinstance(payload, dict) else {}
+    payload.setdefault("store", store)
+    payload.setdefault("session_id", session_id)
+    result = _pipeline().dispatch("memory_search", payload)
+    if not isinstance(result, dict):
+        return _emit({"ok": False, "reason": "search_failed"})
+    return _emit(result)
+
+
 def _compaction_index(argv):
     """压缩目录：把记忆库里已有的事件摘要拼成一行一件的文本。
 
@@ -545,6 +560,8 @@ def main(argv):
             return _compaction_scan(argv)
         if command == "compaction_index" and len(argv) >= 3:
             return _compaction_index(argv)
+        if command == "memory_search" and len(argv) >= 3:
+            return _memory_search(argv)
         if command == "runtime_prompt" and len(argv) >= 2:
             return _runtime_prompt(argv)
         if command == "runtime_gate" and len(argv) >= 2:
