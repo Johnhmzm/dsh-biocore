@@ -1449,14 +1449,29 @@ def record_compaction(session_id, store, payload=None):
     data = payload if isinstance(payload, dict) else {}
     now = data.get("now")
     stamp = float(now) if isinstance(now, (int, float)) else time.time()
+    # 摘要本身也带向量：压缩内容才能"自己被召回"（条目命中不到时按相似度直配）
+    payload = dict(data)
+    if payload.get("vector") in (None, "", []):
+        try:
+            text = str(payload.get("text") or "").strip()
+            vectors = _embed_texts(root, [text]) if text else []
+            if vectors:
+                payload["vector"] = vectors[0]
+        except Exception:
+            payload["vector"] = None
     try:
         from biocore_memory.event import compaction_record as _cr
-        out = _cr.record(_cr.db_path(root, sid), sid, data, now=stamp)
+        out = _cr.record(_cr.db_path(root, sid), sid, payload, now=stamp)
     except Exception as exc:
         logger.warning("[compaction] 写入失败：%s: %s",
                        type(exc).__name__, str(exc)[:150])
         return {"ok": False, "reason": "record_failed",
                 "detail": str(exc)[:150]}
+    try:
+        if int(_recall_param("vector_backfill_on", store, payload) or 0):
+            _vector_top_up(root, sid, limit=20)
+    except Exception:
+        pass
     return dict({"ok": True}, **out)
 
 
@@ -1626,6 +1641,216 @@ def compaction_index(session_id, store, payload=None):
     return {"ok": True, "text": text, "source": source, "lines": len(lines),
             "messages": messages, "span": {"start_ts": start, "end_ts": end},
             "provider": COMPACTION_INDEX_SOURCE, "session_id": sid}
+
+
+_EMBED_LOG_LIMIT = {'warned': False}
+
+
+def _embedding_provider(store):
+    """这个 store 配置的 embedding provider；没配置就 None（不猜默认模型）。"""
+    try:
+        cfg, _rerank = _vector_space_config(store)
+    except Exception:
+        cfg = None
+    if not cfg or not str(cfg.get('model') or '').strip():
+        return None, None
+    try:
+        from biocore_memory.recall import providers as _prov
+        return _prov.load_embedding_provider(cfg), cfg
+    except Exception as exc:
+        if not _EMBED_LOG_LIMIT['warned']:
+            _EMBED_LOG_LIMIT['warned'] = True
+            logger.warning("[vector] embedding 不可用：%s: %s", type(exc).__name__, str(exc)[:120])
+        return None, cfg
+
+
+def _embed_texts(store, texts):
+    """批量算向量；失败返回 []（调用方自己决定降级）。"""
+    items = [str(t or '') for t in (texts or [])]
+    if not items:
+        return []
+    provider, _cfg = _embedding_provider(store)
+    if provider is None:
+        return []
+    try:
+        return provider.embed(items) or []
+    except Exception as exc:
+        logger.debug("[vector] embed 失败：%s: %s", type(exc).__name__, str(exc)[:120])
+        return []
+
+
+def _sessions_of(store, session=None):
+    """要处理的会话：给了 session 就只处理它，否则扫 sessions/ 下的全部目录。"""
+    root = _store_root(store)
+    if root is None:
+        return []
+    if session:
+        return [sanitize_session_id(session)]
+    sessions = root / 'sessions'
+    if not sessions.is_dir():
+        return []
+    return sorted(path.name for path in sessions.iterdir()
+                  if path.is_dir() and (path / 'memory.db').is_file())
+
+
+def _missing_rows(store, session_id, table, limit=None):
+    """{table} 里 vector IS NULL 的行：[{id, text}]（只读）。"""
+    root = _store_root(store)
+    if root is None:
+        return []
+    try:
+        path = _sql_store().db_path(root, session_id)
+    except Exception:
+        return []
+    if not path.is_file():
+        return []
+    try:
+        conn = sqlite3.connect(path.as_uri() + '?mode=ro', uri=True, timeout=5.0)
+    except Exception:
+        return []
+    try:
+        sql = 'SELECT id, text FROM %s WHERE vector IS NULL' % table
+        args = []
+        if limit:
+            sql += ' LIMIT ?'
+            args.append(int(limit))
+        rows = conn.execute(sql, tuple(args)).fetchall()
+        return [{'id': str(row[0]), 'text': str(row[1] or '')} for row in rows]
+    except Exception:
+        return []
+    finally:
+        conn.close()
+
+
+def _vector_top_up(store, session_id, limit=20):
+    """就近补一小批缺失向量（单会话、限量、静默）。给 turn_end / 压缩写入用。"""
+    try:
+        return vectors_backfill(store, session_id, limit=limit)
+    except Exception as exc:
+        logger.debug("[vector] 兜底补齐失败：%s: %s", type(exc).__name__, str(exc)[:120])
+        return None
+
+
+def vectors_check(store, session=None):
+    """体检：三个表各有多少行缺向量（只读，不调模型、不调 embedding）。"""
+    root = _store_root(store)
+    if root is None:
+        return {"ok": False, "reason": "no_store"}
+    sessions = _sessions_of(store, session)
+    result = {"ok": True, "sessions": len(sessions), "entries_missing": 0,
+              "units_missing": 0, "compactions_missing": 0, "per_session": []}
+    from biocore_memory.event import compaction_record as _cr
+    for sid in sessions:
+        entries = len(_missing_rows(store, sid, 'entries'))
+        units = len(_missing_rows(store, sid, 'units'))
+        compactions = _cr.missing_vectors(_cr.db_path(root, sid), sid)
+        if entries or units or compactions:
+            result["per_session"].append({"session_id": sid, "entries_missing": entries,
+                                          "units_missing": units,
+                                          "compactions_missing": compactions})
+        result["entries_missing"] += entries
+        result["units_missing"] += units
+        result["compactions_missing"] += compactions
+    result["total_missing"] = (result["entries_missing"] + result["units_missing"]
+                               + result["compactions_missing"])
+    return result
+
+
+def vectors_backfill(store, session=None, limit=200):
+    """补齐缺失向量：entries / units / compactions 都补；幂等、可反复跑。
+
+    只调 embedding（不调 chat）。每批最多 limit 行，超出留给下一次——这样它既能在
+    面板里"一键补齐"，也能在 turn_end 后做一次很小的兜底。
+    """
+    started = time.time()
+    root = _store_root(store)
+    if root is None:
+        return {"ok": False, "reason": "no_store"}
+    sessions = _sessions_of(store, session)
+    budget = max(1, int(limit or 200))
+    out = {"ok": True, "entries": 0, "units": 0, "compactions": 0,
+           "skipped": 0, "sessions": len(sessions), "embed_model": ""}
+    store_api = _sql_store()
+    precision = getattr(store_api, 'precision_of', lambda _root: 'float32')(root)
+    provider, cfg = _embedding_provider(store)
+    out["embed_model"] = str((cfg or {}).get('model') or '')
+    if provider is None:
+        return dict(out, ok=False, reason="no_embedding_provider")
+    from biocore_memory.event import compaction_record as _cr
+
+    def embed_batch(texts):
+        try:
+            return provider.embed(list(texts)) or []
+        except Exception:
+            return []
+
+    for sid in sessions:
+        # ---- entries
+        rows = _missing_rows(store, sid, 'entries', limit=budget)
+        if rows:
+            vectors = embed_batch([row['text'] for row in rows])
+            if len(vectors) == len(rows):
+                path = store_api.db_path(root, sid)
+                conn = store_api.connect(root, sid)
+                try:
+                    for row, vector in zip(rows, vectors):
+                        if not vector:
+                            continue
+                        blob = store_api.pack_vector(vector, precision)
+                        if not blob:
+                            continue
+                        conn.execute('UPDATE entries SET vector=? WHERE id=?',
+                                     (blob, row['id']))
+                        out["entries"] += 1
+                    conn.commit()
+                    store_api._remember_vector_dim(conn, len(vectors[0]) if vectors else 0)
+                    conn.commit()
+                except Exception as exc:
+                    logger.debug("[vector] entries 写回失败：%s", str(exc)[:120])
+                finally:
+                    conn.close()
+        # ---- units
+        rows = _missing_rows(store, sid, 'units', limit=budget)
+        if rows:
+            vectors = embed_batch([row['text'] for row in rows])
+            if len(vectors) == len(rows):
+                conn = store_api.connect(root, sid)
+                try:
+                    for row, vector in zip(rows, vectors):
+                        if not vector:
+                            continue
+                        blob = store_api.pack_vector(vector, precision)
+                        if not blob:
+                            continue
+                        conn.execute('UPDATE units SET vector=? WHERE id=?',
+                                     (blob, row['id']))
+                        out["units"] += 1
+                    conn.commit()
+                except Exception as exc:
+                    logger.debug("[vector] units 写回失败：%s", str(exc)[:120])
+                finally:
+                    conn.close()
+        # ---- compactions
+        db = _cr.db_path(root, sid)
+        rows = _cr.missing_rows(db, sid, limit=budget)
+        if rows:
+            vectors = embed_batch([row['text'] for row in rows])
+            if len(vectors) == len(rows):
+                for row, vector in zip(rows, vectors):
+                    if not vector:
+                        continue
+                    if _cr.set_vector(db, row['id'], vector):
+                        out["compactions"] += 1
+    try:
+        from biocore_memory.config import recall_params as _rp
+        if int(_rp.get('vector_backfill_on') or 0):
+            pass
+    except Exception:
+        pass
+    out["elapsed"] = round(time.time() - started, 2)
+    out["skipped"] = max(0, out["sessions"] * budget - (out["entries"] + out["units"]
+                                                        + out["compactions"]))
+    return out
 
 
 # ---------------------------------------------------------------- governance
@@ -5667,6 +5892,44 @@ def _hit_stamps(store, session_id, ids):
     return out
 
 
+def _compaction_vector_match(store, session_id, payload, db, sid):
+    """压缩内容自己的相似度匹配：query 向量 vs compactions.vector。
+
+    只在"条目窗口一条都没命中"时兜底：压缩记录是历史原文的派生，命中就该附上，
+    门槛与事件交付同一个 recall.relevant_floor。没有向量/没有 query 就返回 None。
+    """
+    data = payload if isinstance(payload, dict) else {}
+    query = str(data.get("query") or "").strip()
+    if not query:
+        return None
+    try:
+        floor = float(_recall_param("relevant_floor", store, payload) or 0.20)
+    except Exception:
+        floor = 0.20
+    try:
+        from biocore_memory.event import compaction_record as _cr
+        rows = [row for row in _cr.with_vectors(db, sid) if row.get("text")]
+    except Exception:
+        rows = []
+    if not rows:
+        return None
+    vectors = _embed_texts(store, [query])
+    if not vectors:
+        return None
+    scored = []
+    for row in rows:
+        score = _cosine_list(vectors[0], row.get("vector") or [])
+        scored.append((score, row))
+    scored.sort(key=lambda item: -item[0])
+    score, row = scored[0]
+    if score < floor:
+        return None
+    row = dict(row)
+    row["score"] = round(float(score), 4)
+    row["by"] = "vector"
+    return row
+
+
 def _compaction_attach(store, session_id, stamps, payload=None):
     """命中的 ts 落在哪条压缩记录的时间窗里，就把那条摘要附一次。
 
@@ -5690,8 +5953,8 @@ def _compaction_attach(store, session_id, stamps, payload=None):
         logger.warning("[compaction] 读失败，本轮不挂：%s: %s",
                        type(exc).__name__, str(exc)[:120])
         return None
-    if not usable:
-        return None
+    # 没有可用窗口不算失败：还有"压缩内容自己"的向量直配（见下）
+    usable = usable or []
     picked, seen = [], set()
     for stamp in stamps:
         for row in usable:
@@ -5702,6 +5965,11 @@ def _compaction_attach(store, session_id, stamps, payload=None):
                 continue
             seen.add(key)
             picked.append(row)
+    if not picked:
+        # 条目一条都没落进窗口：让"压缩内容自己"参与匹配（它带向量时才有）
+        extra = _compaction_vector_match(store, session_id, payload, db, sid)
+        if extra is not None:
+            picked = [extra]
     if not picked:
         return None
     picked.sort(key=lambda row: float(row.get("window_end") or 0.0))
@@ -10010,6 +10278,13 @@ def dispatch(action, payload=None):
                                               store=store)
             timescale_view = _timescale_tick(store, session_id, data,
                                              now=time.time())
+            # 向量兜底：这一轮写进来的条目如果还算不出向量（embedding 暂不可用、
+            # 或者老库有缺口），就近补一小批；失败静默，绝不影响回复。
+            try:
+                if int(_recall_param("vector_backfill_on", store, data) or 0):
+                    _vector_top_up(store, session_id, limit=20)
+            except Exception:
+                pass
             return {
                 "ok": True,
                 "gate": {"blocked": gate["blocked"], "action": gate["action"],
@@ -10496,6 +10771,12 @@ def dispatch(action, payload=None):
             if not session_id:
                 return bad("missing session_id")
             return record_compaction(session_id, store, data)
+        if action == "vectors_check":
+            return vectors_check(store, data.get("session") or data.get("session_id"))
+        if action == "vectors_backfill":
+            limit = _int_param(data.get("limit"), 200, 1, 5000)
+            return vectors_backfill(store, data.get("session") or data.get("session_id"),
+                                    limit)
         if action == "compaction_index":
             # 压缩产物：库内已有摘要拼成目录（只读、不调模型）
             session_id = str(data.get("session_id") or "").strip()

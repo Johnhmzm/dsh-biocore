@@ -54,6 +54,9 @@ SPECS = {
     'compaction_on': (1, 0, 1),
     # 一次挂回最多附多少字的压缩摘要（超了按行边界裁，不切句子）
     'compaction_chars': (3000, 200, 12000),
+    # 向量体检+补齐：缺向量的行（entries/units/compactions）在 turn_end 与压缩写入
+    # 之后各做一次少量补齐（最多 20 条）。缺省开；关掉只是减少 embedding 调用。
+    'vector_backfill_on': (1, 0, 1),
 }
 
 # Deliberately NOT consumed yet (2026-11-13 decision, option b): neither value
@@ -84,6 +87,7 @@ ENV_NAMES = {
     'long_event_chars': 'BIOCORE_LONG_EVENT_CHARS',
     'compaction_on': 'BIOCORE_COMPACTION_ON',
     'compaction_chars': 'BIOCORE_COMPACTION_CHARS',
+    'vector_backfill_on': 'BIOCORE_VECTOR_BACKFILL',
 }
 
 

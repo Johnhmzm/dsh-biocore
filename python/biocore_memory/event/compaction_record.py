@@ -26,6 +26,7 @@ from __future__ import annotations
 import json
 import logging
 import sqlite3
+import struct
 import time
 from pathlib import Path
 
@@ -47,6 +48,7 @@ DDL = (
     ' model TEXT,'
     ' text TEXT,'
     ' usage_json TEXT,'
+    ' vector BLOB,'
     ' window_start REAL,'
     ' window_end REAL,'
     ' created_at REAL,'
@@ -58,6 +60,8 @@ DDL = (
 COLUMNS = ('id', 'session_id', 'compaction_id', 'range_start', 'range_end',
            'shadowed_count', 'shadowed_tokens', 'provider', 'model', 'text',
            'usage_json', 'window_start', 'window_end', 'created_at')
+# vector 是后加的列：老库在第一次写入时 ALTER 补上（NULL 表示还没算）。
+VECTOR_COLUMN = 'vector'
 
 # DSH 的 event.time 是毫秒；条目 ts / time.time() 是秒。超过这个量级一律按毫秒收。
 _MS_FLOOR = 1e11
@@ -105,11 +109,42 @@ def summary_text(blocks):
     return '\n'.join(parts)
 
 
+def _ensure_vector_column(conn):
+    """老库补 vector 列：只 ADD COLUMN，不动已有行（已有行保持 NULL）。"""
+    try:
+        cols = {row[1] for row in conn.execute('PRAGMA table_info(%s)' % TABLE).fetchall()}
+        if VECTOR_COLUMN not in cols:
+            conn.execute('ALTER TABLE %s ADD COLUMN %s BLOB' % (TABLE, VECTOR_COLUMN))
+    except Exception as exc:
+        logger.debug('[compaction] 补 vector 列失败：%s: %s', type(exc).__name__, str(exc)[:120])
+
+
 def _connect(path):
     conn = sqlite3.connect(str(path))
     for ddl in DDL:
         conn.execute(ddl)
+    _ensure_vector_column(conn)
     return conn
+
+
+def _pack(vector):
+    """向量 -> BLOB（与 entries 同一套 float32 打包，读的时候按长度判精度）。"""
+    if not vector:
+        return None
+    try:
+        return struct.pack('<%df' % len(vector), *[float(x) for x in vector])
+    except Exception:
+        return None
+
+
+def unpack(blob):
+    """BLOB -> float 列表；与 sql_store.unpack_vector 同义（这里只读压缩记录）。"""
+    if not blob:
+        return []
+    try:
+        return list(struct.unpack('<%df' % (len(blob) // 4), blob))
+    except Exception:
+        return []
 
 
 # 下界往前收一毫秒：窗口的左端是严格大于，不复位这一毫秒的话"会话第一条消息"
@@ -193,6 +228,7 @@ def _normalise(payload):
         'text': '' if text is None else str(text),
         'usage_json': usage_json,
         'covered_at': _stamp(pick('covered_at', 'time', 'ts')),
+        'vector': pick('vector'),
     }
 
 
@@ -222,12 +258,12 @@ def record(db_path, session_id, payload=None, now=None):
             'INSERT OR IGNORE INTO %s'
             ' (session_id, compaction_id, range_start, range_end, shadowed_count,'
             '  shadowed_tokens, provider, model, text, usage_json,'
-            '  window_start, window_end, created_at)'
-            ' VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)' % TABLE,
+            '  window_start, window_end, created_at, vector)'
+            ' VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)' % TABLE,
             (session_id, row['compaction_id'], row['range_start'], row['range_end'],
              row['shadowed_count'], row['shadowed_tokens'], row['provider'],
              row['model'], row['text'], row['usage_json'],
-             window_start, window_end, stamp))
+             window_start, window_end, stamp, _pack(row.get('vector'))))
         conn.commit()
         inserted = 1 if cur.rowcount > 0 else 0
         new_id = cur.lastrowid if inserted else None
@@ -268,6 +304,119 @@ def load(db_path, session_id, limit=None):
         return []
     finally:
         conn.close()
+
+
+def missing_vectors(db_path, session_id):
+    """这个会话里还没有向量的压缩记录数（只读；表不存在就是 0）。"""
+    path = Path(str(db_path))
+    if not path.exists():
+        return 0
+    try:
+        conn = sqlite3.connect(str(path))
+    except Exception:
+        return 0
+    try:
+        # 老库还没有 vector 列时，所有行都算"缺向量"
+        cols = {row[1] for row in conn.execute('PRAGMA table_info(%s)' % TABLE).fetchall()}
+        if VECTOR_COLUMN not in cols:
+            row = conn.execute('SELECT COUNT(*) FROM %s WHERE session_id=?' % TABLE,
+                               (str(session_id or ''),)).fetchone()
+            return int(row[0] or 0) if row else 0
+        row = conn.execute(
+            'SELECT COUNT(*) FROM %s WHERE session_id=? AND %s IS NULL' % (TABLE, VECTOR_COLUMN),
+            (str(session_id or ''),)).fetchone()
+        return int(row[0] or 0) if row else 0
+    except Exception:
+        return 0
+    finally:
+        conn.close()
+
+
+def missing_rows(db_path, session_id, limit=None):
+    """缺向量的压缩记录：[{id, compaction_id, text}]（回填用）。"""
+    path = Path(str(db_path))
+    if not path.exists():
+        return []
+    try:
+        conn = sqlite3.connect(str(path))
+    except Exception:
+        return []
+    try:
+        cols = {row[1] for row in conn.execute('PRAGMA table_info(%s)' % TABLE).fetchall()}
+        if VECTOR_COLUMN not in cols:
+            sql = ('SELECT id, compaction_id, text FROM %s'
+                   ' WHERE session_id=? ORDER BY id' % TABLE)
+            args = [str(session_id or '')]
+            if limit:
+                sql += ' LIMIT ?'
+                args.append(int(limit))
+            return [{'id': int(row[0]), 'compaction_id': str(row[1] or ''),
+                     'text': str(row[2] or '')} for row in conn.execute(sql, tuple(args))]
+        sql = ('SELECT id, compaction_id, text FROM %s'
+               ' WHERE session_id=? AND %s IS NULL ORDER BY id' % (TABLE, VECTOR_COLUMN))
+        args = [str(session_id or '')]
+        if limit:
+            sql += ' LIMIT ?'
+            args.append(int(limit))
+        return [{'id': int(row[0]), 'compaction_id': str(row[1] or ''),
+                 'text': str(row[2] or '')} for row in conn.execute(sql, tuple(args))]
+    except Exception:
+        return []
+    finally:
+        conn.close()
+
+
+def set_vector(db_path, row_id, vector):
+    """给一条压缩记录补向量（只 UPDATE 这一列）。"""
+    path = Path(str(db_path))
+    if not path.exists():
+        return 0
+    blob = _pack(vector)
+    if not blob:
+        return 0
+    try:
+        conn = sqlite3.connect(str(path))
+    except Exception:
+        return 0
+    try:
+        # 老库在这里补列：补向量本身就意味着"该库要开始存向量"
+        _ensure_vector_column(conn)
+        cur = conn.execute('UPDATE %s SET %s=? WHERE id=?' % (TABLE, VECTOR_COLUMN),
+                           (blob, int(row_id)))
+        conn.commit()
+        return int(cur.rowcount or 0)
+    except Exception:
+        return 0
+    finally:
+        conn.close()
+
+
+def with_vectors(db_path, session_id):
+    """带向量的压缩记录：[{compaction_id, text, window_start, window_end, vector}]。"""
+    path = Path(str(db_path))
+    if not path.exists():
+        return []
+    try:
+        conn = sqlite3.connect(str(path))
+    except Exception:
+        return []
+    try:
+        rows = conn.execute(
+            'SELECT compaction_id, text, window_start, window_end, %s FROM %s'
+            ' WHERE session_id=? AND %s IS NOT NULL ORDER BY id'
+            % (VECTOR_COLUMN, TABLE, VECTOR_COLUMN), (str(session_id or ''),)).fetchall()
+    except Exception:
+        return []
+    finally:
+        conn.close()
+    out = []
+    for compaction_id, text, start, end, blob in rows:
+        vector = unpack(blob)
+        if not vector:
+            continue
+        out.append({'compaction_id': str(compaction_id or ''), 'text': str(text or ''),
+                    'window_start': start, 'window_end': end, 'vector': vector})
+    return out
 
 
 def windows(db_path, session_id):

@@ -1958,6 +1958,8 @@
     if (clean) clean.checked = Number(s.event_delivery_clean_on || 0) === 1
     var mode = $('msEventTextMode'); if (mode) mode.value = s.event_text_mode || 'raw'
     var longc = $('msLongEventChars'); if (longc && s.long_event_chars != null) longc.value = String(s.long_event_chars)
+    var vb = $('msVectorBackfillOn')
+    if (vb) vb.checked = Number(s.vector_backfill_on == null ? 1 : s.vector_backfill_on) === 1
     var iw = $('msInjectWait')
     if (iw && s.inject_wait_ms != null) iw.value = String(s.inject_wait_ms)
     var it = $('msInjectTtl')
@@ -1982,6 +1984,13 @@
     setText('msAccessToday', String(log.today != null ? log.today : '—'))
   }
 
+  function bindVectorButtons() {
+    var check = $('msVectorCheck')
+    var fill = $('msVectorBackfill')
+    if (check) check.addEventListener('click', function () { void msVectorCheck() })
+    if (fill) fill.addEventListener('click', function () { void msVectorBackfill() })
+  }
+
   function loadMemorySettings() {
     setText('msStatus', '读取中')
     msAction('settings_get', {}).then(function (out) {
@@ -1995,8 +2004,58 @@
       msFillModel('rerank', (body.models || {}).rerank)
       msFillSettings(body.settings)
       msFillStatus(body.status)
+      bindVectorButtons()
+      void msVectorCheck()
       setText('msStatus', '已载入')
     }).catch(function () { setText('msStatus', '读取失败 连不上宿主') })
+  }
+
+  /** 向量体检：把三个缺向量计数写进面板；失败就显示原因。 */
+  function msVectorCheck() {
+    var node = $('msVectorStatus')
+    if (node) node.textContent = '缺向量：检查中…'
+    return msAction('vectors_check', {}).then(function (out) {
+      var body = (out && out.body) || {}
+      if (body.ok !== true) {
+        if (node) node.textContent = '缺向量：检查失败 ' + (body.reason || body.code || out.status)
+        return body
+      }
+      if (node) {
+        node.textContent = '缺向量：条目 ' + (body.entries_missing || 0)
+          + ' / 句子 ' + (body.units_missing || 0)
+          + ' / 压缩 ' + (body.compactions_missing || 0)
+      }
+      return body
+    }).catch(function () {
+      if (node) node.textContent = '缺向量：检查失败 连不上宿主'
+      return null
+    })
+  }
+
+  /** 补齐向量：调一次 vectors_backfill（只调 embedding），完成后自动复查。 */
+  function msVectorBackfill() {
+    var node = $('msVectorStatus')
+    var button = $('msVectorBackfill')
+    if (button) button.disabled = true
+    if (node) node.textContent = '缺向量：补齐中…'
+    return msAction('vectors_backfill', { limit: 200 }).then(function (out) {
+      var body = (out && out.body) || {}
+      if (body.ok !== true) {
+        if (node) node.textContent = '补齐失败：' + (body.reason || body.code || out.status)
+        return body
+      }
+      if (node) {
+        node.textContent = '已补：条目 ' + (body.entries || 0) + ' / 句子 ' + (body.units || 0)
+          + ' / 压缩 ' + (body.compactions || 0) + '（' + (body.elapsed || 0) + 's）'
+      }
+      return msVectorCheck()
+    }).catch(function () {
+      if (node) node.textContent = '补齐失败 连不上宿主'
+      return null
+    }).then(function (result) {
+      if (button) button.disabled = false
+      return result
+    })
   }
 
   function msCollect() {
@@ -2034,6 +2093,7 @@
         event_delivery_clean_on: ($('msEventDeliveryClean') || {}).checked ? 1 : 0,
         event_text_mode: (($('msEventTextMode') || {}).value) || 'raw',
         long_event_chars: num('msLongEventChars', 1200),
+        vector_backfill_on: ($('msVectorBackfillOn') || {}).checked ? 1 : 0,
         // 召回等待：0 = 一直等到召回完成（用户要求先等再答）；TTL 只对同一句提问生效
         inject_wait_ms: Math.max(0, Math.round(num('msInjectWait', 10000))),
         inject_ttl_ms: Math.max(0, Math.round(num('msInjectTtl', 15000))),

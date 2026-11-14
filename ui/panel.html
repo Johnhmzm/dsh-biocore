@@ -441,6 +441,19 @@
             <input id="msPortraitTop" type="number" min="1" max="50" step="1" value="8">
           </label>
         </div>
+        <p class="group-title">向量</p>
+        <label class="switch-row">
+          <span class="switch-text">
+            <span class="switch-label">向量兜底</span>
+            <span class="switch-desc">回复后/压缩后各补一小批缺失向量（最多 20 条）</span>
+          </span>
+          <input id="msVectorBackfillOn" type="checkbox" checked>
+        </label>
+        <p class="ms-row" id="msVectorStatus">缺向量：—</p>
+        <div class="field-grid">
+          <button id="msVectorCheck" type="button" class="btn-ghost">体检</button>
+          <button id="msVectorBackfill" type="button" class="btn-ghost">补齐向量</button>
+        </div>
         <p class="group-title">召回等待</p>
         <div class="field-grid">
           <label class="field"><span>等待上限（ms）</span>

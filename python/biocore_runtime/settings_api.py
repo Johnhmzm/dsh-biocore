@@ -50,6 +50,8 @@ SETTINGS_SPEC = {
     'inject_wait_ms': ('int', 0, 60000),
     # 缓存有效期（毫秒）：同一句提问在 TTL 内直接复用，不重新召回，缺省 15000
     'inject_ttl_ms': ('int', 0, 600000),
+    # 向量兜底：turn_end / 压缩写入后各补一次少量缺失向量（缺省开）
+    'vector_backfill_on': ('int', 0, 1),
 }
 
 # 设置名 -> recall 段里的键（detail_shape 是面板自己的开关，不进 recall）
@@ -69,6 +71,7 @@ RECALL_KEYS = {
     'compaction_context_window': 'recall.compaction_context_window',
     'inject_wait_ms': 'recall.inject_wait_ms',
     'inject_ttl_ms': 'recall.inject_ttl_ms',
+    'vector_backfill_on': 'recall.vector_backfill_on',
 }
 
 
