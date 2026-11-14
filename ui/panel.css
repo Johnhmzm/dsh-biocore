@@ -709,18 +709,46 @@ body.layout-editing [data-card-id].dragging { outline: 1px dashed var(--orange);
 body[data-tab='settings'] .body {
   max-width: 1720px;
   margin: 0 auto;
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(420px, 1fr));
-  gap: 24px;
-  align-items: start;
+  columns: 3 420px;
+  column-gap: 24px;
 }
-/* 宽卡片（表格类）跨满整行 */
+/* 多列流式：卡片不被拆开、彼此紧挨着，不留同高空白 */
+body[data-tab='settings'] .card {
+  break-inside: avoid;
+  margin: 0 0 24px;
+  min-width: 0;
+}
+/* 宽表格跨满所有列 */
 body[data-tab='settings'] .card-wide,
-body[data-tab='settings'] .card[data-card-id='compaction-archive'] { grid-column: 1 / -1; }
-/* 卡片内默认单列字段；宽卡片才用两列 */
-body[data-tab='settings'] .field-grid { grid-template-columns: 1fr; }
+body[data-tab='settings'] .card[data-card-id='compaction-archive'] {
+  column-span: all;
+  break-inside: auto;
+}
+/* 字段：标签窄一点，控件拿到剩余宽度（minmax(0,1fr) 才不会被压扁） */
+body[data-tab='settings'] .field-grid { grid-template-columns: 1fr; min-width: 0; }
+body[data-tab='settings'] .field,
+body[data-tab='settings'] .field-grid > .field {
+  display: grid;
+  grid-template-columns: 110px minmax(0, 1fr);
+  align-items: center;
+  column-gap: 10px;
+  row-gap: 10px;
+  min-width: 0;
+}
 body[data-tab='settings'] .card-wide .field-grid,
-body[data-tab='settings'] .card[data-card-id='compaction-archive'] .field-grid { grid-template-columns: 1fr 1fr; }
+body[data-tab='settings'] .card[data-card-id='compaction-archive'] .field-grid {
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+}
+/* 输入控件：占满自己的格子，数字框也不例外 */
+body[data-tab='settings'] input:not([type='checkbox']):not([type='radio']),
+body[data-tab='settings'] select,
+body[data-tab='settings'] textarea {
+  width: 100%;
+  min-width: 0;
+  box-sizing: border-box;
+  height: 32px;
+}
+body[data-tab='settings'] input[type='number'] { width: 100%; min-width: 0; }
 body[data-tab='settings'] .card {
   background: var(--panel, #12130f);
   border: 1px solid var(--line, #2a2b22);
