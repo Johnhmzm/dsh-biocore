@@ -453,10 +453,10 @@
         </div>
         <p class="group-title">压缩阈值</p>
         <div class="field-grid">
-          <label class="field"><span>阈值 token（0=关）</span>
+          <label class="field"><span>阈值 token</span>
             <input id="msCompactTokens" type="number" min="0" max="2000000" step="1000" value="0">
           </label>
-          <label class="field"><span>上下文窗口（0=用适配器）</span>
+          <label class="field"><span>上下文窗口</span>
             <input id="msCompactWindow" type="number" min="0" max="4000000" step="1000" value="0">
           </label>
         </div>
@@ -480,7 +480,7 @@
               <option value="auto">自动</option>
             </select>
           </label>
-          <label class="field"><span>长事件阈值（字符）</span>
+          <label class="field"><span>长事件阈值</span>
             <input id="msLongEventChars" type="number" min="200" max="8000" step="100" value="1200">
           </label>
         </div>
@@ -499,7 +499,7 @@
         </dl>
       </section>
 
-      <section class="card card-wide" data-card-id="compaction-archive" data-card-label="压缩归档">
+      <section class="card" data-card-id="compaction-archive" data-card-label="压缩归档">
         <header class="card-head">
           <i class="sq" aria-hidden="true"></i>
           <b>ARCHIVE</b><span class="zh">/ 压缩归档</span>
@@ -508,10 +508,11 @@
         <div class="btn-row">
           <button id="caRefresh" class="btn" type="button">刷新</button>
         </div>
-        <table class="log-table ca-table">
-          <thead><tr><th>会话</th><th>压缩次数</th><th>未成件段数</th><th>上次处理</th><th class="ta-r">操作</th></tr></thead>
-          <tbody id="caList"><tr class="is-empty"><td colspan="5">—</td></tr></tbody>
-        </table>
+        <div class="table-scroll"><table class="log-table ca-table">
+            <thead><tr><th>会话</th><th>压缩次数</th><th>未成件段数</th><th>上次处理</th><th class="ta-r">操作</th></tr></thead>
+            <tbody id="caList"><tr class="is-empty"><td colspan="5">—</td></tr></tbody>
+          </table>
+        </div>
       </section>
 
       <section class="card" data-card-id="recall" data-card-label="召回注入">
@@ -521,10 +522,10 @@
           <span class="r" id="recallStatus">读取中</span>
         </header>
         <div class="field-grid">
-          <label class="field"><span>事件预算（个）</span>
+          <label class="field"><span>事件预算</span>
             <input id="recallEvents" type="number" min="1" max="20" step="1" value="8">
           </label>
-          <label class="field"><span>注入预算（字符，仅旧路径生效）</span>
+          <label class="field"><span>注入预算</span>
             <input id="recallChars" type="number" min="500" max="200000" step="1000" value="14000">
           </label>
           <label class="field"><span>交付方式</span>
@@ -563,7 +564,7 @@
           <input id="expressionToggle" type="checkbox">
         </label>
         <div class="field-grid" id="expressionFields" hidden>
-          <label class="field"><span>每句目标字数</span><input id="lengthTarget" type="number" min="1" max="200" value="10"></label>
+          <label class="field"><span>目标字数</span><input id="lengthTarget" type="number" min="1" max="200" value="10"></label>
           <label class="field"><span>上限字数</span><input id="lengthMax" type="number" min="2" max="400" value="30"></label>
         </div>
         <div class="btn-row">

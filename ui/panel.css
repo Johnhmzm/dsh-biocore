@@ -806,3 +806,13 @@ body:not([data-tab='dashboard']) .card-head b { color: var(--orange); }
     padding: 10px 10px calc(72px + env(safe-area-inset-bottom, 0px));
   }
 }
+
+/* 压缩归档：不再跨满整行，做成一张普通卡片；表格列宽钉死、表体内部滚动 */
+body[data-tab='settings'] .table-scroll { max-height: 240px; overflow-y: auto; }
+body[data-tab='settings'] .ca-table th:nth-child(1) { width: 108px; }
+body[data-tab='settings'] .ca-table th:nth-child(2) { width: 56px; }
+body[data-tab='settings'] .ca-table th:nth-child(3) { width: 64px; }
+body[data-tab='settings'] .ca-table th:nth-child(4) { width: 88px; }
+body[data-tab='settings'] .ca-table td { padding: 3px 4px; font-size: 11px; }
+body[data-tab='settings'] .ca-table th { padding: 4px 4px; }
+body[data-tab='settings'] .ca-table .btn { height: 22px; min-width: 54px; padding: 0 6px; font-size: 10.5px; border-radius: 4px; }
