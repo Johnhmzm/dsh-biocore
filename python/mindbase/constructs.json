@@ -1,0 +1,44 @@
+{
+  "expressive_suppression": {
+    "label": "表达抑制",
+    "description": "抑制情绪表达；表面平静，内部生理负荷高",
+    "references": [
+      "Gross 1998/2002 process model",
+      "10.1016/j.jad.2026.122328"
+    ],
+    "deltas": {
+      "stress_reactivity": 0.25,
+      "recovery_rate": -0.2,
+      "baseline_v": -0.15,
+      "extra.expressivity": -0.4,
+      "extra.self_disclosure": -0.25
+    }
+  },
+  "self_silencing": {
+    "label": "自我沉默",
+    "description": "压住自己的需求/声音，优先维持关系",
+    "references": [
+      "Jack 1991 Silencing the Self",
+      "10.1177/09727531251385283"
+    ],
+    "deltas": {
+      "autonomy_gain": -0.2,
+      "extra.assertiveness": -0.35,
+      "extra.help_seeking": -0.3,
+      "extra.other_oriented": 0.25
+    }
+  },
+  "camouflaging_depression": {
+    "label": "掩饰抑郁（微笑抑郁）",
+    "description": "努力看起来没抑郁；高功能外表 + 内部消耗",
+    "references": [
+      "10.1007/s44192-025-00200-x"
+    ],
+    "deltas": {
+      "stress_reactivity": 0.2,
+      "baseline_v": -0.2,
+      "extra.masking": 0.35,
+      "extra.expressivity": -0.2
+    }
+  }
+}

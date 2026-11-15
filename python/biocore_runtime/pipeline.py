@@ -7201,9 +7201,11 @@ def body_loop(store, session_id, now=None, seed=BODY_LOOP_SEED, payload=None):
         body = _mb.body_for(store, sid, seed=int(seed))
 
         # ---------- L0 生理：呼吸/自律/昼夜/疲劳 -> discomfort、阈值 ----------
-        base_v = float(state.get("valence") or 0.0)
-        base_a = float(state.get("arousal") or 0.5)
-        base_stress = float(state.get("stress") or 0.0)
+        # 基准取静息点，而不是"当前值"：拿当前值当基准，每拍都会在上拍结果上
+        # 再扣一次，八拍就能滑到 -0.17，几十拍钉死在 -1。
+        base_v = float(state.get("anchor_valence") or 0.0)
+        base_a = 0.5
+        base_stress = float(state.get("anchor_stress") or 0.0)
         base_social = float(state.get("social_drive") or 0.5)
         base_safety = float(state.get("drive_safety") or 0.5)
         base_energy = float(state.get("drive_energy") or 0.5)
@@ -7233,13 +7235,18 @@ def body_loop(store, session_id, now=None, seed=BODY_LOOP_SEED, payload=None):
                       + max(0.0, 0.7 - base_safety) * 0.2
                       + max(0.0, 0.5 - circadian) * 0.1
                       + load0 * 0.1 + boost)
-        over = bool(discomfort + 0.05 * noise_val > threshold)
+        # 绝对阈值单用不够：平静时的不适度本来就贴着阈值，于是"过线"要么永远
+        # 不触发、要么一直触发。改成"相对自己的平常"——超过自家基线一截也算过线。
+        dash = float(state.get("discomfort_baseline") or 0.25)
+        over = bool((discomfort + 0.05 * noise_val > threshold)
+                    or (discomfort > dash + 0.06))
         layers = {"L0": {"discomfort": _clamp(discomfort, 0.0, 2.0),
                           "threshold": _clamp(threshold),
                           "autonomic_wave": round(wave, 4),
                           "noise": round(noise_val, 4),
                           "circadian": _clamp(circadian),
                           "fatigue_load": _clamp(load0),
+                          "baseline": round(dash, 4),
                           "over_threshold": over}}
 
         # ---------- L1 内感受 <- L0 ----------
@@ -7260,7 +7267,7 @@ def body_loop(store, session_id, now=None, seed=BODY_LOOP_SEED, payload=None):
         if not intero:
             intero = {
                 "tension": _clamp(0.45 * source["stress"] + 0.25 * base_a
-                                  + 0.20 * load0),
+                                  + 0.20 * min(0.35, load0)),
                 "warmth": _clamp(0.40 * ((base_v + 1.0) / 2.0)
                                  + 0.25 * base_social + 0.20 * source["trust"]
                                  + 0.15 * source["closeness"]),
@@ -7276,15 +7283,25 @@ def body_loop(store, session_id, now=None, seed=BODY_LOOP_SEED, payload=None):
         # ---------- L2 情绪 <- L1 ----------
         tension, warmth = L1["tension"], L1["warmth"]
         heaviness, clarity = L1["heaviness"], L1["clarity"]
-        v2 = base_v - 0.45 * max(0.0, tension - 0.30) + 0.18 * (warmth - 0.60) \
-            - 0.15 * heaviness
+        # 关键：不能拿"当前效价"当基准再加一个负增量 —— 那是个正反馈，
+        # 每拍再扣一点，几十拍之后就钉死在 -1（实测 3 分钟就到）。
+        # 基准改成静息点，增量只做修正，并且每拍按一个小比例回到静息。
+        rest_v = float(state.get("anchor_valence") or 0.0)
+        delta_v = (-0.45 * max(0.0, tension - 0.30)
+                   + 0.18 * (warmth - 0.60)
+                   - 0.15 * heaviness)
+        v2 = base_v + 0.12 * (rest_v - base_v) + 0.50 * delta_v
         a2 = base_a + 0.35 * tension - 0.20 * clarity
         d2 = float(getattr(body.mind.affect, "dominance", 0.0)) \
             + 0.30 * clarity - 0.20 * tension
         stress2 = base_stress + 0.55 * max(0.0, tension - 0.20)
         mood0 = float(state.get("mood") or 0.0)
         mood2 = mood0 + 0.05 * (v2 - mood0)
-        load2 = load0 + 0.15 * max(0.0, -v2)
+        # 负荷也要退：只涨不退同样会顶到 1.0，再回头把紧张顶上去。
+        # 退得快一点、涨得慢一点：原来 0.15 的增益配上 2% 的衰减，只要效价负着，
+        # 负荷就会卡在 0.98 不动（实测）。0.05 / 3% 才能在十几拍内退下来。
+        load2 = max(0.0, load0 * (1.0 - 0.03)
+                    + 0.05 * max(0.0, -v2) - 0.004)
         L2 = {"v": _clamp(v2, -1.0, 1.0), "a": _clamp(a2),
               "d": _clamp(d2, -1.0, 1.0), "stress": _clamp(stress2),
               "mood": _clamp(mood2, -1.0, 1.0), "load": _clamp(load2)}
@@ -7305,9 +7322,15 @@ def body_loop(store, session_id, now=None, seed=BODY_LOOP_SEED, payload=None):
         if not skipped:
             try:
                 aff = body.mind.affect
-                aff.v = L2["v"]
-                aff.a = L2["a"]
-                aff.stress = L2["stress"]
+                # 并非硬写：按比例并入，让身体的回拉（PI）仍有作用，
+                # 否则每拍都被覆盖成 L2 的值，PI 等于不存在。
+                _w4 = 0.5
+                aff.v = _clamp(float(getattr(aff, "v", 0.0)) * (1.0 - _w4)
+                               + L2["v"] * _w4, -1.0, 1.0)
+                aff.a = _clamp(float(getattr(aff, "a", 0.5)) * (1.0 - _w4)
+                               + L2["a"] * _w4)
+                aff.stress = _clamp(float(getattr(aff, "stress", 0.0)) * (1.0 - _w4)
+                                    + L2["stress"] * _w4)
                 if hasattr(aff, "dominance"):
                     aff.dominance = L2["d"]
                 drives = body.mind.drives.values
@@ -7330,6 +7353,14 @@ def body_loop(store, session_id, now=None, seed=BODY_LOOP_SEED, payload=None):
                 except Exception:
                     pass
                 state = body.state()
+                # 记下自家不适度的平常水平，供下一拍判断"这次算不算异常"
+                try:
+                    _prev_dash = float(state.get("discomfort_baseline") or 0.25)
+                    state["discomfort_baseline"] = round(
+                        _prev_dash * 0.95
+                        + float(layers["L0"]["discomfort"]) * 0.05, 4)
+                except Exception:
+                    pass
                 _mb.save_state(store, sid, state)
             except Exception as exc:
                 logger.warning("[body-loop] L4 apply skipped: %s: %s",
