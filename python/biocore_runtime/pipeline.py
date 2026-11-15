@@ -7660,6 +7660,9 @@ def _body_loop_impl(store, session_id, now=None, seed=BODY_LOOP_SEED, payload=No
         # ---------- L5 意图 <- L4 ----------
         intent_text = ""
         pending = None
+        # 话题封闭（BIOCORE_TOPIC_CLOSURE，缺省关）：关着时 _closure 恒 1.0
+        _closure = 1.0
+        _topic_key = ""
         # 起念不该要求"先难受"：果蝇的自发行为不需要外部刺激。
         # 强度 = 情绪（由头）+ 噪声；超过 0 就起念，没有情绪也可以被噪声推一下。
         # 起念的水平来自"不带对象的唤醒"（Panksepp 的 SEEKING + 唤醒度），
@@ -7696,6 +7699,15 @@ def _body_loop_impl(store, session_id, now=None, seed=BODY_LOOP_SEED, payload=No
                 pull = _wander.choose(loops, rumination=stress_now,
                                       seed=int(stamp), now=int(stamp)) or {}
                 topic = str(pull.get("topic") or "muse")
+                _topic_key = topic
+                # 提过就收住：同一个话题在封闭期内不再被反复捡起（只压低开口，
+                # 不清零 —— 憋着的事仍可能漏出来）。渲染侧不归这里管。
+                try:
+                    from biocore_runtime import topic_closure as _tc
+                    if _tc.enabled():
+                        _closure = _tc.factor(store, sid, _topic_key, stamp)
+                except Exception:
+                    _closure = 1.0
                 action = {"rest": "rest", "share": "share",
                           "muse": "question"}.get(topic, "question")
                 # 情绪给高低，噪声给起伏：这一拍要不要起念看这个合量。
@@ -7783,6 +7795,8 @@ def _body_loop_impl(store, session_id, now=None, seed=BODY_LOOP_SEED, payload=No
             _amp = max(0.0, min(2.0, _amp))
             # 风险随沉默时长上升（重尾）：沉默越久，越可能开口；没有由头则涨了也不开
             _hazard = 0.06 * (1.0 + _silent) ** 1.4 * (0.15 + _reason)
+            # 话题封闭：这一拍想提的那件事最近提过 → 压低开口（不清零）。
+            _hazard *= _closure
             # 自发通路（默认网络那一路）：与由头无关，只随空闲和好奇上升。
             # 没有它，CARE/PLAY 的底会一直充当由头，长尾永远出不来。
             try:
@@ -7807,6 +7821,13 @@ def _body_loop_impl(store, session_id, now=None, seed=BODY_LOOP_SEED, payload=No
                 speak_action = "speak"
                 state["silent_beats"] = 0.0
                 state["beats_since_spoke"] = 0.0
+                # 说出去 = 这个话题收住；下一拍不再拿同一件事当下开口的由头
+                try:
+                    from biocore_runtime import topic_closure as _tc2
+                    if _tc2.enabled() and _topic_key:
+                        _tc2.mark(store, sid, _topic_key, stamp)
+                except Exception:
+                    pass
                 # 想开口，但现在没有发送通道（proactive_send 关着）。
                 # 这个"没发出去"不会消失：它攒着，等对方下一次开口时结算。
                 try:
@@ -7826,6 +7847,9 @@ def _body_loop_impl(store, session_id, now=None, seed=BODY_LOOP_SEED, payload=No
                     state.get("beats_since_spoke") or 0.0) + 1.0
             speak_reason = {"silent_beats": _silent, "reason": round(_reason, 3),
                             "amp": round(_amp, 3), "p_speak": round(_p_final, 4)}
+            if _closure < 1.0:
+                # 证据面：这一拍的开口被"话题已提过"压过（开关关着时不多这个键）
+                speak_reason["topic_closed"] = round(_closure, 3)
             if isinstance(_systems, dict) and _systems:
                 speak_reason["systems"] = {k: round(float(_systems.get(k) or 0.0), 3)
                                            for k in _mb.SYSTEMS}
