@@ -1143,7 +1143,8 @@ def save_body_state(store, session_id, state) -> bool:
     """
     try:
         prev = load_state(store, session_id)
-        if isinstance(state, dict) and any(str(k).startswith("sys_") for k in prev):
+        _keep = any(str(k).startswith("sys_") for k in prev)
+        if isinstance(state, dict) and _keep:
             for key, value in prev.items():
                 if key not in state and isinstance(value, (int, float)):
                     state[key] = value
@@ -1818,6 +1819,45 @@ def heartbeat_last(store, session_id):
     except Exception:
         pass
     return {}
+
+
+def wish_path(store, session_id):
+    return _body_path(store, session_id).replace(BODY_STATE_FILE, "mindbase_wishes.jsonl")
+
+
+def wish_stat_append(store, session_id, row, cap=2000):
+    """"想说话但没发出去"的计数流水，与心跳分开存，便于单独统计。"""
+    import json
+    import os
+    path = wish_path(store, session_id)
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "a", encoding="utf-8") as fh:
+            fh.write(json.dumps(row, ensure_ascii=False) + chr(10))
+        try:
+            with open(path, "r", encoding="utf-8") as fh:
+                lines = fh.readlines()
+            if len(lines) > int(cap):
+                with open(path, "w", encoding="utf-8") as fh:
+                    fh.writelines(lines[-int(cap):])
+        except Exception:
+            pass
+        return True
+    except Exception:
+        return False
+
+
+def wish_last(store, session_id):
+    """读"想说话"流水的最后一行（计数以流水为准，不依赖 state 的覆盖行为）。"""
+    import json
+    import os
+    path = wish_path(store, session_id)
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            lines = [ln for ln in fh if ln.strip()]
+        return json.loads(lines[-1]) if lines else {}
+    except Exception:
+        return {}
 
 
 def heartbeat_append(store, session_id, row, cap=HEARTBEAT_CAP):

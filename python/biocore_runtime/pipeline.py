@@ -6907,6 +6907,32 @@ def _body_turn_impl(store, session_id, text, payload=None):
                 outs = _ap.appraise(dims, confidence=0.7, weights=_w)
         except Exception:
             outs = None
+        # 上一次她想说话却发不出去，攒了多少 —— 对方一开口就结算。
+        # 不是"欠账"那样记在负荷里，而是变成这一轮的底色：等得越久，
+        # 被回应时的松快越多，同时"被搁着"的那点不快也一起上来。
+        try:
+            _pre = _mb.load_state(store, session_id) or {}
+            _wrow = _mb.wish_last(store, session_id) or {}
+            _waited = float(_wrow.get("unmet") or _pre.get("wish_unmet") or 0.0)
+            if _waited > 0 and isinstance(dims, dict):
+                _weeks = min(1.0, _waited / 8.0)
+                dims = dict(dims)
+                dims["valence"] = max(-1.0, min(1.0,
+                    float(dims.get("valence") or 0.0) + 0.25 * _weeks))
+                dims["stress"] = max(0.0, min(1.0,
+                    float(dims.get("stress") or 0.0) + 0.10 * _weeks))
+                if isinstance(payload, dict):
+                    _st_w = payload.get("state")
+                    if isinstance(_st_w, dict):
+                        _st_w["waited_beats"] = _waited
+                _sent = float(_wrow.get("sent") or 0.0) + 1.0
+                _mb.wish_stat_append(store, session_id, {
+                    "ts": round(time.time(), 3), "settled": True,
+                    "wanted": float(_wrow.get("wanted") or 0.0),
+                    "unmet": 0.0, "sent": _sent,
+                    "waited": _waited})
+        except Exception:
+            pass
         state = _mb.turn(store, session_id, text, dims, with_memory=False, outs=outs)
         try:
             # 拟合评价矩阵要的数据：dims、outs、状态前后
@@ -7646,6 +7672,18 @@ def _body_loop_impl(store, session_id, now=None, seed=BODY_LOOP_SEED, payload=No
                 speak_action = "speak"
                 state["silent_beats"] = 0.0
                 state["beats_since_spoke"] = 0.0
+                # 想开口，但现在没有发送通道（proactive_send 关着）。
+                # 这个"没发出去"不会消失：它攒着，等对方下一次开口时结算。
+                try:
+                    _prev_w = _mb.wish_last(store, sid) or {}
+                    _ws = {"ts": round(stamp, 3),
+                           "wanted": float(_prev_w.get("wanted") or 0.0) + 1.0,
+                           "unmet": float(_prev_w.get("unmet") or 0.0) + 1.0,
+                           "sent": float(_prev_w.get("sent") or 0.0),
+                           "reason": round(_reason, 3)}
+                    _mb.wish_stat_append(store, sid, _ws)
+                except Exception:
+                    pass
             else:
                 speak_action = "silence"
                 state["silent_beats"] = float(_silent + 1)
@@ -7670,7 +7708,8 @@ def _body_loop_impl(store, session_id, now=None, seed=BODY_LOOP_SEED, payload=No
         # 只让这一个字段真的持久化。为保持"关掉时逐字节一致"，只在七系统开启时补。
         if isinstance(_systems, dict) and _systems:
             try:
-                _mb.save_state(store, sid, state)
+                # save_body_state 会保住"身体不产"的键（silent_beats / sys_*）
+                _mb.save_body_state(store, sid, state)
             except Exception:
                 pass
         # 唯一判定点：蘑菇体这一拍决定了什么（六层数值只是证据）
