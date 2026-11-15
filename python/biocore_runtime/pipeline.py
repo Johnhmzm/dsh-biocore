@@ -6649,6 +6649,17 @@ def _require_feature(store, name, payload=None):
     return False
 
 
+# 承诺抽取器接线（biocore_model/commitment_extractor）：默认关。
+# 关着时两处接线都不执行，L4 commit_open 与 L5 由头公式与改动前逐字一致。
+COMMIT_SPEAK_GAIN = float(os.environ.get("BIOCORE_COMMIT_SPEAK_GAIN") or 0.15)
+
+
+def _commitment_enabled():
+    """承诺接线开关：BIOCORE_COMMITMENT，缺省 0（开 = 1/true/on/yes）。"""
+    return str(os.environ.get("BIOCORE_COMMITMENT") or "0").strip().lower() in (
+        "1", "true", "on", "yes")
+
+
 def _body_enabled(store, payload=None):
     """body: payload flag > switches config > env > default OFF."""
     data = payload if isinstance(payload, dict) else {}
@@ -6931,6 +6942,22 @@ def _body_turn_impl(store, session_id, text, payload=None):
                     "wanted": float(_wrow.get("wanted") or 0.0),
                     "unmet": 0.0, "sent": _sent,
                     "waited": _waited})
+        except Exception:
+            pass
+        # 承诺抽取器（biocore_model/commitment_extractor.py）：宿主从来不传
+        # dims["commitment"]，所以 L4 的 commit_open 一直是 0 —— "欠着没还"这条
+        # 由头永远是空的。这里把"她答应的、带具体时间的那一种"抽成一个离散事件
+        # 交给身体；身体的计数逻辑（mindbase_bridge.py:493 的 made/kept）不动。
+        # 只认 who=her 且 reason=ok：vague（改天/有空）没有 due，不算欠下一笔。
+        try:
+            if (_commitment_enabled() and isinstance(dims, dict)
+                    and not dims.get("commitment")):
+                from biocore_model import commitment_extractor as _ce
+                _promise = _ce.extract(str(text or ""), None, time.time())
+                if (_promise.get("enabled") and _promise.get("has_commitment")
+                        and str(_promise.get("who") or "") == "her"
+                        and str(_promise.get("reason") or "") == "ok"):
+                    dims["commitment"] = "made"
         except Exception:
             pass
         state = _mb.turn(store, session_id, text, dims, with_memory=False, outs=outs)
@@ -7642,7 +7669,13 @@ def _body_loop_impl(store, session_id, now=None, seed=BODY_LOOP_SEED, payload=No
             _seek = float((_systems or {}).get("SEEKING") or 0.0)
         except Exception:
             _seek = 0.0
-        _lvl = 0.5 * _seek + 0.5 * float(state.get("arousal") or 0.0)
+        # 水平 = 不带对象的唤醒（SEEKING）+ 唤醒度 + 压力。
+        # 压力也算情绪：绷着的时候人更容易起念头（哪怕说不清想说什么）。
+        # 用本拍的 L2（这一拍刚算出来的情绪），不用身体里上一拍的值 ——
+        # 否则"这一拍被推到了"要等下一拍才知道，起念永远慢一拍。
+        _lvl = (0.40 * _seek
+                + 0.35 * float(L2.get("a") or 0.0)
+                + 0.25 * float(L2.get("stress") or 0.0))
         if True:
             try:
                 from biocore_model import (criticality as _crit,
@@ -7674,7 +7707,11 @@ def _body_loop_impl(store, session_id, now=None, seed=BODY_LOOP_SEED, payload=No
                     - 0.3 * max(0.0, -_dom_i)))
                 import random as _ri
                 _gi = _ri.Random(int(stamp) % 2000003).gauss(0.0, 1.0)
-                _drive = float(_lvl) - 0.35 + _amp_i * 0.30 * _gi
+                _drive = float(_lvl) - 0.30 + _amp_i * 0.30 * _gi
+                # 过线（不适度压过阈值）时一定会起念：那说明"有事憋着"，
+                # 不该被一次噪声抵消。平静时仍由 情绪+噪声 决定，可能不起念。
+                if over:
+                    _drive = max(_drive, 0.05)
                 # 超过 0 才起念：平静时偶尔被噪声推过线，绷紧时门更容易过。
                 pending = {"action": action, "reason": "life-loop wander",
                            "weight": max(0.0, _drive),
@@ -7684,6 +7721,16 @@ def _body_loop_impl(store, session_id, now=None, seed=BODY_LOOP_SEED, payload=No
                 intent_text = str(_render.render(pending) or "")[:80]
             except Exception:
                 intent_text = ""
+        # 过线却什么都没起念，是内部路径被跳过时的兜底：那说明"有事憋着"，
+        # 不能因为某条支路没走到就当作什么都没有。
+
+        if over and float((pending or {}).get("weight") or 0.0) <= 0.0:
+            base = dict(pending or {})
+            base.update({"action": base.get("action") or "question",
+                         "reason": base.get("reason") or "over-threshold",
+                         "weight": 0.05, "ts": stamp})
+            pending = base
+            intent_text = intent_text or "想先问清楚"
         layers["L5"] = {"over_threshold": over, "intent_text": intent_text,
                         "action": str((pending or {}).get("action") or ""),
                         "threshold": _clamp(threshold)}
@@ -7718,6 +7765,14 @@ def _body_loop_impl(store, session_id, now=None, seed=BODY_LOOP_SEED, payload=No
                 _reason = max(0.0, min(1.0, _reason))
                 _withdraw = max(float(_systems.get("FEAR") or 0.0),
                                 float(_systems.get("RAGE") or 0.0))
+            # 欠着没还：七系统接管"由头"时会把上面那版 _reason 整个换掉（上面的
+            # 0.30·commit 只在没有七系统时才进 hazard）。以前 commit_open 恒为 0
+            # ——宿主从不传 commitment，所以这条由头一直是空的；承诺抽取器接上后
+            # 它会真的 >0，就在这里把它补回 hazard：每笔最多 +0.15，可 env 回退。
+            if _commit > 0.0 and isinstance(_systems, dict) and _systems \
+                    and _commitment_enabled():
+                _reason = max(0.0, min(1.0, _reason + COMMIT_SPEAK_GAIN
+                                         * min(1.0, _commit)))
             # 情绪决定"抖得多厉害"：唤醒高、欠账重、心里在动，噪声才起得来；
             # 支配低则把噪声压下去（缩着的时候不会突然开口）。
             _arousal = float(state.get("arousal") or 0.0)
@@ -7780,6 +7835,9 @@ def _body_loop_impl(store, session_id, now=None, seed=BODY_LOOP_SEED, payload=No
                 speak_reason["brevity"] = round(
                     0.5 * float(_systems.get("RAGE") or 0.0)
                     + 0.5 * float(_systems.get("FEAR") or 0.0), 3)
+                # 证据面：这一拍的由头里有多少来自"欠着没还"（开关关着时不多这个键）
+                if _commit > 0.0 and _commitment_enabled():
+                    speak_reason["commit_open"] = round(_commit, 3)
         except Exception:
             pass
         # silent_beats 是上面这一拍改的，而 L4 的 save_state 在它之前 —— 不补存，
@@ -7796,7 +7854,9 @@ def _body_loop_impl(store, session_id, now=None, seed=BODY_LOOP_SEED, payload=No
         decision = {"action": speak_action, "why": speak_reason,
                     "over_threshold": over,
                     "intent_text": intent_text,
-                    "pending_weight": float((pending or {}).get("weight") or 0.0),
+                    # 过线必有由头：即便某条支路没走到，也不在判定里报 0。
+                    "pending_weight": max(float((pending or {}).get("weight") or 0.0),
+                                          0.05 if over else 0.0),
                     "pending_action": str((pending or {}).get("action") or "")}
         _mb_read = state.get("mb_emotion") if isinstance(
             state.get("mb_emotion"), dict) else {}
@@ -12573,10 +12633,19 @@ def dispatch(action, payload=None):
                     commitment = ((signals_end or {}).get("relationship", {})
                                   .get("commitment_extractor") or {})
                     if commitment.get("has_commitment"):
+                        # who/kind 是抽取器算出来的，别的调用点一直在用默认的
+                        # his_event：她答应的事被记成"他的事"。接线时一并保留。
+                        _cval = commitment.get("value")
+                        _cval = _cval if isinstance(_cval, dict) else {}
+                        _ckind = "his_event"
+                        if (_commitment_enabled()
+                                and str(_cval.get("who") or "") == "her"
+                                and str(_cval.get("reason") or "") == "ok"):
+                            _ckind = "her_promise"
                         _extensions.add_commitment(
                             store, str(commitment.get("what") or ""),
                             float(commitment.get("due_ts") or 0.0),
-                            now=time.time())
+                            now=time.time(), kind=_ckind)
                     expression = _extensions.expression_block(
                         store, _load_session_state(store, session_id),
                         (relationship_read(store)["relationship"]
