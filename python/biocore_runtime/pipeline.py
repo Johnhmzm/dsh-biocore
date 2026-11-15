@@ -6654,6 +6654,41 @@ def _require_feature(store, name, payload=None):
 COMMIT_SPEAK_GAIN = float(os.environ.get("BIOCORE_COMMIT_SPEAK_GAIN") or 0.15)
 
 
+# 预测误差 → 学习率（predictor 的 learning_rate_scale）：默认关。
+# 关着时 RLS 的 λ 与改动前逐字一致（调用方不传 lam）。
+PREDICTOR_LR_BASE_SCALE = 0.6      # learning_rate_scale 的下界，用来把 0 归一成"不放大"
+
+
+def _predictor_lr_enabled():
+    return str(os.environ.get("BIOCORE_PREDICTOR_LR") or "0").strip().lower() in (
+        "1", "true", "on", "yes")
+
+
+def _surprise_lambda(payload=None):
+    """上一轮的预测误差 → 这一轮 RLS 的遗忘因子（惊讶越大，λ 越小，学得越快）。
+
+    surprise 来自 turn_end 的 batch_b（state["prediction"]["surprise"]），所以是
+    "上一轮的惊讶"；没有它就返回 None（调用方沿用 BIOCORE_RLS_LAMBDA）。
+    映射用模块自己的 learning_rate_scale（0.6–1.8），归一化后当 λ 的指数：
+    surprise=0 → 指数 1 → λ 不变；surprise=1 → 指数 3 → 0.98³ ≈ 0.941。
+    """
+    data = payload if isinstance(payload, dict) else {}
+    st = data.get("state") if isinstance(data.get("state"), dict) else {}
+    pred = st.get("prediction") if isinstance(st.get("prediction"), dict) else {}
+    surprise = pred.get("surprise")
+    if not isinstance(surprise, (int, float)) or isinstance(surprise, bool):
+        return None
+    try:
+        from biocore_model import appraisal_rls as _rls3
+        from biocore_model import predictor as _pr
+        scale = float(_pr.learning_rate_scale(float(surprise)))
+        exponent = max(1.0, scale / PREDICTOR_LR_BASE_SCALE)
+        lam = float(_rls3.lambda_value()) ** exponent
+        return round(max(0.5, min(1.0, lam)), 4)
+    except Exception:
+        return None
+
+
 def _commitment_enabled():
     """承诺接线开关：BIOCORE_COMMITMENT，缺省 0（开 = 1/true/on/yes）。"""
     return str(os.environ.get("BIOCORE_COMMITMENT") or "0").strip().lower() in (
@@ -6985,7 +7020,13 @@ def _body_turn_impl(store, session_id, text, payload=None):
             # 同一份观测立刻做一次 RLS（从第 1 行就开始，不等 8 行）
             try:
                 from biocore_model import appraisal_rls as _rls2
-                _rls2.update(store, dims, _before, state, prior=_appraisal_prior())
+                _lam = _surprise_lambda(payload) if _predictor_lr_enabled() else None
+                _rls2.update(store, dims, _before, state,
+                             prior=_appraisal_prior(), lam=_lam)
+                if _lam is not None and isinstance(payload, dict):
+                    _st_lam = payload.get("state")
+                    if isinstance(_st_lam, dict):
+                        _st_lam["surprise_lambda"] = _lam
             except Exception:
                 pass
         except Exception:
@@ -7663,6 +7704,8 @@ def _body_loop_impl(store, session_id, now=None, seed=BODY_LOOP_SEED, payload=No
         # 话题封闭（BIOCORE_TOPIC_CLOSURE，缺省关）：关着时 _closure 恒 1.0
         _closure = 1.0
         _topic_key = ""
+        # 解释风格（BIOCORE_ATTRIB_STYLE，缺省关）：关着时 _attrib 恒 1.0
+        _attrib = 1.0
         # 起念不该要求"先难受"：果蝇的自发行为不需要外部刺激。
         # 强度 = 情绪（由头）+ 噪声；超过 0 就起念，没有情绪也可以被噪声推一下。
         # 起念的水平来自"不带对象的唤醒"（Panksepp 的 SEEKING + 唤醒度），
@@ -7708,6 +7751,13 @@ def _body_loop_impl(store, session_id, now=None, seed=BODY_LOOP_SEED, payload=No
                         _closure = _tc.factor(store, sid, _topic_key, stamp)
                 except Exception:
                     _closure = 1.0
+                # 一贯的内-稳定归因 → "说了也没用" → 开口更少（习得性无助的努力撤回）
+                try:
+                    from biocore_runtime import attribution_style as _astyle
+                    if _astyle.enabled():
+                        _attrib = _astyle.factor(store, sid, stamp)
+                except Exception:
+                    _attrib = 1.0
                 action = {"rest": "rest", "share": "share",
                           "muse": "question"}.get(topic, "question")
                 # 情绪给高低，噪声给起伏：这一拍要不要起念看这个合量。
@@ -7797,6 +7847,8 @@ def _body_loop_impl(store, session_id, now=None, seed=BODY_LOOP_SEED, payload=No
             _hazard = 0.06 * (1.0 + _silent) ** 1.4 * (0.15 + _reason)
             # 话题封闭：这一拍想提的那件事最近提过 → 压低开口（不清零）。
             _hazard *= _closure
+            # 解释风格：内-稳定归因攒够两次之后，开口按风格压低（0.5–1.0）
+            _hazard *= _attrib
             # 自发通路（默认网络那一路）：与由头无关，只随空闲和好奇上升。
             # 没有它，CARE/PLAY 的底会一直充当由头，长尾永远出不来。
             try:
@@ -7850,6 +7902,8 @@ def _body_loop_impl(store, session_id, now=None, seed=BODY_LOOP_SEED, payload=No
             if _closure < 1.0:
                 # 证据面：这一拍的开口被"话题已提过"压过（开关关着时不多这个键）
                 speak_reason["topic_closed"] = round(_closure, 3)
+            if _attrib < 1.0:
+                speak_reason["attrib_style"] = round(_attrib, 3)
             if isinstance(_systems, dict) and _systems:
                 speak_reason["systems"] = {k: round(float(_systems.get(k) or 0.0), 3)
                                            for k in _mb.SYSTEMS}
