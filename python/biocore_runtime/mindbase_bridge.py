@@ -521,22 +521,56 @@ class DialogueBody:
         ai = st.get("active_inference") or {}
         self_ = st.get("self") or {}
         dr = (st.get("drives") or {}).get("values") or {}
-        return {"valence": round(float(A.get("valence") or 0.0), 4),
-                "arousal": round(float(A.get("arousal") or 0.0), 4),
-                "stress": round(float(A.get("stress") or 0.0), 4),
-                "mood": round(float(A.get("mood") or 0.0), 4),
-                "agency": round(float(self_.get("agency") or 0.0), 4),
-                "social_drive": round(float(dr.get("social") or 0.0), 4),
-                "drive_safety": round(float(dr.get("safety") or 0.5), 4),
-                "drive_energy": round(float(dr.get("energy") or 0.5), 4),
-                "drive_curiosity": round(float(dr.get("curiosity") or 0.5), 4),
-                "action": str(ai.get("action") or ""),
-                "anchor_valence": round(float(self.anchor["valence"]), 4),
-                "anchor_stress": round(float(self.anchor["stress"]), 4),
-                "commit_open": float(self.commit["open"]),
-                "commit_kept": float(self.commit["kept"]),
-                "mood": round(float(self.slow.get("mood") or 0.0), 4),
-                "allostatic_load": round(float(self.slow.get("load") or 0.0), 4)}
+        out = {"valence": round(float(A.get("valence") or 0.0), 4),
+               "arousal": round(float(A.get("arousal") or 0.0), 4),
+               "stress": round(float(A.get("stress") or 0.0), 4),
+               "mood": round(float(A.get("mood") or 0.0), 4),
+               "agency": round(float(self_.get("agency") or 0.0), 4),
+               "social_drive": round(float(dr.get("social") or 0.0), 4),
+               "drive_safety": round(float(dr.get("safety") or 0.5), 4),
+               "drive_energy": round(float(dr.get("energy") or 0.5), 4),
+               "drive_curiosity": round(float(dr.get("curiosity") or 0.5), 4),
+               "action": str(ai.get("action") or ""),
+               "anchor_valence": round(float(self.anchor["valence"]), 4),
+               "anchor_stress": round(float(self.anchor["stress"]), 4),
+               "commit_open": float(self.commit["open"]),
+               "commit_kept": float(self.commit["kept"]),
+               "mood": round(float(self.slow.get("mood") or 0.0), 4),
+               "allostatic_load": round(float(self.slow.get("load") or 0.0), 4)}
+        # 蘑菇体是唯一的情绪器官：状态里的 mb_emotion 是它的读数；扁平字段
+        # 为了跨进程落盘（load_state 只收数字与 action）。
+        try:
+            circuit = getattr(self.mind, "circuit", None)
+            if circuit is not None:
+                approach = max(0.0, float(getattr(circuit, "mbon_approach", 0.0)))
+                avoid = max(0.0, float(getattr(circuit, "mbon_avoid", 0.0)))
+                valence = float(circuit.valence())
+                reward = max(0.0, float(getattr(circuit, "dan_reward", 0.0)))
+                punishment = max(0.0, float(getattr(circuit, "dan_punishment", 0.0)))
+                arousal = min(1.0, abs(approach - avoid) + 0.5 * (reward + punishment))
+                bias = 0
+                try:
+                    bias_value = circuit.behavior_bias()
+                    bias = {"approach": 1, "avoid": -1}.get(bias_value, 0)
+                except Exception:
+                    bias = 0
+                out["mb_emotion"] = {
+                    "approach": round(approach, 4),
+                    "avoid": round(avoid, 4),
+                    "valence": round(valence, 4),
+                    "arousal": round(arousal, 4),
+                    "reward": round(reward, 4),
+                    "punishment": round(punishment, 4),
+                    "bias": bias,
+                }
+                out["mb_approach"] = round(approach, 4)
+                out["mb_avoid"] = round(avoid, 4)
+                out["mb_valence"] = round(valence, 4)
+                out["mb_arousal"] = round(arousal, 4)
+                out["mb_bias"] = int(bias)
+        except Exception:
+            pass
+        return out
 
 
 def appraise_text(text: str, config: Optional[Dict[str, object]] = None,

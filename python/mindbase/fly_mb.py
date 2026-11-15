@@ -7,7 +7,7 @@ class FlyMushroomBody:
     """Sparse KC code, DAN reward/punishment, MBON approach/avoid, APL feedback."""
 
     N_KC = 2000
-    N_IN = 16
+    N_IN = 23   # 16 base features + 4 intero + v/a/stress (old checkpoints pad zeros)
     N_MBON = 100
     N_DAN = 200
 
@@ -54,6 +54,20 @@ class FlyMushroomBody:
         self.ppl1_rpe = 0.0
         self.last_sparse = 0.0
 
+    def load_input_weights(self, matrix) -> bool:
+        """Load an old w_in checkpoint: missing columns are zero-filled (no re-init)."""
+        try:
+            arr = np.asarray(matrix, dtype=float)
+            if arr.ndim != 2 or arr.shape[0] != self.N_KC:
+                return False
+            out = np.zeros((self.N_KC, self.N_IN), dtype=float)
+            cols = min(arr.shape[1], self.N_IN)
+            out[:, :cols] = arr[:, :cols]
+            self.w_in = out
+            return True
+        except Exception:
+            return False
+
     def encode(self, features: np.ndarray) -> np.ndarray:
         f = np.asarray(features, dtype=float).reshape(-1)[: self.N_IN]
         if f.size < self.N_IN:
@@ -70,7 +84,8 @@ class FlyMushroomBody:
         self.last_sparse = float(k) / float(self.N_KC)
         return x
 
-    def step(self, features: np.ndarray, reward: float = 0.0, punishment: float = 0.0) -> dict:
+    def step(self, features: np.ndarray, reward: float = 0.0, punishment: float = 0.0,
+             emotion=None) -> dict:
         x = self.encode(features)
         r = max(0.0, min(1.0, float(reward)))
         p = max(0.0, min(1.0, float(punishment)))
@@ -99,6 +114,21 @@ class FlyMushroomBody:
         self.w_avoid *= (1.0 - decay)
         self.mbon_approach = max(0.0, float(np.mean(self.w_approach @ xr))) + 0.05 + 0.20 * r
         self.mbon_avoid = max(0.0, float(np.mean(self.w_avoid @ xr))) + 0.05 + 0.20 * p
+        # 情绪先验直接并进 MBON 读数（特征列之外，让"感知到情绪"可测；旧调用
+        # emotion=None 时完全不变）。
+        if isinstance(emotion, dict):
+            try:
+                _v = max(-1.0, min(1.0, float(emotion.get("v") or 0.0)))
+                _warmth = max(0.0, min(1.0, float(emotion.get("warmth") or 0.0)))
+                _tension = max(0.0, min(1.0, float(emotion.get("tension") or 0.0)))
+                _stress = max(0.0, min(1.0, float(emotion.get("stress") or 0.0)))
+                self.mbon_approach = max(0.0, self.mbon_approach
+                                         + 0.50 * max(0.0, _v) + 0.25 * _warmth)
+                self.mbon_avoid = max(0.0, self.mbon_avoid
+                                      + 0.50 * max(0.0, -_v)
+                                      + 0.25 * _tension + 0.15 * _stress)
+            except Exception:
+                pass
         return {
             "kc_sparse": round(self.last_sparse, 4),
             "age_steps": int(self.age_steps),

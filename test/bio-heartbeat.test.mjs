@@ -48,14 +48,32 @@ test('body off: no python call, no session needed', async () => {
   assert.equal(called, 0)
 })
 
-test('no active session: no python call', async () => {
+test('no active session: falls back to the last touched one', async () => {
+  // 安静下来也要跳：没有"活跃会话"时找最近动过的那个，否则身体一停就是几个小时。
+  resetActivity()
+  let payload = null
+  const out = await runBeat(fakeCtx(), {
+    dataDir: cfgDir(true), getConfig: () => ({ dataDir: cfgDir(true) }),
+    deps: {
+      lastTouchedSession: () => 'session-old',
+      bodyLoop: async (p) => { payload = p; return { ok: true, ticks: 1 } },
+    },
+  })
+  assert.notEqual(out.skipped, true)
+  assert.equal(payload.session_id, 'session-old')
+})
+
+test('no session anywhere: no python call', async () => {
   resetActivity()
   let called = 0
   const out = await runBeat(fakeCtx(), {
     dataDir: cfgDir(true), getConfig: () => ({ dataDir: cfgDir(true) }),
-    deps: { bodyLoop: async () => { called += 1 } },
+    deps: {
+      lastTouchedSession: () => '',
+      bodyLoop: async () => { called += 1 },
+    },
   })
-  assert.equal(out.reason, 'no_active_session')
+  assert.equal(out.reason, 'no_session')
   assert.equal(called, 0)
 })
 

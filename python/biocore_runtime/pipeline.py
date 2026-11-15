@@ -7320,6 +7320,15 @@ def body_loop(store, session_id, now=None, seed=BODY_LOOP_SEED, payload=None):
                 sm.identity = L3["esteem"]
                 body.slow["mood"] = L2["mood"]
                 body.slow["load"] = L2["load"]
+                # 让情绪真正进蘑菇体：L1/L2 作为 KC 前的输入列再感知一次
+                try:
+                    body.mind.circuit.update(
+                        max(0.0, min(1.0, layers["L0"]["discomfort"])),
+                        reward=max(0.0, L2["v"]),
+                        punishment=max(0.0, -L2["v"]),
+                        intero=layers["L1"], affect=L2)
+                except Exception:
+                    pass
                 state = body.state()
                 _mb.save_state(store, sid, state)
             except Exception as exc:
@@ -7377,11 +7386,17 @@ def body_loop(store, session_id, now=None, seed=BODY_LOOP_SEED, payload=None):
                     "intent_text": intent_text,
                     "pending_weight": float((pending or {}).get("weight") or 0.0),
                     "pending_action": str((pending or {}).get("action") or "")}
-        mushroom = {"affect": {"v": L4["v"], "a": L4["a"],
+        _mb_read = state.get("mb_emotion") if isinstance(
+            state.get("mb_emotion"), dict) else {}
+        mushroom = {"affect": {"v": round(float(_mb_read.get("valence",
+                                                            L4["v"])), 4),
+                                "a": round(float(_mb_read.get("arousal",
+                                                              L4["a"])), 4),
                                 "stress": L4["stress"]},
                     "action": str(state.get("action") or ""),
                     "over_threshold": over,
-                    "intent": intent_text}
+                    "intent": intent_text,
+                    "mb_emotion": dict(_mb_read)}
         row = {"ts": round(stamp, 3), "clock": round(_mb.clock_value(store, sid), 3),
                "ticks": ticks, "skipped": skipped,
                "v": L4["v"], "stress": L4["stress"],
@@ -7796,6 +7811,13 @@ def _state_block(state, budget):
     v = _num(state.get("v", core.get("v", state.get("valence"))), 0.0)
     a = _num(state.get("a", core.get("a")), 0.5)
     d = _num(state.get("d", core.get("d")), 0.0)
+    # 蘑菇体是唯一情绪器官：渲染"此刻"的效价/唤醒以它的读数为准；
+    # 没有 mb 字段（老数据/无 body）才退回 state。
+    _body_emotion = state.get("body") if isinstance(state.get("body"), dict) else {}
+    if "mb_valence" in _body_emotion:
+        v = _num(_body_emotion.get("mb_valence"), v)
+    if "mb_arousal" in _body_emotion:
+        a = _num(_body_emotion.get("mb_arousal"), a)
     stress = _num(core.get("stress", state.get("stress")), 0.0)
     social = _num(core.get("social", state.get("social")), 0.5)
     # Numbers first: a label would collapse a continuous state into a handful

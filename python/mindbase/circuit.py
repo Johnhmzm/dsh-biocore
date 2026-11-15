@@ -15,6 +15,8 @@ class Circuit:
     SUBREGION_RATES = {"gamma": 1.00, "alpha": 0.80, "beta": 0.70}
     SUBREGION_MEMORY = {"gamma": "short", "alpha": "long", "beta": "long"}
     SUBREGION_TAU_DAYS = {"gamma": 1.0, "alpha": 30.0, "beta": 20.0}
+    # 情绪列（4 内感受 + v/a/stress）在 KC 前的放大：让感知可测，不改旧 8 列
+    EMOTION_FEATURE_GAIN = 6.0
 
     POPULATIONS = {
         "sensory": 3000,
@@ -46,7 +48,8 @@ class Circuit:
         self.chronic_scar = 0.0
         self.scar_floor = 0.05
 
-    def update(self, salience: float, sparse: float | None = None, reward: float = 0.0, punishment: float = 0.0) -> Dict[str, float]:
+    def update(self, salience: float, sparse: float | None = None, reward: float = 0.0, punishment: float = 0.0,
+               intero=None, affect=None) -> Dict[str, float]:
         for region, left in list(self.lesion_timers.items()):
             self.lesion_strength[region] = max(0.0, self.lesion_strength.get(region, 0.0) - self.lesion_rate.get(region, 0.0))
             if left <= 1 or self.lesion_strength[region] <= 1e-9:
@@ -60,6 +63,33 @@ class Circuit:
         features = np.array([s, self.dan_reward, self.dan_punishment, 1.0,
                              s * (1.0 - self.dan_reward), s * (1.0 - self.dan_punishment),
                              self.chronic_scar, 0.5], dtype=float)
+        # 情绪也进蘑菇体：L1 内感受四量 + L2 v/a/stress（只增列，老 8 列不动；
+        # FlyMushroomBody.N_IN=23，不足补 0）。这一层是"感知情绪"，不是决策。
+        try:
+            _intero = intero if isinstance(intero, dict) else {}
+            _affect = affect if isinstance(affect, dict) else {}
+            def _clip01(v):
+                try:
+                    return max(0.0, min(1.0, float(v)))
+                except Exception:
+                    return 0.0
+            def _clipv(v):
+                try:
+                    return max(-1.0, min(1.0, float(v)))
+                except Exception:
+                    return 0.0
+            _g = float(self.EMOTION_FEATURE_GAIN)
+            features = np.concatenate([features, np.array([
+                _clip01(_intero.get("tension")),
+                _clip01(_intero.get("warmth")),
+                _clip01(_intero.get("heaviness")),
+                _clip01(_intero.get("clarity")),
+                _clipv(_affect.get("v")),
+                _clip01(_affect.get("a")),
+                _clip01(_affect.get("stress")),
+            ], dtype=float) * _g])
+        except Exception:
+            pass
         if self.fly_mb is None:
             self.fly_mb = FlyMushroomBody(seed=1, sparsity=self.sparsity)
         if self.fly_mb is None:
@@ -75,7 +105,17 @@ class Circuit:
             self.pending_features = None
         elif self.dan_reward <= 0.0 and self.dan_punishment <= 0.0:
             self.pending_features = features.copy()
-        mb = self.fly_mb.step(features, reward=self.dan_reward * dan_factor, punishment=self.dan_punishment * dan_factor)
+        _emotion_readout = None
+        if isinstance(intero, dict) or isinstance(affect, dict):
+            _emotion_readout = {
+                "v": float((affect or {}).get("v") or 0.0),
+                "warmth": float((intero or {}).get("warmth") or 0.0),
+                "tension": float((intero or {}).get("tension") or 0.0),
+                "stress": float((affect or {}).get("stress") or 0.0),
+            }
+        mb = self.fly_mb.step(features, reward=self.dan_reward * dan_factor,
+                              punishment=self.dan_punishment * dan_factor,
+                              emotion=_emotion_readout)
         self.sparsity = float(self.fly_mb.sparsity)
         self.activity["sensory"] = s
         self.activity["KC"] = round(float(mb["kc_sparse"]), 4)

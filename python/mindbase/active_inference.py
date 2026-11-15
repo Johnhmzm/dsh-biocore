@@ -34,14 +34,23 @@ class ActiveInference:
         self.w_cost = 1.0
         self.lr = 0.005
 
-    def choose(self, load: float, pred_err: float, social: float, energy: float, activity: float = 0.0, valence: float = 0.0):
+    def choose(self, load: float, pred_err: float, social: float, energy: float, activity: float = 0.0, valence: float = 0.0,
+               mb_tendency: float = 0.0):
+        """speak/silence，蘑菇体 approach-avoid 差作为先验（默认 0 = 旧行为）。"""
+        try:
+            tendency = max(-1.0, min(1.0, float(mb_tendency)))
+        except Exception:
+            tendency = 0.0
         def efe(action: str) -> float:
             if action == "speak":
                 risk = max(0.0, load - 0.10 * social - 0.15 * float(valence))
                 cost = 0.05 + 0.05 * max(0.0, 0.3 - energy) + 0.10 * max(0.0, float(activity))
+                # 蘑菇体回避 -> 说话更贵；趋近 -> 更便宜
+                risk += 2.5 * max(0.0, -tendency)
             else:
                 risk = load + 0.08 * social + 0.10 * float(valence)
                 cost = 0.02
+                risk += 2.5 * max(0.0, tendency)
             return self.w_risk * risk + self.w_amb * pred_err * pred_err + self.w_cost * cost
         s, q = efe("speak"), efe("silence")
         return {"action": "speak" if s < q else "silence", "efe_speak": round(s, 4), "efe_silence": round(q, 4)}

@@ -48,6 +48,7 @@ def read_rows(store, session_id=None) -> List[dict]:
                     paths.append(p)
     rows = []
     for path in paths:
+        sid = os.path.basename(os.path.dirname(path))
         try:
             with open(path, "r", encoding="utf-8") as fh:
                 for line in fh:
@@ -55,9 +56,12 @@ def read_rows(store, session_id=None) -> List[dict]:
                     if not line:
                         continue
                     try:
-                        rows.append(json.loads(line))
+                        row = json.loads(line)
                     except Exception:
                         continue
+                    if isinstance(row, dict):
+                        row["_session"] = sid
+                        rows.append(row)
         except Exception:
             continue
     return rows
@@ -85,11 +89,20 @@ def _solve(a, b):
     return [m[i][n] for i in range(n)]
 
 
-def fit(rows, min_rows=8) -> Optional[Dict[str, Dict[str, float]]]:
-    """按输出通道分别拟合；样本不足或奇异就返回 None。"""
+def sessions_of(rows) -> int:
+    return len({str(r.get("_session") or "") for r in rows if isinstance(r, dict)} - {""})
+
+
+def fit(rows, min_rows=8, min_sessions=2) -> Optional[Dict[str, Dict[str, float]]]:
+    """按输出通道分别拟合；样本不足、会话不够或方程奇异就返回 None。
+
+    只在一个会话里拟合出来的权重，反映的是"那一段时间的巧合"，不是规律。
+    """
     usable = [r for r in rows if isinstance(r.get("dims"), dict)
               and isinstance(r.get("before"), dict) and isinstance(r.get("after"), dict)]
     if len(usable) < int(min_rows):
+        return None
+    if min_sessions and sessions_of(usable) < int(min_sessions):
         return None
     out = {}
     for channel in OUTPUTS:
@@ -119,14 +132,55 @@ def fit(rows, min_rows=8) -> Optional[Dict[str, Dict[str, float]]]:
     return out or None
 
 
-def save(store, table) -> str:
+def history_path(store):
+    return os.path.join(str(store), "appraisal_weights_history.jsonl")
+
+
+def save(store, table, meta=None) -> str:
+    """写当前权重；同时追一条历史，方便以后看它有没有漂。"""
     path = weights_path(store)
     doc = {"version": 1, "weights": table}
     tmp = path + ".tmp"
     with open(tmp, "w", encoding="utf-8") as fh:
         json.dump(doc, fh, ensure_ascii=False, indent=2)
     os.replace(tmp, path)
+    try:
+        import time as _time
+        row = {"ts": round(_time.time(), 3), "weights": table}
+        if isinstance(meta, dict):
+            row.update({k: v for k, v in meta.items() if k in ("rows", "sessions")})
+        with open(history_path(store), "a", encoding="utf-8") as fh:
+            fh.write(json.dumps(row, ensure_ascii=False) + "\n")
+    except Exception:
+        pass
     return path
+
+
+def last_history(store):
+    """上一条历史（用来对比这次漂了多少）；没有就返回空。"""
+    try:
+        with open(history_path(store), "r", encoding="utf-8") as fh:
+            lines = [line.strip() for line in fh if line.strip()]
+        return json.loads(lines[-1]) if lines else {}
+    except Exception:
+        return {}
+
+
+def drift(old, new, top=3):
+    """两次权重之间变化最大的几项（绝对值差）。"""
+    old = old if isinstance(old, dict) else {}
+    new = new if isinstance(new, dict) else {}
+    diffs = []
+    for channel, row in (new or {}).items():
+        base = old.get(channel) if isinstance(old.get(channel), dict) else {}
+        for dim, value in (row or {}).items():
+            try:
+                delta = float(value) - float(base.get(dim) or 0.0)
+            except Exception:
+                continue
+            diffs.append((abs(delta), channel, dim, delta))
+    diffs.sort(reverse=True)
+    return [{"channel": c, "dim": d, "delta": round(v, 4)} for _a, c, d, v in diffs[:top]]
 
 
 def load(store) -> Dict[str, Dict[str, float]]:

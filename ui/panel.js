@@ -451,8 +451,8 @@
     var el = $('bodyTruth')
     if (!el) return
     var m = (data && data.mushroom_body) || {}
-    var v = Number(m.valence)
-    var a = Number(m.arousal)
+    var v = Number(Number.isFinite(Number(m.mb_valence)) ? m.mb_valence : m.valence)
+    var a = Number(Number.isFinite(Number(m.mb_arousal)) ? m.mb_arousal : m.arousal)
     var s = Number(m.stress)
     if (!Number.isFinite(v) || !Number.isFinite(s)) {
       el.textContent = DASH
@@ -460,6 +460,8 @@
     }
     el.textContent = 'v ' + fmt(v) + ' · a ' + fmt(Number.isFinite(a) ? a : 0)
       + ' · stress ' + fmt(s) + ' · ' + String(m.action || DASH)
+      + (Number.isFinite(Number(m.mb_approach)) && Number.isFinite(Number(m.mb_avoid))
+        ? ' · MB ' + fmt(Number(m.mb_approach) - Number(m.mb_avoid)) : '')
   }
 
   function renderState(data) {

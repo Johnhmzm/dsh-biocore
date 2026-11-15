@@ -153,7 +153,17 @@ class MindBase:
         salience = clip(salience + 0.15 * float(getattr(self, "memory_prediction_error", 0.0)), 0.0, 1.0)
         self.wm.tick(dt, self.t)
         self.wm.push(ev.text, salience, self.t)
-        self.circuit.update(salience, reward=max(0.0, ap.valence), punishment=max(0.0, -ap.valence))
+        _intero_now = {}
+        try:
+            _intero_now = self.physiology.interoception(
+                self.drives.get("energy"), self.drives.get("social"))
+        except Exception:
+            _intero_now = {}
+        self.circuit.update(
+            salience, reward=max(0.0, ap.valence), punishment=max(0.0, -ap.valence),
+            intero=_intero_now,
+            affect={"v": self.affect.v, "a": self.affect.a,
+                    "stress": self.affect.stress})
         self.critical_state = self.critical.step(salience)
         self.circuit.enforce_capacity()
         self.circuit_valence = self.circuit.valence()

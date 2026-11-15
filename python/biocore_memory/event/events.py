@@ -16,6 +16,11 @@ import time
 FLAG_KEY = 'event_layer'
 _DEFAULT_RERANK = None
 
+# 记忆是自己的记忆：不写「用户 / 助手」这种第三人称。
+# 对方的名字由调用方注入（配置 recall.gist_names）；没注入时退成「对方」。
+SELF_LABEL = '我'
+USER_LABEL = '对方'
+
 
 def set_default_rerank(fn):
     """Register the rerank used when a caller does not pass one (None = off)."""
@@ -615,7 +620,8 @@ def render_event_hits(event, max_hits=3):
             continue
         by_turn.setdefault(turn, []).append(entry)
     def speaker(entry):
-        return '用户' if str(entry.get('role') or '') == 'user' else '助手'
+        # 记忆是自己的记忆：自己写「我」；对方不写「用户」，没有注入全名时写「对方」。
+        return USER_LABEL if str(entry.get('role') or '') == 'user' else SELF_LABEL
     first = _split_sentences(entries[0].get('text'))
     last = _split_sentences(entries[-1].get('text'))
     if first:
@@ -883,7 +889,7 @@ def _short_stamp(ts):
 def rerank_doc(entry, event=None):
     """Rerank input: time + speaker + sentence + a short note clue (sentence intact)."""
     entry = entry if isinstance(entry, dict) else {}
-    role = '用户' if str(entry.get('role') or '') == 'user' else '助手'
+    role = USER_LABEL if str(entry.get('role') or '') == 'user' else SELF_LABEL
     note = str((event or {}).get('overview') or '').strip()[:40]
     return '[%s %s] %s ｜ 事件：%s' % (_short_stamp(entry.get('ts')), role,
                                       str(entry.get('text') or ''), note)
