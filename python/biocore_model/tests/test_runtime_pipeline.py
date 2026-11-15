@@ -1059,6 +1059,7 @@ class PersonaPromptTest(unittest.TestCase):
         return pl.dispatch("turn_start", payload)
 
     def _persona_line(self, prompt_block):
+        # 默认顺序下（STABLE_PREFIX=0）人设仍是最后一行。
         lines = str(prompt_block).splitlines()
         self.assertTrue(lines)
         self.assertTrue(lines[-1].startswith("人设："))

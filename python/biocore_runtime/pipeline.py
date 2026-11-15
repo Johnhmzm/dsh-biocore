@@ -6688,7 +6688,17 @@ def _body_turn_impl(store, session_id, text, payload=None):
         try:
             from biocore_model import appraisal as _ap
             if dims:
-                outs = _ap.appraise(dims, confidence=0.7)
+                # 有拟合好的权重就用它：那是从真实回合里学出来的映射，
+                # 没有就退回内置的手调矩阵。
+                _w = None
+                try:
+                    from biocore_model import appraisal_fit as _af
+                    _table = _af.load(store)
+                    if _table:
+                        _w = _af.flatten(_table) or None
+                except Exception:
+                    _w = None
+                outs = _ap.appraise(dims, confidence=0.7, weights=_w)
         except Exception:
             outs = None
         state = _mb.turn(store, session_id, text, dims, with_memory=False, outs=outs)
