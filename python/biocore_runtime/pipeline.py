@@ -7717,6 +7717,8 @@ def _body_loop_impl(store, session_id, now=None, seed=BODY_LOOP_SEED, payload=No
         _topic_key = ""
         # 解释风格（BIOCORE_ATTRIB_STYLE，缺省关）：关着时 _attrib 恒 1.0
         _attrib = 1.0
+        # 照顾的代价（BIOCORE_CARE_FATIGUE，缺省关）：关着时 _care_factor 恒 1.0
+        _care_factor = 1.0
         # 起念不该要求"先难受"：果蝇的自发行为不需要外部刺激。
         # 强度 = 情绪（由头）+ 噪声；超过 0 就起念，没有情绪也可以被噪声推一下。
         # 起念的水平来自"不带对象的唤醒"（Panksepp 的 SEEKING + 唤醒度），
@@ -7831,8 +7833,19 @@ def _body_loop_impl(store, session_id, now=None, seed=BODY_LOOP_SEED, payload=No
             _panic_eff = 0.0
             if isinstance(_systems, dict) and _systems:
                 _panic_eff = _mb.panic_effective(_systems.get("PANIC", 0.0))
+                # 照顾的代价：连着照顾越久，CARE 对由头的贡献越钝（下限 0.35，不会消失）。
+                # 只在七系统这一路上生效；SEEKING/FEAR/RAGE 一律不碰。
+                _care_v = float(_systems.get("CARE") or 0.0)
+                try:
+                    from biocore_runtime import care_fatigue as _cf
+                    if _cf.enabled():
+                        _cf.observe(store, sid, _care_v, stamp,
+                                    negative=max(0.0, -float(state.get("valence") or 0.0)))
+                        _care_factor = _cf.factor(store, sid, stamp)
+                except Exception:
+                    _care_factor = 1.0
                 _reason = (0.35 * float(_systems.get("SEEKING") or 0.0)
-                           + 0.25 * float(_systems.get("CARE") or 0.0)
+                           + 0.25 * _care_v * _care_factor
                            + 0.20 * _panic_eff
                            + 0.20 * float(_systems.get("PLAY") or 0.0))
                 _reason = max(0.0, min(1.0, _reason))
@@ -7915,6 +7928,8 @@ def _body_loop_impl(store, session_id, now=None, seed=BODY_LOOP_SEED, payload=No
                 speak_reason["topic_closed"] = round(_closure, 3)
             if _attrib < 1.0:
                 speak_reason["attrib_style"] = round(_attrib, 3)
+            if _care_factor < 1.0:
+                speak_reason["care_fatigue"] = round(_care_factor, 3)
             if isinstance(_systems, dict) and _systems:
                 speak_reason["systems"] = {k: round(float(_systems.get(k) or 0.0), 3)
                                            for k in _mb.SYSTEMS}
