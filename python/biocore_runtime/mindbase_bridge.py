@@ -243,20 +243,27 @@ class DialogueBody:
             return 0
         aff = self.mind.affect
         try:
-            for key, field in (("v", "v"), ("a", "a"), ("stress", "stress"),
-                               ("d", "dominance")):
+            # 每个字段自己的范围：stress/a 是 0..1，v/d 是 -1..1。
+            for key, field, lo, hi in (("v", "v", -1.0, 1.0),
+                                       ("a", "a", 0.0, 1.0),
+                                       ("stress", "stress", 0.0, 1.0),
+                                       ("d", "dominance", -1.0, 1.0)):
                 if key in outs:
                     cur = float(getattr(aff, field, 0.0))
-                    setattr(aff, field, max(-1.0, min(1.0, cur + float(outs[key]) * scale)))
+                    setattr(aff, field,
+                            max(lo, min(hi, cur + float(outs[key]) * scale)))
                     applied += 1
         except Exception:
             pass
         try:
             drives = self.mind.drives.values
-            for key, field in (("social", "social"), ("trust", "safety")):
+            for key, field, sign in (("social", "social", 1.0),
+                                     ("trust", "safety", 1.0),
+                                     ("conflict", "safety", -1.0)):
                 if key in outs:
                     cur = float(drives.get(field, 0.5))
-                    drives[field] = max(0.0, min(1.0, cur + float(outs[key]) * scale))
+                    drives[field] = max(0.0, min(
+                        1.0, cur + sign * float(outs[key]) * scale))
                     applied += 1
         except Exception:
             pass
@@ -266,6 +273,122 @@ class DialogueBody:
                 cur = float(getattr(sm, "agency", 0.5))
                 sm.agency = max(0.0, min(1.0, cur + float(outs["self_esteem"]) * scale))
                 applied += 1
+        except Exception:
+            pass
+        return applied
+
+    def apply_dims_channels(self, dims, scale: float = 1.0) -> int:
+        """7 维在 outs 之外的直连通道（只写 outs 覆盖不到的量）。
+
+        blame/novelty/hit/involve/goal 已经由 appraisal.outs 落到 affect/drives
+        （见 V2_WEIGHTS），这里不重复写；control 没有 agency 的输出、certainty
+        没有 confidence 的输出，才在这里补两条。
+        """
+        if not isinstance(dims, dict):
+            return 0
+        applied = 0
+        try:
+            sm = self.mind.self_model
+            control = dims.get("control")
+            if isinstance(control, (int, float)):
+                cur = float(getattr(sm, "agency", 0.5))
+                sm.agency = max(0.0, min(1.0, cur + (float(control) - 0.5)
+                                           * DIMS_GAIN * scale))
+                applied += 1
+            certainty = dims.get("certainty")
+            if isinstance(certainty, (int, float)):
+                cur = float(getattr(sm, "expression_confidence", 0.5))
+                sm.expression_confidence = max(
+                    0.0, min(1.0, cur + (float(certainty) - 0.5)
+                             * DIMS_GAIN * scale))
+                applied += 1
+        except Exception:
+            pass
+        return applied
+
+    def apply_affiliation_channels(self, dims, scale: float = 1.0) -> int:
+        """closeness + needs.belonging/self_esteem/control/meaningful -> drives/self。
+
+        closeness 与 needs.belonging 都指向 social 驱动（关系足够近、归属被满足）；
+        needs.control -> agency；needs.self_esteem -> identity（自我价值）； 
+        needs.meaningful_existence -> curiosity（意义感驱动探索）。
+        """
+        if not isinstance(dims, dict):
+            return 0
+        applied = 0
+        try:
+            drives = self.mind.drives.values
+            sm = self.mind.self_model
+
+            def _push(current, delta):
+                return max(0.0, min(1.0, float(current) + delta))
+
+            for key, field in (("closeness", "social"),
+                               ("need_belonging", "social")):
+                value = dims.get(key)
+                if isinstance(value, (int, float)):
+                    drives[field] = _push(drives.get(field, 0.5),
+                                          (float(value) - 0.5) * LINK_GAIN * scale)
+                    applied += 1
+            value = dims.get("need_control")
+            if isinstance(value, (int, float)):
+                sm.agency = _push(getattr(sm, "agency", 0.5),
+                                  (float(value) - 0.5) * LINK_GAIN * scale)
+                applied += 1
+            value = dims.get("need_self_esteem")
+            if isinstance(value, (int, float)):
+                sm.identity = _push(getattr(sm, "identity", 0.7),
+                                    (float(value) - 0.5) * LINK_GAIN * scale)
+                applied += 1
+            value = dims.get("need_meaningful")
+            if isinstance(value, (int, float)):
+                drives["curiosity"] = _push(
+                    drives.get("curiosity", 0.5),
+                    (float(value) - 0.5) * LINK_GAIN * scale)
+                applied += 1
+        except Exception:
+            pass
+        return applied
+
+    def apply_intero_channels(self, dims, scale: float = 1.0) -> int:
+        """内感受四量 -> affect/physiology/drives（各选一个不重复的落点）。
+
+        tension -> affect.fatigue（紧张耗能）；
+        warmth   -> physiology.oxytocin（温暖=催产素）；
+        heaviness -> drives.energy（沉=精力低）；
+        clarity  -> mind.meta.confidence（清楚=元认知置信）。
+        stress/social 已有状态层来源，这里不重复写。
+        """
+        if not isinstance(dims, dict):
+            return 0
+        applied = 0
+        try:
+            aff = self.mind.affect
+            value = dims.get("intero_tension")
+            if isinstance(value, (int, float)):
+                aff.fatigue = max(0.0, min(1.0, float(aff.fatigue)
+                                           + (float(value) - 0.3) * INTERO_GAIN * scale))
+                applied += 1
+            value = dims.get("intero_warmth")
+            if isinstance(value, (int, float)):
+                phys = self.mind.physiology
+                phys.oxytocin = max(0.0, min(1.0, float(phys.oxytocin)
+                                             + (float(value) - 0.6) * INTERO_GAIN * scale))
+                applied += 1
+            value = dims.get("intero_heaviness")
+            if isinstance(value, (int, float)):
+                drives = self.mind.drives.values
+                drives["energy"] = max(0.0, min(1.0, float(drives.get("energy", 0.5))
+                                                - (float(value) - 0.3) * INTERO_GAIN * scale))
+                applied += 1
+            value = dims.get("intero_clarity")
+            if isinstance(value, (int, float)):
+                meta = getattr(self.mind, "meta", None)
+                if meta is not None:
+                    cur = float(getattr(meta, "confidence", 0.5))
+                    meta.confidence = max(0.0, min(1.0, cur + (float(value) - 0.7)
+                                                     * INTERO_GAIN * scale))
+                    applied += 1
         except Exception:
             pass
         return applied
@@ -352,6 +475,28 @@ class DialogueBody:
                     aff2.a = max(0.0, min(1.0, float(aff2.a) * (1.0 - _k) + _a_keep * _k))
                 except Exception:
                     pass
+        # 评价矩阵的 8 个输出在 push 之后落地：feed 先 tick 后 push，放在 push
+        # 之后才不会被 tick 重算抹平；v/a 复用 _tick_once 里已有的 PUSH_KEEP
+        # 惯性，drives（safety/social）与 self_model.agency 是积分量，跨轮保留。
+        if outs:
+            try:
+                self.apply_outputs(outs, scale=eff("outs_gain", OUTS_GAIN))
+            except Exception:
+                pass
+        # 7 维里 outs 覆盖不到的两条（control/agency、certainty/confidence）
+        if d:
+            try:
+                self.apply_dims_channels(d, scale=eff("dims_gain", 1.0))
+            except Exception:
+                pass
+            try:
+                self.apply_affiliation_channels(d, scale=eff("link_gain", 1.0))
+            except Exception:
+                pass
+            try:
+                self.apply_intero_channels(d, scale=eff("intero_gain", 1.0))
+            except Exception:
+                pass
         return self.state()
 
     def reply(self, text: str = "", ticks: int = 0) -> Dict[str, float]:
@@ -444,6 +589,15 @@ import os as _os
 BODY_NOISE_AMP = float(_os.environ.get("BIOCORE_BODY_NOISE_AMP") or 0.30)
 # how hard one message pushes the body: 1.0 = replace, 0.35 = nudge
 PUSH_GAIN = float(_os.environ.get("BIOCORE_BODY_PUSH") or 0.35)
+# appraisal.outputs 已经是逐项限幅后的 delta（CAPS），直接落、不再额外打折；
+# 需要更钝的近似旧行为可用 BIOCORE_OUTS_GAIN=0.35。
+OUTS_GAIN = float(_os.environ.get("BIOCORE_OUTS_GAIN") or 1.0)
+# appraisal 的 7 维里，outs 覆盖不到的直连通道：control -> agency、certainty -> confidence。
+DIMS_GAIN = float(_os.environ.get("BIOCORE_DIMS_GAIN") or 0.2)
+# 关系亲近 + 四需求 -> drives/self_model（只在状态层算过、此前没进身体）
+LINK_GAIN = float(_os.environ.get("BIOCORE_LINK_GAIN") or 0.2)
+# 内感受四量 -> 找各自没有第二条来源的落点（不重复写 stress/social）
+INTERO_GAIN = float(_os.environ.get("BIOCORE_INTERO_GAIN") or 0.2)
 ANCHOR_GAIN = float(_os.environ.get("BIOCORE_ANCHOR_GAIN") or 0.04)
 ANCHOR_LEARN = float(_os.environ.get("BIOCORE_ANCHOR_LEARN") or 0.25)
 # 一次冲击在下一轮还能留住多少：0 = 立刻抹平（旧行为），0.7 = 三轮左右退干净
@@ -580,6 +734,18 @@ def body_for(store, session_id, seed: int = 1) -> "DialogueBody":
                                     prev.get("arousal", 0.5),
                                     prev.get("dominance", 0.0),
                                     intensity=1.0, blend=1.0)
+            # 生命循环要求身体跨轮连续：stress / agency 此前每轮被重置，
+            # 导致"过阈"永远看不到上一轮留下的压力。只恢复已存在的数字，
+            # 不造新值（没有该键就保持默认）。
+            try:
+                if prev.get("stress") is not None:
+                    body.mind.affect.stress = max(
+                        0.0, min(1.0, float(prev.get("stress") or 0.0)))
+                if prev.get("agency") is not None:
+                    body.mind.self_model.agency = max(
+                        0.0, min(1.0, float(prev.get("agency") or 0.0)))
+            except Exception:
+                pass
         except Exception:
             pass
     try:
@@ -1136,6 +1302,68 @@ def _clock_save(store, session_id, ts):
         return True
     except Exception:
         return False
+
+
+HEARTBEAT_FILE = "mindbase_heartbeat.jsonl"
+HEARTBEAT_CAP = 400
+
+
+def heartbeat_path(store, session_id):
+    return _body_path(store, session_id).replace(BODY_STATE_FILE, HEARTBEAT_FILE)
+
+
+def heartbeat_last(store, session_id):
+    """Last heartbeat row (corrupt/missing file -> {}; never raises)."""
+    import json
+    path = heartbeat_path(store, session_id)
+    try:
+        rows = []
+        with open(path, "r", encoding="utf-8") as fh:
+            for line in fh:
+                line = line.strip()
+                if line:
+                    rows.append(line)
+        for line in reversed(rows):
+            try:
+                row = json.loads(line)
+            except Exception:
+                continue
+            if isinstance(row, dict):
+                return row
+    except Exception:
+        pass
+    return {}
+
+
+def heartbeat_append(store, session_id, row, cap=HEARTBEAT_CAP):
+    """Append one observability line outside state.json (safe if file corrupt)."""
+    import json
+    import os
+    path = heartbeat_path(store, session_id)
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        line = json.dumps(row, ensure_ascii=False) + chr(10)
+        with open(path, "a", encoding="utf-8") as fh:
+            fh.write(line)
+        try:
+            with open(path, "r", encoding="utf-8") as fh:
+                lines = fh.readlines()
+            if len(lines) > int(cap):
+                with open(path, "w", encoding="utf-8") as fh:
+                    fh.writelines(lines[-int(cap):])
+        except Exception:
+            pass
+        return True
+    except Exception:
+        return False
+
+
+def clock_value(store, session_id):
+    """Last advance() clock (the same one advance() uses for elapsed)."""
+    try:
+        return float(_clock_load(store, session_id).get("last_tick") or 0.0)
+    except Exception:
+        return 0.0
 
 
 def advance(store, session_id, now=None, seed=1):

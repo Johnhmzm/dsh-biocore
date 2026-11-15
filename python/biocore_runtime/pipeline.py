@@ -6665,6 +6665,86 @@ def body_turn(store, session_id, text, payload=None):
         return _body_turn_impl(store, session_id, text, payload)
 
 
+def _body_dims_from_payload(payload):
+    """把 appraisal 的 7 维从 payload/上一次 perception 状态里取出来。
+
+    身体侧的 `dims` 原来只有 PAD + 状态层四量；7 维留在 perception/state，
+    评价矩阵拿不到。这里只读、不改任何状态。
+    """
+    data = payload if isinstance(payload, dict) else {}
+    try:
+        from biocore_runtime import perception as _pc
+        dims = _pc.dims_of(data)
+    except Exception:
+        dims = {}
+    if dims:
+        return dims
+    state = data.get("state") if isinstance(data.get("state"), dict) else {}
+    appr = state.get("appraisal") if isinstance(state.get("appraisal"), dict) else {}
+    raw = appr.get("dims") if isinstance(appr.get("dims"), dict) else appr
+    if not isinstance(raw, dict):
+        return {}
+    out = {}
+    for name in ("goal", "blame", "control", "certainty", "novelty",
+                 "involve", "hit"):
+        value = raw.get(name)
+        if isinstance(value, (int, float)):
+            low = -1.0 if name == "goal" else 0.0
+            out[name] = round(max(low, min(1.0, float(value))), 4)
+    return out
+
+
+def _body_links_from_payload(payload):
+    """关系 closeness + 四需求（belonging/self_esteem/control/meaningful）。
+
+    只读 payload/state，返回 {closeness, need_*}；没有就给空 dict。
+    """
+    data = payload if isinstance(payload, dict) else {}
+    state = data.get("state") if isinstance(data.get("state"), dict) else {}
+    core = state.get("core") if isinstance(state.get("core"), dict) else {}
+    rel = state.get("relationship") if isinstance(
+        state.get("relationship"), dict) else {}
+    out = {}
+    closeness = rel.get("closeness", core.get("closeness"))
+    if isinstance(closeness, (int, float)):
+        out["closeness"] = round(max(0.0, min(1.0, float(closeness))), 4)
+    needs = state.get("needs") if isinstance(state.get("needs"), dict) else {}
+    if not needs and isinstance(core.get("needs"), dict):
+        needs = core["needs"]
+    for need_key, dim_key in (("belonging", "need_belonging"),
+                              ("self_esteem", "need_self_esteem"),
+                              ("control", "need_control"),
+                              ("meaningful_existence", "need_meaningful")):
+        value = needs.get(need_key)
+        if isinstance(value, (int, float)):
+            out[dim_key] = round(max(0.0, min(1.0, float(value))), 4)
+    return out
+
+
+def _body_intero_from_payload(payload):
+    """内感受四量（tension/warmth/heaviness/clarity）从 payload/state 取。
+
+    身体只消费数字；读不到就给空 dict，不造默认值。
+    """
+    data = payload if isinstance(payload, dict) else {}
+    state = data.get("state") if isinstance(data.get("state"), dict) else {}
+    core = state.get("core") if isinstance(state.get("core"), dict) else {}
+    intero = state.get("intero") if isinstance(state.get("intero"), dict) else {}
+    if not intero and isinstance(core.get("intero"), dict):
+        intero = core["intero"]
+    if not intero and isinstance(data.get("intero"), dict):
+        intero = data["intero"]
+    out = {}
+    for src, key in (("tension", "intero_tension"),
+                     ("warmth", "intero_warmth"),
+                     ("heaviness", "intero_heaviness"),
+                     ("clarity", "intero_clarity")):
+        value = intero.get(src)
+        if isinstance(value, (int, float)):
+            out[key] = round(max(0.0, min(1.0, float(value))), 4)
+    return out
+
+
 def _body_turn_impl(store, session_id, text, payload=None):
     """Feed one user turn into the digital-fly body and return its state.
 
@@ -6698,6 +6778,24 @@ def _body_turn_impl(store, session_id, text, payload=None):
                                ("conflict", _rel.get("conflict", _core.get("conflict")))):
                 if isinstance(_val, (int, float)):
                     dims.setdefault(_key, float(_val))
+        except Exception:
+            pass
+        # 7 维（goal/blame/control/certainty/novelty/involve/hit）喂给评价矩阵；
+        # 来源：payload.dims / payload.appraisal.dims / 上一次 state.appraisal.dims。
+        try:
+            for _k, _v in (_body_dims_from_payload(payload) or {}).items():
+                dims.setdefault(_k, float(_v))
+        except Exception:
+            pass
+        # 关系亲近 + 四需求：状态层算过、此前从没进过身体。
+        try:
+            for _k, _v in (_body_links_from_payload(payload) or {}).items():
+                dims.setdefault(_k, float(_v))
+        except Exception:
+            pass
+        try:
+            for _k, _v in (_body_intero_from_payload(payload) or {}).items():
+                dims.setdefault(_k, float(_v))
         except Exception:
             pass
         # 7x7 评价矩阵在这里第一次真正上电：dims 进去，八个输出各自落到身体
@@ -7049,6 +7147,262 @@ def body_state(store, session_id):
         return _mb.load_state(store, session_id)
     except Exception:
         return {}
+
+
+BODY_LOOP_SEED = 1
+
+
+def body_loop(store, session_id, now=None, seed=BODY_LOOP_SEED, payload=None):
+    """DSH 生命循环的一次循环体：L0→L5 逐层下渗（纯本地，0 模型调用）。
+
+    L0 生理（呼吸/自律/昼夜/疲劳）→ discomfort、阈值
+    L1 内感受（tension/warmth/heaviness/clarity）← L0
+    L2 情绪（v/a/d/mood/load）← L1
+    L3 需要（social/safety/esteem/control/meaning）← L2
+    L4 身体（蘑菇体 drives/affect/self_model）← L2 + L3
+    L5 意图（是否开口/想说什么）← L4
+
+    每层输出写进返回的 layers，并逐层消费上一层本 tick 的值；不读上一 tick 缓存
+    （L1 用 L0 的 discomfort 重建 source，L2/L3 只用上一层数字）。只写身体状态与
+    心跳日志，不写记忆条目；任何异常返回 ok=False，不影响主流程。
+    """
+    data = payload if isinstance(payload, dict) else {}
+    if not _body_enabled(store, data):
+        return {"ok": True, "enabled": False, "reason": "body_off",
+                "ticks": 0, "over_threshold": False, "intent_text": "",
+                "layers": {}, "state": {}}
+    from biocore_runtime import mindbase_bridge as _mb
+    if not _mb.available():
+        return {"ok": False, "enabled": True, "reason": "mindbase_unavailable",
+                "ticks": 0, "over_threshold": False, "intent_text": "",
+                "layers": {}, "state": {}}
+    sid = sanitize_session_id(session_id)
+    stamp = float(now) if isinstance(now, (int, float)) else time.time()
+
+    def _clamp(value, lo=0.0, hi=1.0):
+        try:
+            return round(max(lo, min(hi, float(value))), 4)
+        except Exception:
+            return round(lo, 4)
+
+    try:
+        last = _mb.heartbeat_last(store, sid) or {}
+        clock = float(_mb.clock_value(store, sid) or 0.0)
+        skipped = bool(last and clock > float(last.get("clock") or 0.0) + 1e-6)
+        ticks = 0
+        if not skipped:
+            adv = _mb.advance(store, sid, stamp, seed=int(seed)) or {}
+            ticks = int(adv.get("ticks") or 0)
+            try:
+                _mb.idle_activity(store, sid, now=stamp, seed=int(seed))
+            except Exception:
+                pass
+        state = _mb.load_state(store, sid) or {}
+        body = _mb.body_for(store, sid, seed=int(seed))
+
+        # ---------- L0 生理：呼吸/自律/昼夜/疲劳 -> discomfort、阈值 ----------
+        base_v = float(state.get("valence") or 0.0)
+        base_a = float(state.get("arousal") or 0.5)
+        base_stress = float(state.get("stress") or 0.0)
+        base_social = float(state.get("social_drive") or 0.5)
+        base_safety = float(state.get("drive_safety") or 0.5)
+        base_energy = float(state.get("drive_energy") or 0.5)
+        load0 = float(state.get("allostatic_load") or 0.0)
+        circadian = 0.5
+        try:
+            from biocore_model import sleep_circadian as _circ
+            rhythm = _circ.sleep_state(stamp) or {}
+            circadian = float(rhythm.get("circadian") or 0.5)
+        except Exception:
+            pass
+        try:
+            from biocore_model import autonomic as _autonomic
+            threshold = float(_autonomic.threshold(now=stamp))
+            wave = float(_autonomic.wave(stamp))
+        except Exception:
+            threshold, wave = 0.35, 0.0
+        try:
+            from biocore_model import noise_bank as _noise
+            noise_val = float((_noise.value(int(seed), int(stamp // 60), "core")
+                               or {}).get("value") or 0.0)
+        except Exception:
+            noise_val = 0.0
+        boost = float(data.get("l0_discomfort") or 0.0)
+        discomfort = (max(0.0, -base_v) * 0.6 + base_stress * 0.9
+                      + max(0.0, 0.5 - base_social) * 0.2
+                      + max(0.0, 0.7 - base_safety) * 0.2
+                      + max(0.0, 0.5 - circadian) * 0.1
+                      + load0 * 0.1 + boost)
+        over = bool(discomfort + 0.05 * noise_val > threshold)
+        layers = {"L0": {"discomfort": _clamp(discomfort, 0.0, 2.0),
+                          "threshold": _clamp(threshold),
+                          "autonomic_wave": round(wave, 4),
+                          "noise": round(noise_val, 4),
+                          "circadian": _clamp(circadian),
+                          "fatigue_load": _clamp(load0),
+                          "over_threshold": over}}
+
+        # ---------- L1 内感受 <- L0 ----------
+        source = {"v": base_v, "a": base_a,
+                  # L1 只吃 L0 本 tick 的 discomfort（不用上一 tick 的 intero 缓存）
+                  "stress": max(base_stress, discomfort),
+                  "arousal": base_a, "social": base_social,
+                  "trust": float(state.get("drive_safety") or 0.5),
+                  "closeness": float(state.get("social_drive") or 0.5),
+                  "energy": base_energy, "allostatic_load": load0,
+                  "sleep_debt": 0.0, "conflict": 0.0,
+                  "noise": abs(noise_val)}
+        try:
+            from biocore_model import intero_core as _intero
+            intero = _intero.target(source) or {}
+        except Exception:
+            intero = {}
+        if not intero:
+            intero = {
+                "tension": _clamp(0.45 * source["stress"] + 0.25 * base_a
+                                  + 0.20 * load0),
+                "warmth": _clamp(0.40 * ((base_v + 1.0) / 2.0)
+                                 + 0.25 * base_social + 0.20 * source["trust"]
+                                 + 0.15 * source["closeness"]),
+                "heaviness": _clamp(0.40 * max(0.0, -base_v)
+                                    + 0.30 * load0 + 0.20 * (1.0 - base_energy)),
+                "clarity": _clamp(0.40 * (1.0 - abs(noise_val))
+                                  + 0.30 + 0.30 * (1.0 - abs(base_a - 0.5) * 2.0)),
+            }
+        L1 = {key: _clamp(intero.get(key)) for key in
+              ("tension", "warmth", "heaviness", "clarity")}
+        layers["L1"] = L1
+
+        # ---------- L2 情绪 <- L1 ----------
+        tension, warmth = L1["tension"], L1["warmth"]
+        heaviness, clarity = L1["heaviness"], L1["clarity"]
+        v2 = base_v - 0.45 * max(0.0, tension - 0.30) + 0.18 * (warmth - 0.60) \
+            - 0.15 * heaviness
+        a2 = base_a + 0.35 * tension - 0.20 * clarity
+        d2 = float(getattr(body.mind.affect, "dominance", 0.0)) \
+            + 0.30 * clarity - 0.20 * tension
+        stress2 = base_stress + 0.55 * max(0.0, tension - 0.20)
+        mood0 = float(state.get("mood") or 0.0)
+        mood2 = mood0 + 0.05 * (v2 - mood0)
+        load2 = load0 + 0.15 * max(0.0, -v2)
+        L2 = {"v": _clamp(v2, -1.0, 1.0), "a": _clamp(a2),
+              "d": _clamp(d2, -1.0, 1.0), "stress": _clamp(stress2),
+              "mood": _clamp(mood2, -1.0, 1.0), "load": _clamp(load2)}
+        layers["L2"] = L2
+
+        # ---------- L3 需要 <- L2 ----------
+        L3 = {
+            "social": _clamp(0.50 + 0.30 * L2["v"] + 0.20 * warmth
+                              - 0.20 * tension),
+            "safety": _clamp(0.55 - 0.35 * L2["stress"] + 0.25 * warmth),
+            "esteem": _clamp(0.50 + 0.30 * L2["d"] + 0.20 * (1.0 - tension)),
+            "control": _clamp(0.50 + 0.40 * L2["d"]),
+            "meaning": _clamp(0.50 + 0.30 * L2["mood"] - 0.20 * L2["load"]),
+        }
+        layers["L3"] = L3
+
+        # ---------- L4 身体 <- L2 + L3 ----------
+        if not skipped:
+            try:
+                aff = body.mind.affect
+                aff.v = L2["v"]
+                aff.a = L2["a"]
+                aff.stress = L2["stress"]
+                if hasattr(aff, "dominance"):
+                    aff.dominance = L2["d"]
+                drives = body.mind.drives.values
+                drives["social"] = L3["social"]
+                drives["safety"] = L3["safety"]
+                drives["curiosity"] = _clamp(float(drives.get("curiosity", 0.5))
+                                             + 0.10 * (L3["meaning"] - 0.5))
+                sm = body.mind.self_model
+                sm.agency = L3["control"]
+                sm.identity = L3["esteem"]
+                body.slow["mood"] = L2["mood"]
+                body.slow["load"] = L2["load"]
+                state = body.state()
+                _mb.save_state(store, sid, state)
+            except Exception as exc:
+                logger.warning("[body-loop] L4 apply skipped: %s: %s",
+                               type(exc).__name__, str(exc)[:100])
+        L4 = {"v": round(float(state.get("valence") or 0.0), 4),
+              "a": round(float(state.get("arousal") or 0.0), 4),
+              "stress": round(float(state.get("stress") or 0.0), 4),
+              "social": round(float(state.get("social_drive") or 0.0), 4),
+              "safety": round(float(state.get("drive_safety") or 0.0), 4),
+              "agency": round(float(state.get("agency") or 0.0), 4),
+              "mood": round(float(state.get("mood") or 0.0), 4),
+              "load": round(float(state.get("allostatic_load") or 0.0), 4)}
+        layers["L4"] = L4
+
+        # ---------- L5 意图 <- L4 ----------
+        intent_text = ""
+        pending = None
+        if over:
+            try:
+                from biocore_model import (criticality as _crit,
+                                           intent_render as _render,
+                                           mind_wander as _wander)
+                stress_now = L4["stress"]
+                social_now = L4["social"]
+                safety_now = L4["safety"]
+                loops = []
+                if stress_now >= 0.25:
+                    loops.append({"topic": "rest", "tension": min(1.0, stress_now)})
+                if social_now <= 0.5:
+                    loops.append({"topic": "share", "tension": min(1.0, 1.0 - social_now)})
+                if safety_now <= 0.6:
+                    loops.append({"topic": "muse", "tension": min(1.0, 1.0 - safety_now)})
+                if not loops:
+                    loops.append({"topic": "muse", "tension": 0.3})
+                pull = _wander.choose(loops, rumination=stress_now,
+                                      seed=int(stamp), now=int(stamp)) or {}
+                topic = str(pull.get("topic") or "muse")
+                action = {"rest": "rest", "share": "share",
+                          "muse": "question"}.get(topic, "question")
+                pending = {"action": action, "reason": "life-loop wander",
+                           "weight": float(pull.get("weight") or 0.0),
+                           "ts": stamp,
+                           "burst": float(_crit.burst_value(int(stamp),
+                                                           int(stamp // 60)))}
+                intent_text = str(_render.render(pending) or "")[:80]
+            except Exception:
+                intent_text = ""
+        layers["L5"] = {"over_threshold": over, "intent_text": intent_text,
+                        "action": str((pending or {}).get("action") or ""),
+                        "threshold": _clamp(threshold)}
+        # 唯一判定点：蘑菇体这一拍决定了什么（六层数值只是证据）
+        decision = {"action": str(state.get("action") or ""),
+                    "over_threshold": over,
+                    "intent_text": intent_text,
+                    "pending_weight": float((pending or {}).get("weight") or 0.0),
+                    "pending_action": str((pending or {}).get("action") or "")}
+        mushroom = {"affect": {"v": L4["v"], "a": L4["a"],
+                                "stress": L4["stress"]},
+                    "action": str(state.get("action") or ""),
+                    "over_threshold": over,
+                    "intent": intent_text}
+        row = {"ts": round(stamp, 3), "clock": round(_mb.clock_value(store, sid), 3),
+               "ticks": ticks, "skipped": skipped,
+               "v": L4["v"], "stress": L4["stress"],
+               "over_threshold": over, "intent": intent_text,
+               "layers": layers, "decision": decision,
+               "mushroom": mushroom}
+        _mb.heartbeat_append(store, sid, row)
+        return {"ok": True, "enabled": True, "ticks": ticks,
+                "skipped": skipped, "seconds": float(ticks) * 60.0,
+                "discomfort": layers["L0"]["discomfort"],
+                "threshold": layers["L0"]["threshold"],
+                "over_threshold": over, "intent_text": intent_text,
+                "pending_intent": pending or {}, "layers": layers,
+                "decision": decision, "mushroom": mushroom,
+                "state": state}
+    except Exception as exc:
+        logger.warning("[body-loop] 心跳跳过：%s: %s",
+                       type(exc).__name__, str(exc)[:120])
+        return {"ok": False, "enabled": True, "reason": type(exc).__name__,
+                "ticks": 0, "over_threshold": False, "intent_text": "",
+                "layers": {}, "decision": {}, "state": {}}
 
 
 def _inject_block_core(session_id, store, max_chars=None, top_k=TOP_K,
@@ -10749,6 +11103,7 @@ def _ui_state_body(store, session_id, data):
                 "memory_conflicts": memory_conflicts,
                 "relationship_metrics": rel_metrics,
                 "body_metrics": body,
+                "mushroom_body": body_state(store, session_id),
                 "narrative": {"intent": intent, "length_factor": 1.0,
                               "initiative": 0.5, "metacog_band": "",
                               "allow_correction": False},
@@ -12124,6 +12479,14 @@ def dispatch(action, payload=None):
             except Exception:
                 pass
             return {"ok": True, **result}
+        if action == "body_loop":
+            # 生命循环的一次循环体：本地推进 + 过阈 + 意图，0 模型调用。
+            session_id = str(data.get("session_id") or "").strip()
+            if not session_id:
+                return bad("missing session_id")
+            return body_loop(store, session_id, now=data.get("now"),
+                             seed=data.get("seed", BODY_LOOP_SEED),
+                             payload=data)
         if action == "body_evolve":
             # Offline evolution of the substrate. Explicitly NOT on the per-turn
             # path: it runs the fly body in its own environment for a while and
