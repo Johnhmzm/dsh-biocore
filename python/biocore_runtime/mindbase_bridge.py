@@ -148,7 +148,26 @@ class DialogueBody:
                     self.mind.drives.values[name] = max(0.0, min(1.0, val))
             except Exception:
                 pass
+        # 冲进去的情绪必须留得住：tick() 会按目标重算 affect，
+        # 一次强负面（-0.8）在一轮之内就被抹平（实测 -0.15 → +0.045）。
+        # 所以先记下当前值，tick 之后按惯性并回去，而不是被覆盖。
+        try:
+            _aff_before = self.mind.affect
+            _v_before = float(getattr(_aff_before, "v", 0.0))
+            _a_before = float(getattr(_aff_before, "a", 0.5))
+        except Exception:
+            _v_before = _a_before = None
         self.mind.tick()
+        if _v_before is not None:
+            try:
+                _keep = eff("push_keep", PUSH_KEEP)
+                _aff_now = self.mind.affect
+                _aff_now.v = max(-1.0, min(1.0,
+                    float(getattr(_aff_now, "v", 0.0)) * (1.0 - _keep) + _v_before * _keep))
+                _aff_now.a = max(0.0, min(1.0,
+                    float(getattr(_aff_now, "a", 0.5)) * (1.0 - _keep) + _a_before * _keep))
+            except Exception:
+                pass
         try:
             a = self.anchor
             aff = self.mind.affect
@@ -244,8 +263,23 @@ class DialogueBody:
             except Exception:
                 pass
         else:
+            # 没有评价的普通轮次走的是 mind.step()，它同样会把 affect 重算回目标。
+            # 这里也把上一轮的值按惯性并回去，否则一次冲击只活到下一句话。
+            try:
+                _v_keep = float(getattr(self.mind.affect, "v", 0.0))
+                _a_keep = float(getattr(self.mind.affect, "a", 0.5))
+            except Exception:
+                _v_keep = None
             self.mind.step(Event(text=str(text or ""), speaker="user",
                                  kind="message", domain="chat"))
+            if _v_keep is not None:
+                try:
+                    _k = eff("push_keep", PUSH_KEEP)
+                    aff2 = self.mind.affect
+                    aff2.v = max(-1.0, min(1.0, float(aff2.v) * (1.0 - _k) + _v_keep * _k))
+                    aff2.a = max(0.0, min(1.0, float(aff2.a) * (1.0 - _k) + _a_keep * _k))
+                except Exception:
+                    pass
         return self.state()
 
     def reply(self, text: str = "", ticks: int = 0) -> Dict[str, float]:
@@ -338,6 +372,8 @@ BODY_NOISE_AMP = float(_os.environ.get("BIOCORE_BODY_NOISE_AMP") or 0.30)
 PUSH_GAIN = float(_os.environ.get("BIOCORE_BODY_PUSH") or 0.35)
 ANCHOR_GAIN = float(_os.environ.get("BIOCORE_ANCHOR_GAIN") or 0.04)
 ANCHOR_LEARN = float(_os.environ.get("BIOCORE_ANCHOR_LEARN") or 0.25)
+# 一次冲击在下一轮还能留住多少：0 = 立刻抹平（旧行为），0.7 = 三轮左右退干净
+PUSH_KEEP = float(_os.environ.get("BIOCORE_PUSH_KEEP") or 0.7)
 # how much one idle recollection moves the baseline (small: only volume counts)
 REPLAY_LEARN = float(_os.environ.get("BIOCORE_REPLAY_LEARN") or 0.06)
 ANCHOR_RELAX = float(_os.environ.get("BIOCORE_ANCHOR_RELAX") or 0.02)
