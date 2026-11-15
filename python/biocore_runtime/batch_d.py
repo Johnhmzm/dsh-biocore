@@ -37,6 +37,7 @@ import collections
 import importlib
 import json
 import math
+import random
 import time
 
 SCHEMA = 1
@@ -260,13 +261,19 @@ def _write_autonomy(payload, state, now):
 def _read_expression(payload, state, now):
     """intent / tone / granularity / exit-or-silence / reply limits."""
     flat = _flat(state)
+    # expr_intent 的 memory_due 时间窗读 state["now"]；不给就永远拿不到时间
+    flat["now"] = now
     emotion = payload.get("emotion")
     candidates = payload.get("intents")
     if not isinstance(candidates, list) or not candidates:
         # expr_intent.BASE kinds; novelty 1.0 passes its own validity gate
         candidates = [{"kind": "comfort", "weight": 0.6, "novelty": 1.0},
                       {"kind": "share_mood", "weight": 0.4, "novelty": 1.0}]
-    picked = _value(_call("expr_intent", "pick_intent", candidates, flat), None)
+    # 确定性：模块文档写明 pick_intent 只在给了 rng 时才可复现，但调用点一直没给
+    # → 落进全局 random，同一句重复五次会给出不同标签（实测 1/5 一致）。这里按
+    # 分钟播种，与 L5 走神（mind_wander 用 seed=int(stamp)）同一条语义。
+    picked = _value(_call("expr_intent", "pick_intent", candidates, flat,
+                          random.Random(int(now))), None)
     intent = (str(picked.get("kind") or "") if isinstance(picked, dict)
               else str(picked or ""))
     tendency = _value(_call("intent_render", "tendency", intent), "") or ""
