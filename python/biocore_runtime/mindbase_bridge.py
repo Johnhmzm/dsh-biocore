@@ -8,7 +8,10 @@ evolve its genes, without putting any of that on the per-turn path.
 """
 from __future__ import annotations
 
+import math
 import random
+import re
+import time
 from typing import Dict, List, Optional, Sequence, Tuple
 
 _IMPORT_ERROR = None
@@ -127,6 +130,9 @@ class DialogueBody:
         # 三层（Structural Affect 式）：feeling 在 affect 里（秒级），
         # mood 是它的慢积分，load 是"偏离基线的时间累计"（只涨、极慢回落）。
         self.slow = {"mood": 0.0, "load": 0.0}
+        # 习惯化：同一个刺激反复推，力度递减；隔久了才恢复。
+        # 现在按"文本前 16 字的指纹"归并，键与时间都存在 self.habit 里。
+        self.habit = {}
         self.noise = None
         if noise:
             try:
@@ -134,6 +140,27 @@ class DialogueBody:
                 self.noise = EndogenousNoise(seed=int(seed))
             except Exception:
                 self.noise = None
+
+    def _habituation(self, text: str) -> float:
+        """同一个刺激重复出现时的力度系数（1 = 全新，越小越钝）。"""
+        try:
+            key = re.sub(r"\s+", "", str(text or ""))[:16]
+            if not key:
+                return 1.0
+            now = time.time()
+            row = self.habit.get(key) or {"n": 0.0, "ts": now}
+            # 次数按时间半衰：隔得久了，反应恢复
+            gap_h = max(0.0, now - float(row.get("ts") or now)) / 3600.0
+            n = float(row.get("n") or 0.0) * math.exp(-gap_h / max(0.1, eff("hab_tau_h", HAB_TAU_H)))
+            factor = 1.0 / (1.0 + eff("hab_gain", HAB_GAIN) * n)
+            self.habit[key] = {"n": n + 1.0, "ts": now}
+            # 只留最近 40 个刺激，防止无限增长
+            if len(self.habit) > 40:
+                keep = sorted(self.habit.items(), key=lambda kv: kv[1].get("ts", 0))[-40:]
+                self.habit = dict(keep)
+            return max(0.15, factor)
+        except Exception:
+            return 1.0
 
     def _tick_once(self, dt: float = 60.0) -> None:
         if self.noise is not None:
@@ -273,11 +300,12 @@ class DialogueBody:
             except Exception:
                 pass
             try:
+                _hab = self._habituation(text)
                 self.mind.inject_affect(float(d.get("valence") or 0.0),
                                         float(d.get("arousal") or 0.5),
                                         float(d.get("dominance") or 0.0),
-                                        intensity=eff("push_gain", PUSH_GAIN),
-                                        blend=eff("push_gain", PUSH_GAIN))
+                                        intensity=eff("push_gain", PUSH_GAIN) * _hab,
+                                        blend=eff("push_gain", PUSH_GAIN) * _hab)
             except Exception:
                 pass
         else:
@@ -398,6 +426,9 @@ PUSH_KEEP = float(_os.environ.get("BIOCORE_PUSH_KEEP") or 0.7)
 MOOD_ALPHA = float(_os.environ.get("BIOCORE_MOOD_ALPHA") or 0.05)
 LOAD_GAIN = float(_os.environ.get("BIOCORE_LOAD_GAIN") or 0.15)
 LOAD_DECAY = float(_os.environ.get("BIOCORE_LOAD_DECAY") or 0.002)
+# 习惯化：同一刺激重复推的衰减系数，以及恢复的时间常数（小时）
+HAB_GAIN = float(_os.environ.get("BIOCORE_HAB_GAIN") or 0.6)
+HAB_TAU_H = float(_os.environ.get("BIOCORE_HAB_TAU_H") or 6.0)
 # how much one idle recollection moves the baseline (small: only volume counts)
 REPLAY_LEARN = float(_os.environ.get("BIOCORE_REPLAY_LEARN") or 0.06)
 ANCHOR_RELAX = float(_os.environ.get("BIOCORE_ANCHOR_RELAX") or 0.02)
