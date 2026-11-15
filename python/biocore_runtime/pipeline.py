@@ -203,6 +203,10 @@ INSTANT_GAP = float(os.environ.get("BIOCORE_INSTANT_GAP") or 0.30)
 # 开口与沉默由噪声决定：这个振幅越大，越容易被噪声推过线（越随性）。
 # 0 等于不掷骰子，行为退回到纯规则。
 SPEAK_NOISE = float(os.environ.get("BIOCORE_SPEAK_NOISE") or 0.6)
+# 自发开口：与由头无关的那一路（默认网络 / 兴趣衰减）
+SPONT_GAIN = float(os.environ.get("BIOCORE_SPONT_GAIN") or 0.05)
+SPONT_TAU_H = float(os.environ.get("BIOCORE_SPONT_TAU_H") or 1.5)
+REFRACTORY_BEATS = float(os.environ.get("BIOCORE_REFRACTORY_BEATS") or 6.0)
 MAX_ENTRIES = 500         # [engineering]
 SESSION_MAX_LEN = 80
 _HOUR = 3600.0
@@ -7581,6 +7585,20 @@ def _body_loop_impl(store, session_id, now=None, seed=BODY_LOOP_SEED, payload=No
             _amp = max(0.0, min(2.0, _amp))
             # 风险随沉默时长上升（重尾）：沉默越久，越可能开口；没有由头则涨了也不开
             _hazard = 0.06 * (1.0 + _silent) ** 1.4 * (0.15 + _reason)
+            # 自发通路（默认网络那一路）：与由头无关，只随空闲和好奇上升。
+            # 没有它，CARE/PLAY 的底会一直充当由头，长尾永远出不来。
+            try:
+                _curio = float(state.get("drive_curiosity") or 0.5)
+                _idle_h = float(_silent) * 60.0 / 3600.0
+                _spont_tau = max(0.2, eff("spont_tau_h", SPONT_TAU_H))
+                _spont = (1.0 - _m.exp(-_idle_h / _spont_tau)) * (0.25 + 0.75 * _curio)
+                # 兴趣衰减：刚说过话，短期不再被自己提起
+                _since = float(state.get("beats_since_spoke") or 999.0)
+                _refract = 1.0 - _m.exp(-_since / max(1.0, eff("refractory_beats",
+                                                              REFRACTORY_BEATS)))
+                _hazard += eff("spont_gain", SPONT_GAIN) * _spont * _refract
+            except Exception:
+                pass
             _p_speak = 1.0 - _m.exp(-_hazard)
             _g = _r.Random(int(stamp) % 1000003).gauss(0.0, 1.0)
             _p_final = max(0.0, min(0.95, _p_speak * (1.0 + _amp * 0.25 * _g)))
@@ -7590,9 +7608,12 @@ def _body_loop_impl(store, session_id, now=None, seed=BODY_LOOP_SEED, payload=No
             if _r.Random(int(stamp) % 1000003 + 7).random() < _p_final:
                 speak_action = "speak"
                 state["silent_beats"] = 0.0
+                state["beats_since_spoke"] = 0.0
             else:
                 speak_action = "silence"
                 state["silent_beats"] = float(_silent + 1)
+                state["beats_since_spoke"] = float(
+                    state.get("beats_since_spoke") or 0.0) + 1.0
             speak_reason = {"silent_beats": _silent, "reason": round(_reason, 3),
                             "amp": round(_amp, 3), "p_speak": round(_p_final, 4)}
             if isinstance(_systems, dict) and _systems:
