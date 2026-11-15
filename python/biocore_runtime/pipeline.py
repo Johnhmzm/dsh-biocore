@@ -190,6 +190,19 @@ HOURLY_CAP = 20           # [engineering] product rate limit, not a memory theor
 MIN_CHARS = 8             # [engineering]
 MAX_TEXT_CHARS = 2000     # [engineering]
 MAX_STATE_CHARS = 200     # [engineering]
+# 心跳里负荷的时间常数与增益：3%/拍（60 秒一拍）= τ≈2000 秒；增益 0.05/拍。
+LOAD_TAU_S = 2000.0       # [engineering] 与旧 3%/60s 等价
+LOAD_GAIN_PER_BEAT = 0.05  # [engineering] 与旧 0.05/60s 等价
+# 心跳"是否已被别的路径推进过"的判定容差（秒）。行里 clock 只存到毫秒，
+# 1e-6 的容差会被四舍五入吃掉，见 _body_loop_impl 里的注释。
+SKIP_EPS = 0.05
+# "瞬时"的露出阈值：原始读数与 heart 差这么多，才算"刚才跳了一下"。
+# 0.30 是我们选的展示阈值，不是文献值（docs/AFFECT-LIT.md §4 已标）。
+# 可用 BIOCORE_INSTANT_GAP 调；设成 9.9 等于永不露出。
+INSTANT_GAP = float(os.environ.get("BIOCORE_INSTANT_GAP") or 0.30)
+# 开口与沉默由噪声决定：这个振幅越大，越容易被噪声推过线（越随性）。
+# 0 等于不掷骰子，行为退回到纯规则。
+SPEAK_NOISE = float(os.environ.get("BIOCORE_SPEAK_NOISE") or 0.6)
 MAX_ENTRIES = 500         # [engineering]
 SESSION_MAX_LEN = 80
 _HOUR = 3600.0
@@ -6650,6 +6663,19 @@ def _body_enabled(store, payload=None):
     return bool(BODY_ON)
 
 
+def _affect_scope_values(store, session_id):
+    """theta 作用域的取值：学习出来的 theta + 会话/配置层的时间常数。"""
+    from biocore_runtime import mindbase_bridge as _mbs
+    from biocore_runtime import theta as _ths
+    values = dict(_ths.values(store))
+    try:
+        values.update(_mbs.affect_params(_load_session_state(store, session_id),
+                                        _load_runtime_config(store)))
+    except Exception:
+        pass
+    return values
+
+
 def body_turn(store, session_id, text, payload=None):
     """本轮的身体推进。
 
@@ -6658,8 +6684,7 @@ def body_turn(store, session_id, text, payload=None):
     """
     try:
         from biocore_runtime import mindbase_bridge as _mbs
-        from biocore_runtime import theta as _ths
-        with _mbs.theta_scope(_ths.values(store)):
+        with _mbs.theta_scope(_affect_scope_values(store, session_id)):
             return _body_turn_impl(store, session_id, text, payload)
     except Exception:
         return _body_turn_impl(store, session_id, text, payload)
@@ -6807,6 +6832,26 @@ def _body_turn_impl(store, session_id, text, payload=None):
         try:
             for _k, _v in (_body_intero_from_payload(payload) or {}).items():
                 dims.setdefault(_k, float(_v))
+        except Exception:
+            pass
+        # 七维必须真的产出：模型给了就用模型，缺的用纯数值反推，并标来源。
+        # 渲染层（_cause_line）就是读这里写下去的 last_dims / dims_source。
+        try:
+            # 兜底要读得到"她此刻的身体"，否则模型一关，v/a 全是默认值，显就永远是空的。
+            _fb_state = dict(_st) if isinstance(_st, dict) else {}
+            try:
+                _fb_state["body"] = _mb.load_state(store, session_id) or {}
+            except Exception:
+                pass
+            dims, _dsrc = _mb.complete_appraisal(dims, state=_fb_state)
+            if isinstance(_st, dict) and isinstance(payload, dict):
+                _st0b = payload.get("state")
+                if isinstance(_st0b, dict):
+                    _st0b["last_dims"] = {
+                        k: round(float(dims[k]), 3)
+                        for k in _mb.APPRAISAL_DIMS
+                        if isinstance(dims.get(k), (int, float))}
+                    _st0b["dims_source"] = _dsrc
         except Exception:
             pass
         # 7x7 评价矩阵在这里第一次真正上电：dims 进去，八个输出各自落到身体
@@ -7164,6 +7209,22 @@ BODY_LOOP_SEED = 1
 
 
 def body_loop(store, session_id, now=None, seed=BODY_LOOP_SEED, payload=None):
+    """心跳入口：先给时间常数上作用域，再进真正的循环体。
+
+    时间常数是会话级参数（文献：个体差异大），心跳和对话必须用同一份，
+    否则"心"在对话里是 600 秒、在心跳里是另一个数。
+    """
+    try:
+        from biocore_runtime import mindbase_bridge as _mbs
+        with _mbs.theta_scope(_affect_scope_values(store, session_id)):
+            return _body_loop_impl(store, session_id, now=now, seed=seed,
+                                   payload=payload)
+    except Exception:
+        return _body_loop_impl(store, session_id, now=now, seed=seed,
+                               payload=payload)
+
+
+def _body_loop_impl(store, session_id, now=None, seed=BODY_LOOP_SEED, payload=None):
     """DSH 生命循环的一次循环体：L0→L5 逐层下渗（纯本地，0 模型调用）。
 
     L0 生理（呼吸/自律/昼夜/疲劳）→ discomfort、阈值
@@ -7199,7 +7260,12 @@ def body_loop(store, session_id, now=None, seed=BODY_LOOP_SEED, payload=None):
     try:
         last = _mb.heartbeat_last(store, sid) or {}
         clock = float(_mb.clock_value(store, sid) or 0.0)
-        skipped = bool(last and clock > float(last.get("clock") or 0.0) + 1e-6)
+        # 心跳行里的 clock 是 round(...,3) 存下来的；拿它来比"时钟是不是被别人
+        # 推过了"，1e-6 的容差会被四舍五入吃掉：只要小数点第三位向下舍，
+        # clock 就比 last.clock 大出不到 0.001，于是这一拍被误判成"已经跳过"，
+        # 身体从此不动（实测：冷启动后第 2 拍起连跳 3 拍全部 skipped=True）。
+        # 两次真实推进之间至少差 60 秒，0.05 秒的容差足够区分"同一瞬间"与"真的推过"。
+        skipped = bool(last and clock > float(last.get("clock") or 0.0) + SKIP_EPS)
         ticks = 0
         if not skipped:
             adv = _mb.advance(store, sid, stamp, seed=int(seed)) or {}
@@ -7209,6 +7275,9 @@ def body_loop(store, session_id, now=None, seed=BODY_LOOP_SEED, payload=None):
             except Exception:
                 pass
         state = _mb.load_state(store, sid) or {}
+        # 这一拍开始时的身体：七系统的 DAN 用"开始 → 结束"的差分算
+        _state_before = dict(state)
+        _systems = {}
         body = _mb.body_for(store, sid, seed=int(seed))
 
         # ---------- L0 生理：呼吸/自律/昼夜/疲劳 -> discomfort、阈值 ----------
@@ -7307,12 +7376,27 @@ def body_loop(store, session_id, now=None, seed=BODY_LOOP_SEED, payload=None):
             + 0.30 * clarity - 0.20 * tension
         stress2 = base_stress + 0.55 * max(0.0, tension - 0.20)
         mood0 = float(state.get("mood") or 0.0)
-        mood2 = mood0 + 0.05 * (v2 - mood0)
+        # mood 是"小时到天"的泄漏积分（Mood as integrated advantage，PMC8917968）：
+        # 每拍固定 5% 等于把 τ 绑死在拍长上 —— 60 秒一拍、20 拍追平 ≈ 19.5 分钟，
+        # 比文献低一个数量级，也等于把 mood 做成了"心"。这里改成按真实经过秒数的
+        # 指数泄漏，τ 取会话参数（默认 4 小时，见 mindbase_bridge.affect_params）。
+        _aff = _mb.affect_params(_load_session_state(store, sid),
+                                 _load_runtime_config(store))
+        _dt_s = 60.0 * float(max(1, int(ticks or 1)))
+        _mood_tau = max(60.0, float(_aff.get("mood_tau_s") or MOOD_TAU_S))
+        # 上升与消退分开（rise_tau_s 默认 0 = 同值）；leak_step 只管一步。
+        # neg_fade_mult：往下退时 tau 乘这个数（默认 1.5，主管指定，非文献值；
+        # 见 docs/AFFECT-LIT.md §5 的方向冲突说明）。
+        mood2 = _mb.leak_step(mood0, v2, _dt_s, _mood_tau,
+                              _aff.get("rise_tau_s") or 0.0,
+                              _aff.get("neg_fade_mult") or 1.0)
         # 负荷也要退：只涨不退同样会顶到 1.0，再回头把紧张顶上去。
         # 退得快一点、涨得慢一点：原来 0.15 的增益配上 2% 的衰减，只要效价负着，
         # 负荷就会卡在 0.98 不动（实测）。0.05 / 3% 才能在十几拍内退下来。
-        load2 = max(0.0, load0 * (1.0 - 0.03)
-                    + 0.05 * max(0.0, -v2) - 0.004)
+        # 同样改成按时间走：3%/拍在 60 秒网格上就是 τ≈2000 秒，写死拍长会随拍长变形。
+        load2 = max(0.0, load0 * math.exp(-_dt_s / LOAD_TAU_S)
+                    + LOAD_GAIN_PER_BEAT * (_dt_s / 60.0) * max(0.0, -v2)
+                    - 0.004 * (_dt_s / 60.0))
         L2 = {"v": _clamp(v2, -1.0, 1.0), "a": _clamp(a2),
               "d": _clamp(d2, -1.0, 1.0), "stress": _clamp(stress2),
               "mood": _clamp(mood2, -1.0, 1.0), "load": _clamp(load2)}
@@ -7354,16 +7438,50 @@ def body_loop(store, session_id, now=None, seed=BODY_LOOP_SEED, payload=None):
                 sm.identity = L3["esteem"]
                 body.slow["mood"] = L2["mood"]
                 body.slow["load"] = L2["load"]
+                # 七套系统这一拍：bias 由评价（七维+关系+孤独）直接给，
+                # DAN 由"这一拍前后的身体差分"给；没有模型也照样动。
+                _sys_payload = None
+                try:
+                    _rel_now = state.get("relationship") if isinstance(
+                        state.get("relationship"), dict) else {}
+                    _bias_dims = dict(state.get("last_dims") or {})
+                    _bias_dims.setdefault("closeness", float(
+                        _rel_now.get("closeness") or 0.5))
+                    _bias_dims.setdefault("arousal", float(L2["a"]))
+                    _bias_dims.setdefault("stress", float(L2["stress"]))
+                    _sys_bias = _mb.system_bias(_bias_dims, state, now=stamp)
+                    _sys_dan = _mb.system_dan(_state_before, state)
+                    _sys_payload = {"bias": _sys_bias, "dan": _sys_dan}
+                except Exception:
+                    _sys_payload = None
                 # 让情绪真正进蘑菇体：L1/L2 作为 KC 前的输入列再感知一次
                 try:
                     body.mind.circuit.update(
                         max(0.0, min(1.0, layers["L0"]["discomfort"])),
                         reward=max(0.0, L2["v"]),
                         punishment=max(0.0, -L2["v"]),
-                        intero=layers["L1"], affect=L2)
+                        intero=layers["L1"], affect=L2,
+                        systems=_sys_payload)
                 except Exception:
                     pass
+                try:
+                    _systems = dict(getattr(body.mind.circuit, "systems", {}) or {})
+                    if _systems:
+                        body.slow["systems"] = dict(_systems)
+                except Exception:
+                    _systems = {}
                 state = body.state()
+                # body.state() 只报身体自己的字段：上一拍存下来的 silent_beats /
+                # last_human_ts / sys_* 会被它整个换掉，于是"沉默越久越可能开口"
+                # 的重尾永远在 silent=0 上求值（实测连跑 14 拍每拍都读到 0）。
+                # 把身体不产、但这一拍要用的数字并回去（只并 body 没有的键）。
+                if isinstance(_systems, dict) and _systems:
+                    try:
+                        for _k, _v in _state_before.items():
+                            if _k not in state and isinstance(_v, (int, float)):
+                                state[_k] = _v
+                    except Exception:
+                        pass
                 # 记下自家不适度的平常水平，供下一拍判断"这次算不算异常"
                 try:
                     _prev_dash = float(state.get("discomfort_baseline") or 0.25)
@@ -7422,8 +7540,83 @@ def body_loop(store, session_id, now=None, seed=BODY_LOOP_SEED, payload=None):
         layers["L5"] = {"over_threshold": over, "intent_text": intent_text,
                         "action": str((pending or {}).get("action") or ""),
                         "threshold": _clamp(threshold)}
+        # 谁决定开口：不是硬规则，是噪声。回避越高，"这一拍不出声"的概率越大，
+        # 但偶尔也会开口 —— 同一个人同样难受，十次里几次不回、几次回。
+        # 用自律波的相位做种子，同一分钟可复现，不同分钟不同。
+        speak_action = str(state.get("action") or "")
+        speak_reason = {}
+        try:
+            import math as _m
+            import random as _r
+            _silent = int(float(state.get("silent_beats") or 0.0))
+            # 为什么开口：四项由头（有话要说 / 想接触 / 欠着没还 / 憋不住）
+            _pending_w = float((pending or {}).get("weight") or 0.0)
+            _social_need = max(0.0, 0.55 - float(state.get("social_drive") or 0.5))
+            _commit = float(state.get("commit_open") or 0.0)
+            _over = 1.0 if over else 0.0
+            _reason = (0.45 * min(1.0, _pending_w)
+                       + 0.35 * min(1.0, _social_need / 0.35)
+                       + 0.30 * min(1.0, _commit)
+                       + 0.25 * _over)
+            # 七套系统接管"由头"：为什么开口 = 探索/照料/分离/玩闹；
+            # 恐惧与愤怒抬"不说、短说"那一侧。hazard 骨架不动（设计稿 §4）。
+            _withdraw = 0.0
+            _panic_eff = 0.0
+            if isinstance(_systems, dict) and _systems:
+                _panic_eff = _mb.panic_effective(_systems.get("PANIC", 0.0))
+                _reason = (0.35 * float(_systems.get("SEEKING") or 0.0)
+                           + 0.25 * float(_systems.get("CARE") or 0.0)
+                           + 0.20 * _panic_eff
+                           + 0.20 * float(_systems.get("PLAY") or 0.0))
+                _reason = max(0.0, min(1.0, _reason))
+                _withdraw = max(float(_systems.get("FEAR") or 0.0),
+                                float(_systems.get("RAGE") or 0.0))
+            # 情绪决定"抖得多厉害"：唤醒高、欠账重、心里在动，噪声才起得来；
+            # 支配低则把噪声压下去（缩着的时候不会突然开口）。
+            _arousal = float(state.get("arousal") or 0.0)
+            _load = float(state.get("allostatic_load") or 0.0)
+            _dom = float(getattr(body.mind.affect, "dominance", 0.0) or 0.0)
+            _amp = SPEAK_NOISE * (0.45 + 0.9 * _arousal + 0.6 * _load
+                                  - 0.35 * max(0.0, -_dom))
+            _amp = max(0.0, min(2.0, _amp))
+            # 风险随沉默时长上升（重尾）：沉默越久，越可能开口；没有由头则涨了也不开
+            _hazard = 0.06 * (1.0 + _silent) ** 1.4 * (0.15 + _reason)
+            _p_speak = 1.0 - _m.exp(-_hazard)
+            _g = _r.Random(int(stamp) % 1000003).gauss(0.0, 1.0)
+            _p_final = max(0.0, min(0.95, _p_speak * (1.0 + _amp * 0.25 * _g)))
+            if _withdraw:
+                # 恐惧/愤怒把开口这一侧压低（缩着的时候不会突然开口）
+                _p_final = max(0.0, min(0.95, _p_final * (1.0 - 0.45 * _withdraw)))
+            if _r.Random(int(stamp) % 1000003 + 7).random() < _p_final:
+                speak_action = "speak"
+                state["silent_beats"] = 0.0
+            else:
+                speak_action = "silence"
+                state["silent_beats"] = float(_silent + 1)
+            speak_reason = {"silent_beats": _silent, "reason": round(_reason, 3),
+                            "amp": round(_amp, 3), "p_speak": round(_p_final, 4)}
+            if isinstance(_systems, dict) and _systems:
+                speak_reason["systems"] = {k: round(float(_systems.get(k) or 0.0), 3)
+                                           for k in _mb.SYSTEMS}
+                speak_reason["panic_eff"] = round(_panic_eff, 3)
+                speak_reason["withdraw"] = round(_withdraw, 3)
+                # "短说"这一侧：解释层拿这个数决定句子长短（生物层不写句子）
+                speak_reason["brevity"] = round(
+                    0.5 * float(_systems.get("RAGE") or 0.0)
+                    + 0.5 * float(_systems.get("FEAR") or 0.0), 3)
+        except Exception:
+            pass
+        # silent_beats 是上面这一拍改的，而 L4 的 save_state 在它之前 —— 不补存，
+        # "(1+silent)^1.4" 的重尾永远在 silent=0 上求值（实测：连跑 14 拍，
+        # 每拍读到的 silent 都是 0，开口率恒等于基础值）。补一次写盘，
+        # 只让这一个字段真的持久化。为保持"关掉时逐字节一致"，只在七系统开启时补。
+        if isinstance(_systems, dict) and _systems:
+            try:
+                _mb.save_state(store, sid, state)
+            except Exception:
+                pass
         # 唯一判定点：蘑菇体这一拍决定了什么（六层数值只是证据）
-        decision = {"action": str(state.get("action") or ""),
+        decision = {"action": speak_action, "why": speak_reason,
                     "over_threshold": over,
                     "intent_text": intent_text,
                     "pending_weight": float((pending or {}).get("weight") or 0.0),
@@ -7447,6 +7640,10 @@ def body_loop(store, session_id, now=None, seed=BODY_LOOP_SEED, payload=None):
                "over_threshold": over, "intent": intent_text,
                "layers": layers, "decision": decision,
                "mushroom": mushroom}
+        # 七套系统进心跳行（关着的时候整行与改动前一致，不多这个键）
+        if isinstance(_systems, dict) and _systems:
+            row["systems"] = {k: round(float(_systems.get(k) or 0.0), 4)
+                              for k in _mb.SYSTEMS}
         _mb.heartbeat_append(store, sid, row)
         return {"ok": True, "enabled": True, "ticks": ticks,
                 "skipped": skipped, "seconds": float(ticks) * 60.0,
@@ -7885,6 +8082,11 @@ def _cause_line(state):
     # 显影响：这一轮看得见的那一下（谁推的、推成什么形状）
     # 隐影响：看不见的底子（这阵子、欠账、隔了多久）—— 它决定这一下有多重
     head = "显：%s → %s" % (src, "、".join(marks[:3]) or "说不上为什么")
+    # 这一行的七维是谁算的：模型评的还是数值推算的。读的人不用猜。
+    origin = {"model": "模型", "fallback": "推算"}.get(
+        str(st.get("dims_source") or "").strip().lower(), "")
+    if origin:
+        head = head + "（" + origin + "）"
     if base:
         head = head + " ｜ 隐：" + "，".join(base[:3])
     return head
@@ -7948,8 +8150,15 @@ def _state_block(state, budget):
     _body_src = state.get("body") if isinstance(state.get("body"), dict) else {}
     _raw_felt = _body_src.get("valence") if _body_src else None
     _raw_known = _body_src.get("mb_valence") if _body_src else None
+    _raw_heart = _body_src.get("heart") if _body_src else None
     _felt = _num(_raw_felt, 0.0) if isinstance(_raw_felt, (int, float)) else None
     _known = _num(_raw_known, 0.0) if isinstance(_raw_known, (int, float)) else None
+    _heart = _num(_raw_heart, 0.0) if isinstance(_raw_heart, (int, float)) else None
+    # "心里"报的是 heart（蘑菇体读数的时间连续低通），不是那个秒级的原始读数。
+    # 内感受研究里精度与觉察可以分离（Garfinkel et al. 2015），让原始读数冒充
+    # "心"等于宣称她能直读自己的硬件。原始读数保留，只在明显跳变时以"瞬时"露出。
+    if _heart is None:
+        _heart = _known   # 老数据没有 heart：退回原始读数，稍后不显示"瞬时"
     _raw_mood = _body_src.get("mood") if _body_src else None
     _raw_load = _body_src.get("allostatic_load") if _body_src else None
     _mood_v = _num(_raw_mood, 0.0) if isinstance(_raw_mood, (int, float)) else None
@@ -7958,12 +8167,18 @@ def _state_block(state, budget):
     if _mood_v is not None and _load_v is not None:
         # "这一阵子"与"这一件事"要分开：mood 没有具体对象，事件才有。
         _spell = " ｜ 这阵子 mood%+.2f 欠账%.2f" % (_mood_v, _load_v)
-    if _felt is not None and _known is not None:
+    if _felt is not None and _heart is not None:
         # 效价那个位置写"身上"的值（身体的读数才快而准），再单列"心里"与差。
+        # 心里 = heart；差 = 身上与心里的距离（不是与原始读数的距离）。
         numbers = "效价%+.2f 唤醒%.2f 支配%+.2f 紧张%.2f 社交%+.2f" % (
             _felt, a, d, stress, social - 0.5)
         numbers = numbers + " ｜ 心里%+.2f 相差%.2f" % (
-            _known, abs(_felt - _known)) + _spell
+            _heart, abs(_felt - _heart))
+        # 原始读数只在明显跳变（|raw - heart| >= 0.30）时露一格"瞬时"：
+        # 那是"我知道自己刚才跳了一下"，不是"我心里怎样"。
+        if _known is not None and abs(_known - _heart) >= INSTANT_GAP:
+            numbers = numbers + " ｜ 瞬时%+.2f" % _known
+        numbers = numbers + _spell
     _cause = _cause_line(state)
     if _cause:
         numbers = numbers + " ｜ 因：" + _cause
@@ -10774,6 +10989,8 @@ CONFIG_SCHEMA = {
     "persona_text": str, "embedding": dict, "rerank": dict, "expression": dict,
     "autonomy": dict, "standby": dict, "sanitize_reply": bool, "switches": dict,
     "recall_mode": str, "recall": dict, "summarizer": dict,
+    # 情绪动力学的时间常数（会话级默认值由此覆盖；见 affect_params）
+    "affect": dict,
     "event_layer": bool, "event_summarizer": dict, "updated_at": (int, float),
 }
 CONFIG_DROPPED = {}
@@ -11686,6 +11903,29 @@ def dispatch(action, payload=None):
             merge_shared_relationship_into_state(session_id, data)
             session_state = apply_persona_to_session(session_id, data)
             session_state = session_state if isinstance(session_state, dict) else {}
+            # 时间常数落进会话 state：第一轮把默认值写进去，之后它属于这个会话。
+            # config 的 affect 段仍然优先（见 mindbase_bridge.affect_params），
+            # 所以"写进会话"不等于"钉死"。
+            try:
+                if not isinstance(session_state.get("params"), dict):
+                    from biocore_runtime import mindbase_bridge as _mbt
+                    session_state["params"] = _mbt.affect_params({}, {})
+            except Exception:
+                pass
+            # 显/隐 必须真的出现在注入里：body_turn 把这一轮的七维与推力来源
+            # 写进 payload["state"]，可 session_state 是从磁盘重新读出来的，
+            # 那份写不进来，于是 _cause_line 永远只有"隐"、没有"显"。
+            # 这里把这一轮的三项接过去（只增，不改已有字段的语义）。
+            try:
+                _ps = data.get("state") if isinstance(data.get("state"), dict) else {}
+                _pdims = _ps.get("last_dims") if isinstance(_ps.get("last_dims"), dict) else None
+                if _pdims:
+                    session_state["last_dims"] = dict(_pdims)
+                    for _k in ("push_source", "last_push_ts", "dims_source"):
+                        if _ps.get(_k) is not None:
+                            session_state[_k] = _ps[_k]
+            except Exception:
+                pass
             field_host_state = dict(session_state)
             state_store = _relationship_store(data)
             core_path = _core_state_path(data)
@@ -11862,6 +12102,35 @@ def dispatch(action, payload=None):
                     "batches": batch_view,
                     "dimensions": dimensions_view_start,
                     "captured_user": captured_user}
+        if action == "affect_params":
+            # 读/写本会话的情绪动力学时间常数。写只接受两个键与合法区间；
+            # 不改其它字段（会话 state 里可能还有别的东西）。
+            session_id = str(data.get("session_id") or "").strip()
+            if not session_id:
+                return bad("missing session_id")
+            from biocore_runtime import mindbase_bridge as _mbt
+            sid = sanitize_session_id(session_id)
+            wanted = data.get("set")
+            if isinstance(wanted, dict) and wanted:
+                state = _load_session_state(store, sid) or {}
+                params = dict(state.get("params") or {})                     if isinstance(state.get("params"), dict) else {}
+                for key, value in wanted.items():
+                    if key not in _mbt.AFFECT_TAU_BOUNDS:
+                        continue
+                    if not isinstance(value, (int, float)) or isinstance(value, bool):
+                        continue
+                    lo, hi = _mbt.AFFECT_TAU_BOUNDS[key]
+                    params[key] = round(max(lo, min(hi, float(value))), 3)
+                state["params"] = params
+                state.setdefault("session_id", sid)
+                _save_session_state(store, sid, state)
+            session_params = _load_session_state(store, sid).get("params") or {}
+            resolved = _mbt.affect_params({"params": session_params},
+                                          _load_runtime_config(store))
+            return {"ok": True, "params": resolved,
+                    "session": {k: v for k, v in session_params.items()
+                                if k in _mbt.AFFECT_TAU_BOUNDS},
+                    "bounds": {k: list(v) for k, v in _mbt.AFFECT_TAU_BOUNDS.items()}}
         if action == "turn_end":
             session_id = str(data.get("session_id") or "").strip()
             if not session_id:

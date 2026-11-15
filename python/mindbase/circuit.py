@@ -26,7 +26,15 @@ class Circuit:
         "APL": 1,
     }
 
-    def __init__(self):
+    def __init__(self, systems_enabled=None):
+        # 七套情绪系统：None = 看环境变量（BIOCORE_EMOTION_SYSTEMS，默认开）
+        if systems_enabled is None:
+            import os as _os
+            flag = str(_os.environ.get("BIOCORE_EMOTION_SYSTEMS") or "1").strip().lower()
+            systems_enabled = flag not in ("0", "false", "off", "no", "")
+        self.systems_enabled = bool(systems_enabled)
+        self.systems = {}
+        self.system_dan = {}
         self.activity = {k: 0.0 for k in self.POPULATIONS}
         self.dan_reward = 0.0
         self.dan_punishment = 0.0
@@ -49,7 +57,7 @@ class Circuit:
         self.scar_floor = 0.05
 
     def update(self, salience: float, sparse: float | None = None, reward: float = 0.0, punishment: float = 0.0,
-               intero=None, affect=None) -> Dict[str, float]:
+               intero=None, affect=None, systems=None) -> Dict[str, float]:
         for region, left in list(self.lesion_timers.items()):
             self.lesion_strength[region] = max(0.0, self.lesion_strength.get(region, 0.0) - self.lesion_rate.get(region, 0.0))
             if left <= 1 or self.lesion_strength[region] <= 1e-9:
@@ -91,9 +99,11 @@ class Circuit:
         except Exception:
             pass
         if self.fly_mb is None:
-            self.fly_mb = FlyMushroomBody(seed=1, sparsity=self.sparsity)
+            self.fly_mb = FlyMushroomBody(seed=1, sparsity=self.sparsity,
+                                          systems_enabled=self.systems_enabled)
         if self.fly_mb is None:
-            self.fly_mb = FlyMushroomBody(seed=1, sparsity=self.sparsity)
+            self.fly_mb = FlyMushroomBody(seed=1, sparsity=self.sparsity,
+                                          systems_enabled=self.systems_enabled)
         dan_lesion = float(self.lesion_strength.get("DAN", 0.0))
         dan_factor = max(0.0, 1.0 - dan_lesion)
         if (self.dan_reward > 0.0 or self.dan_punishment > 0.0) and self.pending_features is not None:
@@ -115,7 +125,12 @@ class Circuit:
             }
         mb = self.fly_mb.step(features, reward=self.dan_reward * dan_factor,
                               punishment=self.dan_punishment * dan_factor,
-                              emotion=_emotion_readout)
+                              emotion=_emotion_readout, systems=systems)
+        # 七系统读数单独存，不塞进 activity：activity 是按 POPULATIONS 加权的，
+        # 多出七个键会把脑区活动率算错。
+        if self.fly_mb is not None and self.fly_mb.systems_enabled:
+            self.systems = dict(getattr(self.fly_mb, "systems", {}) or {})
+            self.system_dan = dict(getattr(self.fly_mb, "system_dan", {}) or {})
         self.sparsity = float(self.fly_mb.sparsity)
         self.activity["sensory"] = s
         self.activity["KC"] = round(float(mb["kc_sparse"]), 4)
@@ -124,7 +139,10 @@ class Circuit:
         self.mbon_avoid = max(0.0, float(mb["mbon_avoid"]))
         self.activity["MBON"] = min(1.0, max(self.mbon_approach, self.mbon_avoid))
         self.activity["APL"] = float(mb["apl"])
-        return dict(self.activity)
+        out = dict(self.activity)
+        if self.systems:
+            out["systems"] = dict(self.systems)
+        return out
 
     def memory_retention(self, subregion: str, days: float) -> float:
         import math

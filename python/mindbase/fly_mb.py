@@ -10,9 +10,14 @@ class FlyMushroomBody:
     N_IN = 23   # 16 base features + 4 intero + v/a/stress (old checkpoints pad zeros)
     N_MBON = 100
     N_DAN = 200
+    # 七套情绪系统 == 蘑菇体的七条读出通道（Panksepp 的七个初级系统）。
+    # 与 approach/avoid 同构：同一份 KC 稀疏编码，七组权重各自读。
+    SYSTEMS = ("SEEKING", "CARE", "PLAY", "LUST", "FEAR", "RAGE", "PANIC")
+    N_SYSTEM = 7
 
     def __init__(self, seed: int = 1, sparsity: float = 0.05, lr: float = 0.01, apl_gain: float = 0.6, subregion_gain=None,
-                 pam_gamma_ratio: float = 0.60, ppl1_alpha_ratio: float = 0.50, weight_decay: float = 0.0002):
+                 pam_gamma_ratio: float = 0.60, ppl1_alpha_ratio: float = 0.50, weight_decay: float = 0.0002,
+                 systems_enabled: bool = False):
         self.rng = np.random.default_rng(seed)
         self.sparsity = float(sparsity)
         self.lr = float(lr)
@@ -53,6 +58,56 @@ class FlyMushroomBody:
         self.rpe = 0.0
         self.ppl1_rpe = 0.0
         self.last_sparse = 0.0
+        # 七系统：默认关。关的时候 w_system 不分配、不计算、**不消耗主 rng**
+        # （单独的 _sys_rng），所以关掉时所有数值与改动前逐字节一致。
+        self.systems_enabled = bool(systems_enabled)
+        self.w_system = None
+        self._sys_rng = np.random.default_rng(int(seed) * 1000003 + 17)
+        self.systems = {}
+        self.system_dan = {}
+
+    def set_systems_enabled(self, value) -> bool:
+        self.systems_enabled = bool(value)
+        return self.systems_enabled
+
+    def _ensure_systems(self) -> bool:
+        if not self.systems_enabled:
+            return False
+        if self.w_system is None:
+            self.w_system = self._sys_rng.normal(
+                0.0, 0.01, (self.N_SYSTEM, self.N_KC))
+        return True
+
+    def _step_systems(self, x, systems: dict) -> dict:
+        """七条读出：activation = clip(w_system[k]·KC + bias[k], 0, 1)。
+
+        bias 由调用方按评价直接给（没有模型也能动）；每个系统拿自己的 DAN
+        分量做 Hebbian 更新，满足→正向、受挫→负向。
+        """
+        if not self._ensure_systems():
+            return {}
+        bias = systems.get("bias") if isinstance(systems.get("bias"), dict) else {}
+        dan = systems.get("dan") if isinstance(systems.get("dan"), dict) else {}
+        off = systems.get("off") if isinstance(systems.get("off"), (list, tuple, set)) else ()
+        off = {str(name) for name in off}
+        act = {}
+        for i, name in enumerate(self.SYSTEMS):
+            b = float(bias.get(name) or 0.0)
+            raw = float(np.dot(self.w_system[i], x)) + b
+            act[name] = round(max(0.0, min(1.0, raw)), 4)
+            if name in off:
+                act[name] = 0.0      # 占位但停用：不读出、不学习
+                continue
+            d = float(dan.get(name) or 0.0)
+            # 只有拿到自己那份 DAN 的通道才更新与衰减："各自被自己的奖惩塑形"。
+            if d:
+                self.w_system[i] += self.lr * self.plasticity * d * x
+                self.w_system[i] *= (1.0 - float(self.weight_decay))
+        self.systems = act
+        self.system_dan = {str(k): round(float(v), 4)
+                           for k, v in dan.items()
+                           if isinstance(v, (int, float))}
+        return act
 
     def load_input_weights(self, matrix) -> bool:
         """Load an old w_in checkpoint: missing columns are zero-filled (no re-init)."""
@@ -85,7 +140,7 @@ class FlyMushroomBody:
         return x
 
     def step(self, features: np.ndarray, reward: float = 0.0, punishment: float = 0.0,
-             emotion=None) -> dict:
+             emotion=None, systems=None) -> dict:
         x = self.encode(features)
         r = max(0.0, min(1.0, float(reward)))
         p = max(0.0, min(1.0, float(punishment)))
@@ -129,7 +184,13 @@ class FlyMushroomBody:
                                       + 0.25 * _tension + 0.15 * _stress)
             except Exception:
                 pass
-        return {
+        # 七条读出通道：关着的时候这一段完全不执行（不分配、不计算、不取随机数）
+        if systems is not None and self.systems_enabled:
+            try:
+                self._step_systems(x, systems if isinstance(systems, dict) else {})
+            except Exception:
+                pass
+        out = {
             "kc_sparse": round(self.last_sparse, 4),
             "age_steps": int(self.age_steps),
             "plasticity": round(self.plasticity, 4),
@@ -149,6 +210,11 @@ class FlyMushroomBody:
             "mbon_approach": round(self.mbon_approach, 4),
             "mbon_avoid": round(self.mbon_avoid, 4),
         }
+        if self.systems_enabled:
+            out["systems"] = dict(self.systems)
+            out["system_dan"] = dict(self.system_dan)
+            out["systems_enabled"] = True
+        return out
 
     def second_order_pair(self, cs2, cs1, reward: float = 0.8, repeats: int = 2) -> dict:
         """Present CS2 then CS1 with reward on CS1; repeat to strengthen second-order value."""
@@ -159,7 +225,7 @@ class FlyMushroomBody:
         return out
 
     def snapshot(self) -> dict:
-        return {
+        out = {
             "kc": self.N_KC,
             "mbon": self.N_MBON,
             "dan": self.N_DAN,
@@ -187,3 +253,10 @@ class FlyMushroomBody:
             "mbon_approach": round(self.mbon_approach, 4),
             "mbon_avoid": round(self.mbon_avoid, 4),
         }
+        if self.systems_enabled:
+            out["systems_enabled"] = True
+            out["systems"] = dict(self.systems)
+            out["system_weight_norm"] = (
+                round(float(np.linalg.norm(self.w_system)), 6)
+                if self.w_system is not None else 0.0)
+        return out

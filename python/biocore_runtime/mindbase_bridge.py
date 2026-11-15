@@ -205,8 +205,10 @@ class DialogueBody:
             # mood 是"小时到天"的泄漏积分（Mood as integrated advantage）。
             # 按每拍固定百分比更新会让它二十分钟就追平，那等于把 mood 做成了心。
             _mood_tau = max(60.0, eff("mood_tau_s", MOOD_TAU_S))
-            _mood_step = 1.0 - math.exp(-max(0.0, float(dt)) / _mood_tau)
-            _mood += _mood_step * (_v - _mood)
+            # 上升与消退分开：默认 rise_tau=0 时等价于原来的对称泄漏。
+            _mood = leak_step(_mood, _v, dt, _mood_tau,
+                              eff("rise_tau_s", 0.0),
+                              eff("neg_fade_mult", NEG_FADE_MULT))
             _load = float(self.slow.get("load") or 0.0)
             _base = float(self.anchor.get("valence") or 0.0)
             # 只有“低于基线”才算欠账：高兴不该累积负荷，平静时它该慢慢退。
@@ -445,10 +447,29 @@ class DialogueBody:
                 _aff = {"v": _v,
                         "a": float(d.get("arousal") or 0.5),
                         "stress": float(d.get("stress") or 0.0)}
+                # 七套系统这一拍的 bias 与 DAN：bias 来自本次评价的数值，
+                # DAN 来自"上一拍 → 这一拍"的可观测差分。
+                # 整份 dims 都要传：SEEKING 要 goal/novelty、FEAR 要 certainty/blame、
+                # RAGE 要 blame，只传 PAD 会让这几条通道全靠默认值（实测两句话
+                # FEAR/CARE 一模一样，就是这个原因）。
+                _bias_dims = dict(d)
+                _bias_dims.setdefault("closeness", float(d.get("closeness") or 0.5))
+                _sys_bias = system_bias(_bias_dims, self.state())
+                _sys_dan = system_dan(self.slow.get("sys_seen") or {},
+                                      self.state())
                 _act = self.mind.circuit.update(
                     max(0.0, min(1.0, abs(_v))),
                     reward=max(0.0, _v), punishment=max(0.0, -_v),
-                    intero=_intero, affect=_aff)
+                    intero=_intero, affect=_aff,
+                    systems={"bias": _sys_bias, "dan": _sys_dan,
+                             "off": [] if LUST_ENABLED else ["LUST"]})
+                # 七套系统的读数落进慢层（扁平键由 state() 暴露，跨进程活）
+                try:
+                    _sys_now = dict(getattr(self.mind.circuit, "systems", {}) or {})
+                    if _sys_now:
+                        self.slow["systems"] = _sys_now
+                except Exception:
+                    pass
                 # 心跟着走，但只走一小步：它追的是时间，不是这一句。
                 try:
                     _raw = float(self.mind.circuit.valence())
@@ -562,6 +583,14 @@ class DialogueBody:
                 self.apply_intero_channels(d, scale=eff("intero_gain", 1.0))
             except Exception:
                 pass
+        # 留一份"这一拍结束时身体长什么样"，下一拍拿它算七系统的 DAN
+        try:
+            _seen = self.state()
+            self.slow["sys_seen"] = {k: float(_seen.get(k) or 0.0) for k in
+                                     ("valence", "stress", "social_drive",
+                                      "drive_curiosity", "agency")}
+        except Exception:
+            pass
         return self.state()
 
     def reply(self, text: str = "", ticks: int = 0) -> Dict[str, float]:
@@ -632,6 +661,13 @@ class DialogueBody:
                 }
                 # 心 = 蘑菇体读数的时间连续版本（低通）；原始读数仍留在 mb_emotion 里
                 out["heart"] = round(float(self.slow.get("heart") or 0.0), 4)
+                # 七套系统：扁平数字键（save_state 只收数字，嵌套 dict 会丢），
+                # 这样它们能跨进程活下来，心跳与对话读的是同一份。
+                _sys = self.slow.get("systems") if isinstance(
+                    self.slow.get("systems"), dict) else {}
+                for _name in SYSTEMS:
+                    if isinstance(_sys.get(_name), (int, float)):
+                        out["sys_" + _name] = round(float(_sys[_name]), 4)
                 out["mb_approach"] = round(approach, 4)
                 out["mb_avoid"] = round(avoid, 4)
                 out["mb_valence"] = round(valence, 4)
@@ -642,12 +678,102 @@ class DialogueBody:
         return out
 
 
-def appraise_text(text: str, config: Optional[Dict[str, object]] = None,
-                  timeout: float = 60.0) -> Dict[str, float]:
-    """Ask the configured small model for the six dimensions the body needs.
+# 评价七维：渲染层（显/隐）与 7x7 评价矩阵都要这几个数。
+APPRAISAL_DIMS = ("goal", "blame", "control", "certainty", "novelty",
+                  "involve", "hit")
+# 模型"真的产出了评价"的证据：只有这六个键是 PAD 里没有的。
+# control 两边都有，不能拿它当证据，否则老 prompt 的返回会被误判成 model。
+_APPRAISAL_NEW = ("goal", "blame", "certainty", "novelty", "involve", "hit")
 
-    This is the crossing layer on the way down: language becomes numbers here
-    and nowhere else. Failure returns {} so the body keeps its own dynamics.
+
+def _clamp_num(value, lo, hi, default=0.0):
+    try:
+        return max(lo, min(hi, float(value)))
+    except Exception:
+        return float(default)
+
+
+def fallback_appraisal(dims=None, state=None):
+    """模型不可用时的七维：只用已有数值反推，**不含任何词表**。
+
+    映射（粗糙，但方向可解释，全部有界）：
+      goal      = valence × relevance          事情顺不顺，看情绪好坏乘相关度
+      blame     = max(0,−valence) × relevance  被怪责，只看负向强度乘相关度
+      control   = control（模型给过就用，否则 0.5）
+      certainty = 0.5 + (relevance−0.5)×0.4    越相关越容易摸准（弱先验）
+      novelty   = arousal × 0.7                越激动越像"出乎意料"
+      involve   = relevance                    被牵涉程度 = 相关度
+      hit       = max(0,−valence) × relevance  戳到痛处 ≈ 负向 × 相关度
+    """
+    d = dims if isinstance(dims, dict) else {}
+    st = state if isinstance(state, dict) else {}
+    core = st.get("core") if isinstance(st.get("core"), dict) else {}
+    body = st.get("body") if isinstance(st.get("body"), dict) else {}
+
+    def _pick(*keys):
+        for src in (d, core, body, st):
+            if not isinstance(src, dict):
+                continue
+            for key in keys:
+                if isinstance(src.get(key), (int, float)) and not isinstance(src.get(key), bool):
+                    return float(src[key])
+        return None
+
+    v = _pick("valence", "v")
+    v = 0.0 if v is None else _clamp_num(v, -1.0, 1.0)
+    a = _pick("arousal", "a")
+    a = 0.5 if a is None else _clamp_num(a, 0.0, 1.0)
+    rel = _pick("relevance")
+    if rel is None:
+        # 没有相关度时给一个"被这件事影响得越深，就越相关"的下限：
+        # 被推到 −0.9 说明这一下确实落在她身上。纯数值，不读字面。
+        rel = max(0.5, -v) if v < 0 else 0.5
+    rel = _clamp_num(rel, 0.0, 1.0)
+    ctrl = _pick("control")
+    ctrl = 0.5 if ctrl is None else _clamp_num(ctrl, 0.0, 1.0)
+    neg = max(0.0, -v)
+    return {"goal": round(_clamp_num(v * rel, -1.0, 1.0), 4),
+            "blame": round(_clamp_num(neg * rel * 0.9, 0.0, 1.0), 4),
+            "control": round(ctrl, 4),
+            "certainty": round(_clamp_num(0.5 + (rel - 0.5) * 0.4, 0.0, 1.0), 4),
+            "novelty": round(_clamp_num(a * 0.7, 0.0, 1.0), 4),
+            "involve": round(rel, 4),
+            "hit": round(_clamp_num(neg * rel, 0.0, 1.0), 4)}
+
+
+def complete_appraisal(dims=None, state=None, source=None):
+    """补全七维并标来源：返回 (dims, "model" | "fallback")。
+
+    模型给了几维就留几维，缺的用数值反推补上；只要模型产出了
+    _APPRAISAL_NEW 里任何一维，来源就记 model（其余是补的），
+    否则整组都算 fallback。来源会进注入文本，读的人一眼能看出这行字是谁算的。
+    """
+    data = dict(dims) if isinstance(dims, dict) else {}
+    model_hits = [k for k in _APPRAISAL_NEW
+                  if isinstance(data.get(k), (int, float))
+                  and not isinstance(data.get(k), bool)]
+    fb = fallback_appraisal(data, state)
+    out = dict(data)
+    for key in APPRAISAL_DIMS:
+        if key in fb and not isinstance(out.get(key), (int, float)):
+            out[key] = fb[key]
+    if source in ("model", "fallback"):
+        src = source
+    else:
+        src = "model" if model_hits else "fallback"
+    return out, src
+
+
+def appraise_text(text: str, config: Optional[Dict[str, object]] = None,
+                  timeout: float = 60.0, opener=None) -> Dict[str, float]:
+    """用配置里的小模型把一句话评成数字：PAD 六项 + 评价七维。
+
+    这是下行唯一的"语言→数字"关口（核心契约：prompt 是数据，不是逻辑）。
+    prompt 与解析在同一个函数里，prompt 文本在 prompts_default.json 的
+    appraise_dims 键（可被 data/prompts.json 覆盖）。
+    失败返回 {}，调用方用 complete_appraisal 的数值反推兜底。
+    opener：测试注入用（默认 urllib.request.urlopen）；不打补丁，避免与别的
+    测试互相污染全局 urllib 状态。
     """
     cfg = dict(config or {})
     base = str(cfg.get("base_url") or "").rstrip("/")
@@ -655,7 +781,7 @@ def appraise_text(text: str, config: Optional[Dict[str, object]] = None,
     key = str(cfg.get("key") or cfg.get("api_key") or "")
     if not (base and model and key):
         return {}
-    prompt = prompt_text("appraise")
+    prompt = prompt_text("appraise_dims") or prompt_text("appraise")
     import json as _json
     import re as _re
     import urllib.request as _url
@@ -665,8 +791,9 @@ def appraise_text(text: str, config: Optional[Dict[str, object]] = None,
     req = _url.Request(base + "/chat/completions", data=body,
                        headers={"Authorization": "Bearer " + key,
                                 "Content-Type": "application/json"})
+    _open = opener if callable(opener) else _url.urlopen
     try:
-        with _url.urlopen(req, timeout=timeout) as resp:
+        with _open(req, timeout=timeout) as resp:
             raw = _json.loads(resp.read().decode())["choices"][0]["message"]["content"]
         m = _re.search(r"\{.*\}", raw, _re.S)
         data = _json.loads(m.group(0)) if m else {}
@@ -679,6 +806,14 @@ def appraise_text(text: str, config: Optional[Dict[str, object]] = None,
         if name in data:
             try:
                 out[name] = float(data[name])
+            except Exception:
+                continue
+    # 七维与 PAD 同一次调用返回；缺哪维就不写哪维，交给 complete_appraisal 补。
+    for name in APPRAISAL_DIMS:
+        if name in data:
+            lo = -1.0 if name == "goal" else 0.0
+            try:
+                out[name] = round(max(lo, min(1.0, float(data[name]))), 4)
             except Exception:
                 continue
     return out
@@ -768,6 +903,209 @@ def eff(key, default):
         return float(default)
 
 
+# ---- 会话级时间常数 -------------------------------------------------------
+# 文献说情绪动力学是个体参数（Kuppens, Oravecz & Tuerlinckx 2010：home base /
+# variability / attractor strength 三者都因人而异），所以把 τ 写死一个是错的。
+# 取值顺序（高到低）：core_config.json 的 affect 段 > 会话 state.params > 环境默认。
+# 保存位置：会话 state.json 的 params 段（见 pipeline 的 affect_params action）。
+AFFECT_TAU_BOUNDS = {
+    "mood_tau_s": (60.0, 7.0 * 86400.0),      # 1 分钟 .. 7 天
+    "heart_tau_s": (10.0, 86400.0),           # 10 秒 .. 1 天
+    # 上升时间：情绪从 0 到峰值用多久，与消退分开。0 = 与消退同值（对称，默认）。
+    "rise_tau_s": (0.0, 7.0 * 86400.0),
+    # 正负消退速度之比：往下走时 tau 乘这个数。>1 = 坏情绪退得更慢。
+    "neg_fade_mult": (0.25, 4.0),
+}
+# 默认 0.67 = 负向退得**更快**，这是 fading affect bias 的文献方向
+# （Ritchie et al. 2015, Memory 23(2):278-290: "the negative affect … fading
+# faster than the positive affect"；见 docs/AFFECT-LIT.md §5）。
+# 1.5（负向退得更慢）是主管给的备选方向，用 BIOCORE_NEG_FADE_MULT=1.5 或
+# 会话参数 neg_fade_mult=1.5 打开；两个方向都有实测数字（BUILD-LOG）。
+NEG_FADE_MULT = float(_os.environ.get("BIOCORE_NEG_FADE_MULT") or 0.67)
+# 上升的判定：目标与当前同号、且离 0 更远，才算"往上走"。
+# 文献（AIM 的非线性漂移）说上升与下降不对称，但**没给数值**，
+# 所以这里只留机制，默认 0（= 与消退同值，不改变任何既有行为）。
+
+
+def affect_params(state=None, config=None):
+    """把三层的 τ 合成一份数值字典（给 theta_scope 用，也可直接读）。
+
+    session 层读两处：`state["params"][key]` 与顶层的 `state[key]`，
+    后者是早期写入的兼容位置（只读，不回写）。
+    """
+    st = state if isinstance(state, dict) else {}
+    sess = st.get("params") if isinstance(st.get("params"), dict) else {}
+    cfg = config if isinstance(config, dict) else {}
+    affect = cfg.get("affect") if isinstance(cfg.get("affect"), dict) else {}
+    out = {}
+    for key, default in (("mood_tau_s", MOOD_TAU_S),
+                         ("heart_tau_s", HEART_TAU_S),
+                         ("rise_tau_s", 0.0),
+                         ("neg_fade_mult", NEG_FADE_MULT)):
+        value = None
+        for cand in (affect.get(key), sess.get(key), st.get(key)):
+            if isinstance(cand, (int, float)) and not isinstance(cand, bool):
+                value = float(cand)
+                break
+        if value is None:
+            value = float(default)
+        lo, hi = AFFECT_TAU_BOUNDS[key]
+        out[key] = round(max(lo, min(hi, value)), 3)
+    return out
+
+
+def leak_step(current, target, dt, decay_tau, rise_tau=0.0, neg_mult=1.0):
+    """一步指数泄漏；"往上走"用 rise_tau，"往下走"按 neg_mult 放慢。
+
+    往上走 = 目标与当前同号、且 |目标| 比 |当前| 大（离 0 更远）。跨过 0 换号
+    算消退：从 +0.4 掉到 -0.2 是"坏下来了"，不是"涨上去了"。
+    neg_mult 只管"负向在退"这一件事：当前值在 0 以下、且正在往上（往基线）走时，
+    tau 乘 neg_mult。>1 表示坏情绪退得更慢，<1 表示更快；默认 1.0 = 对称，
+    行为与只有 decay_tau 时逐位相同。onset（|值| 变大）不归它管，那是 rise_tau。
+    """
+    try:
+        cur = float(current)
+        tgt = float(target)
+        tau = max(1.0, float(decay_tau))
+        rising = abs(tgt) > abs(cur) and (tgt * cur) >= 0.0
+        if rising and rise_tau is not None and float(rise_tau) > 0.0:
+            tau = max(1.0, float(rise_tau))
+        elif cur < 0.0 and tgt > cur and neg_mult and float(neg_mult) != 1.0:
+            # 负向在消退（从负值往基线走）：按倍数放慢（或加快）
+            tau = max(1.0, tau * float(neg_mult))
+        step = 1.0 - math.exp(-max(0.0, float(dt)) / tau)
+        return cur + (tgt - cur) * step
+    except Exception:
+        return float(current)
+
+
+# ---- 七套情绪系统（Panksepp）的 bias 与 DAN --------------------------------
+# activation[k] = clip(w_system[k]·KC + bias[k], 0, 1)；bias 由评价直接给，
+# 所以模型关掉、只有数值时这七个数照样动（设计稿 docs/EMOTION-SYSTEMS.md §3）。
+SYSTEMS = ("SEEKING", "CARE", "PLAY", "LUST", "FEAR", "RAGE", "PANIC")
+LUST_ENABLED = str(_os.environ.get("BIOCORE_LUST") or "0").strip().lower() in (
+    "1", "true", "on", "yes")
+# PANIC 的双向拐点：0.4–0.7 推开口，>0.7 转退缩（hypervigilance–withdrawal）。
+# 方向有文献，0.7 这个数是我们的选择（设计稿 §6）。
+PANIC_WITHDRAW_AT = 0.7
+PANIC_FLOOR = 0.4
+
+
+def system_bias(dims=None, state=None, now=None):
+    """七套系统的 bias（0..1），全部由已有数值算出，不读字面。"""
+    d = dims if isinstance(dims, dict) else {}
+    st = state if isinstance(state, dict) else {}
+    core = st.get("core") if isinstance(st.get("core"), dict) else {}
+    body = st.get("body") if isinstance(st.get("body"), dict) else {}
+
+    def num(*names, default=0.0):
+        for src in (d, core, body, st):
+            if not isinstance(src, dict):
+                continue
+            for name in names:
+                val = src.get(name)
+                if isinstance(val, (int, float)) and not isinstance(val, bool):
+                    return float(val)
+        return float(default)
+
+    v = max(-1.0, min(1.0, num("valence", "v")))
+    a = max(0.0, min(1.0, num("arousal", "a", default=0.5)))
+    stress = max(0.0, min(1.0, num("stress")))
+    dom = max(-1.0, min(1.0, num("dominance")))
+    certainty = max(0.0, min(1.0, num("certainty", default=0.5)))
+    novelty = max(0.0, min(1.0, num("novelty")))
+    goal = max(-1.0, min(1.0, num("goal")))
+    blame = max(0.0, min(1.0, num("blame")))
+    hit = max(0.0, min(1.0, num("hit")))
+    closeness = max(0.0, min(1.0, num("closeness", default=0.5)))
+    social = max(0.0, min(1.0, num("social_drive", "social", default=0.5)))
+    # "对方也在痛"：hit 里没有被 blame 指向她的那一部分
+    hit_other = max(0.0, hit - blame)
+    loneliness = max(0.0, 0.6 - social) * (0.4 + 0.6 * closeness)
+    hours_alone = 0.0
+    try:
+        last = st.get("last_human_ts")
+        stamp = float(now) if isinstance(now, (int, float)) else time.time()
+        if isinstance(last, (int, float)) and last > 0:
+            hours_alone = max(0.0, (stamp - float(last)) / 3600.0)
+        else:
+            core_ts = st.get("core_state_ts")
+            if isinstance(core_ts, (int, float)) and core_ts > 0:
+                hours_alone = max(0.0, (stamp - float(core_ts)) / 3600.0)
+    except Exception:
+        hours_alone = 0.0
+    out = {
+        "SEEKING": 0.5 * novelty + 0.5 * max(0.0, goal),
+        "CARE": 0.6 * closeness + 0.4 * hit_other,
+        "PLAY": 0.5 * max(0.0, v) + 0.3 * a + 0.2 * (1.0 - stress),
+        "LUST": 0.6 * closeness + 0.4 * max(0.0, v),
+        "FEAR": 0.5 * (1.0 - certainty) + 0.3 * stress + 0.2 * blame,
+        "RAGE": 0.5 * max(0.0, -v) + 0.3 * max(0.0, dom) + 0.2 * blame,
+        "PANIC": 0.6 * loneliness + 0.4 * min(1.0, hours_alone / 12.0),
+    }
+    if not LUST_ENABLED:
+        out["LUST"] = 0.0          # 默认禁用，仅占位
+    return {k: round(max(0.0, min(1.0, float(v_))), 4)
+            for k, v_ in out.items()}
+
+
+def system_dan(prev=None, cur=None, dims=None, systems=None):
+    """每个系统自己的奖惩分量（-1..1）："它想要的结果有没有发生"。
+
+    只用可观测的数值差分，不读字面；没有上一拍就返回空（不学习）。
+    """
+    p = prev if isinstance(prev, dict) else {}
+    c = cur if isinstance(cur, dict) else {}
+    if not p or not c:
+        return {}
+    d = dims if isinstance(dims, dict) else {}
+
+    def delta(key, default=0.0):
+        a = p.get(key, default)
+        b = c.get(key, default)
+        try:
+            return float(b) - float(a)
+        except Exception:
+            return 0.0
+
+    def clamp(x):
+        return max(-1.0, min(1.0, float(x)))
+
+    seek = delta("social_drive") + delta("drive_curiosity")
+    care = -delta("stress")
+    play = delta("valence")
+    neg_p = max(0.0, -float(p.get("valence") or 0.0))
+    neg_c = max(0.0, -float(c.get("valence") or 0.0))
+    fear = neg_p - neg_c            # 负向减轻 = 躲开了伤害
+    rage = delta("dominance") if "dominance" in c else delta("agency")
+    panic = delta("social_drive")   # 有人回应 = 想要的接触发生了
+    out = {"SEEKING": clamp(seek * 2.0), "CARE": clamp(care * 2.0),
+           "PLAY": clamp(play * 2.0), "LUST": 0.0,
+           "FEAR": clamp(fear * 2.0), "RAGE": clamp(rage * 2.0),
+           "PANIC": clamp(panic * 2.0)}
+    return {k: round(v, 4) for k, v in out.items() if abs(v) > 1e-6}
+
+
+def panic_effective(value):
+    """PANIC 的"推开口"有效量：0.4–0.7 上升，>0.7 转负（退缩）。
+
+    没有这一条，"越孤独越黏"就是假人（设计稿 §4）。
+    """
+    try:
+        x = max(0.0, min(1.0, float(value)))
+    except Exception:
+        return 0.0
+    if x <= PANIC_FLOOR:
+        return 0.0
+    if x <= PANIC_WITHDRAW_AT:
+        # 0.4 → 0，0.7 → 1：这一段是"想找人"
+        return (x - PANIC_FLOOR) / (PANIC_WITHDRAW_AT - PANIC_FLOOR)
+    # 过了拐点：从 +1 连续往下走，0.82 附近过零，1.0 触底 −1。
+    # 连续（不在 0.7 处跳变），方向按 hypervigilance–withdrawal。
+    return max(-1.0, 1.0 - 2.5 * (x - PANIC_WITHDRAW_AT)
+               / max(1e-6, 1.0 - PANIC_WITHDRAW_AT))
+
+
 def _body_path(store, session_id):
     import os
     import re
@@ -796,6 +1134,24 @@ def load_state(store, session_id) -> Dict[str, float]:
         return {}
 
 
+def save_body_state(store, session_id, state) -> bool:
+    """存身体状态时，把"身体不产"的数字键保留下来。
+
+    body.state() 只报身体自己的字段；silent_beats、sys_* 这些由别的层写进去
+    的键会被整份覆盖，于是"沉默越久越可能开口"的重尾永远在 0 上求值。
+    只在七系统活着（存量里有 sys_*）时保留，保证关掉开关时与改动前一致。
+    """
+    try:
+        prev = load_state(store, session_id)
+        if isinstance(state, dict) and any(str(k).startswith("sys_") for k in prev):
+            for key, value in prev.items():
+                if key not in state and isinstance(value, (int, float)):
+                    state[key] = value
+    except Exception:
+        pass
+    return save_state(store, session_id, state)
+
+
 def save_state(store, session_id, state: Dict[str, float]) -> bool:
     import json
     import os
@@ -822,6 +1178,17 @@ def body_for(store, session_id, seed: int = 1) -> "DialogueBody":
             # 慢层要跨轮活着，否则每轮都从 0 开始，等于没有 mood 与 load
             body.slow["mood"] = float(prev.get("mood") or 0.0)
             body.slow["load"] = float(prev.get("allostatic_load") or 0.0)
+            # 心也要跨轮活着：600 秒的低通如果每轮从 0 重新开始，它每轮只走
+            # 一步（9.5%），"时间连续"就名存实亡——实测心一路贴着 0，而原始
+            # 读数在 -0.7 的时候它报 -0.01。
+            if prev.get("heart") is not None:
+                body.slow["heart"] = float(prev.get("heart") or 0.0)
+            # 七套系统也跨轮活着（扁平键 sys_<NAME>）
+            _sys = {name: float(prev["sys_" + name])
+                    for name in SYSTEMS
+                    if isinstance(prev.get("sys_" + name), (int, float))}
+            if _sys:
+                body.slow["systems"] = _sys
             body.commit["open"] = float(prev.get("commit_open") or 0.0)
             body.commit["kept"] = float(prev.get("commit_kept") or 0.0)
             try:
@@ -1139,18 +1506,29 @@ _PROMPTS = None
 
 def prompt_text(name):
     """Prompt text lives in data/prompts.json: the core contract forbids CJK
-    string literals in code, and prompts are data, not logic."""
+    string literals in code, and prompts are data, not logic.
+
+    data/prompts.json 是可部署、可被宿主覆盖的那份（在 .gitignore 里，不进仓）；
+    它缺某个键时退回同目录下**入库**的 prompts_default.json。
+    逐键合并、前者优先，所以新增一个键（appraise_dims）不需要改部署产物。
+    """
     global _PROMPTS
     if _PROMPTS is None:
         import json as _json
         import os as _os2
-        path = _os2.path.join(_os2.path.dirname(_os2.path.abspath(__file__)),
-                              "data", "prompts.json")
-        try:
-            with open(path, "r", encoding="utf-8") as fh:
-                _PROMPTS = _json.load(fh)
-        except Exception:
-            _PROMPTS = {}
+        here = _os2.path.dirname(_os2.path.abspath(__file__))
+        merged = {}
+        for path in (_os2.path.join(here, "data", "prompts.json"),
+                     _os2.path.join(here, "prompts_default.json")):
+            try:
+                with open(path, "r", encoding="utf-8") as fh:
+                    doc = _json.load(fh)
+            except Exception:
+                continue
+            if isinstance(doc, dict):
+                for key, value in doc.items():
+                    merged.setdefault(str(key), value)
+        _PROMPTS = merged
     return str(_PROMPTS.get(str(name)) or "")
 
 
@@ -1501,7 +1879,7 @@ def advance(store, session_id, now=None, seed=1):
     for _ in range(ticks):
         body._tick_once(dt=min(dt, 600.0))
     state = body.state()
-    save_state(store, session_id, state)
+    save_body_state(store, session_id, state)
     _clock_save(store, session_id, now)
     return {"ticks": ticks, "seconds": round(elapsed, 1), "state": state}
 
@@ -1614,7 +1992,7 @@ def idle_activity(store, session_id, now=None, seed=1, rng=None):
         events.append({"kind": "muse", "text": note,
                        "valence": round(v, 3), "stress": round(stress, 3)})
 
-    save_state(store, session_id, state)
+    save_body_state(store, session_id, state)
     hist["replays"] = int(hist.get("replays") or 0) + sum(1 for e in events if e["kind"] == "replay")
     hist["muses"] = int(hist.get("muses") or 0) + sum(1 for e in events if e["kind"] == "muse")
     hist["runs"] = int(hist.get("runs") or 0) + 1
