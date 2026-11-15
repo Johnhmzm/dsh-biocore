@@ -7598,6 +7598,14 @@ def prompt_block(payload):
         sections["persona"] = persona_line
     if policy.get("enabled"):
         sections["expression_policy"] = policy
+    # 留痕放在这里：无论宿主走 turn_start 还是 inject，最终都从这里出文本。
+    try:
+        _sid = str(data.get("session_id") or "").strip()
+        _st = data.get("store")
+        if _sid and _st:
+            _injection_trace(_st, _sid, text, state, data)
+    except Exception:
+        pass
     return {"ok": True, "phase": phase, "text": text, "chars": len(text),
             "sections": sections}
 
