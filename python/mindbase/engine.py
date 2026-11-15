@@ -484,6 +484,7 @@ class MindBase:
                     self.drives.get("energy"),
                     self.circuit.action_activity(salience),
                     float(getattr(self, "circuit_valence", 0.0)),
+                    float(self.circuit.mbon_approach) - float(self.circuit.mbon_avoid),
                 )
                 if ai["action"] == "speak" and self._can_initiate():
                     return "speak", "active_inference"
