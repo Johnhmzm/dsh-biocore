@@ -447,7 +447,23 @@
     return parts.length ? parts.join(' · ') : DASH
   }
 
+  function renderBodyTruth(data) {
+    var el = $('bodyTruth')
+    if (!el) return
+    var m = (data && data.mushroom_body) || {}
+    var v = Number(m.valence)
+    var a = Number(m.arousal)
+    var s = Number(m.stress)
+    if (!Number.isFinite(v) || !Number.isFinite(s)) {
+      el.textContent = DASH
+      return
+    }
+    el.textContent = 'v ' + fmt(v) + ' · a ' + fmt(Number.isFinite(a) ? a : 0)
+      + ' · stress ' + fmt(s) + ' · ' + String(m.action || DASH)
+  }
+
   function renderState(data) {
+    renderBodyTruth(data)
     var on = live(data)
     setText('stateRelation', on ? joinRelation(data) : DASH)
     setText('stateTone', on ? (scalarLabel(data.tone, '') || DASH) : DASH)
