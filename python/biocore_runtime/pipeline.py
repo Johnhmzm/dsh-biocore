@@ -7372,6 +7372,33 @@ def _note_prefix(session_id, text):
 PREFIX_STATS = {}
 
 
+def _intero_gloss(intero):
+    """把内感受四量说成人话（不给数值）。"""
+    data = intero if isinstance(intero, dict) else {}
+    if not data:
+        return ""
+    out = []
+    warm = _num(data.get("warmth", 0.5), 0.5)
+    weight = _num(data.get("weight", data.get("heaviness", 0.3)), 0.3)
+    clear = _num(data.get("clarity", 0.5), 0.5)
+    tense = _num(data.get("tension", 0.0), 0.0)
+    if warm >= 0.65:
+        out.append("心里是暖的")
+    elif warm <= 0.35:
+        out.append("有点冷")
+    if weight >= 0.6:
+        out.append("身上发沉")
+    elif weight <= 0.2:
+        out.append("身子轻")
+    if clear <= 0.35:
+        out.append("脑子有点糊")
+    elif clear >= 0.7:
+        out.append("想得很清楚")
+    if tense >= 0.65:
+        out.append("整个人绷着")
+    return "、".join(out)
+
+
 def _state_block(state, budget):
     state = state if isinstance(state, dict) else {}
     core = state.get("core") if isinstance(state.get("core"), dict) else {}
@@ -7390,11 +7417,16 @@ def _state_block(state, budget):
     # of words and cap what the model can infer. The dimensions are what the
     # body actually computed; the words after them are only a gloss.
     numbers = "效价%+.2f 唤醒%.2f 支配%+.2f 紧张%.2f 社交%+.2f" % (v, a, d, stress, social - 0.5)
+    # 内感受四量每轮都在算，但契约规定原始数值不外露（test_runtime_pipeline 钉着）。
+    # 所以只把它们说成话：暖不暖、沉不沉、清不清楚——信息在，数字不泄。
+    _intero_words = _intero_gloss(intero) if intero else ""
     # The interchange layer's job: numbers alone are unreadable, single words
     # collapse them. Give the reading key, once, in the same line.
     reading = ("读法：效价-1难受…+1舒服；唤醒0…1越高越激动；支配-1被推着…+1握得住；"
                "紧张0…1越高越绷；社交-1想退开…+1想靠近")
     parts = []   # no single-word gloss: the numbers and the reading key carry it
+    if _intero_words:
+        parts.append(_intero_words)
     label = str(tone.get("label") or "").strip()
     if label:
         parts.append(label)
@@ -11862,7 +11894,14 @@ def dispatch(action, payload=None):
             rows = trace_read(store, session_id, data.get("limit"))
             return {"ok": True, "rows": rows}
         if action == "inject":
-            return prompt_block(data)
+            out = prompt_block(data)
+            # 留痕：dispatch 手里才有 store（payload 里通常没有），所以放这儿。
+            try:
+                _injection_trace(store, data.get("session_id"),
+                                 out.get("text"), data.get("state"), data)
+            except Exception:
+                pass
+            return out
         if action == "gate":
             reply = data.get("reply", data.get("reply_text", ""))
             return gate_reply(reply, data)
