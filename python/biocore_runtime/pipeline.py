@@ -6774,6 +6774,25 @@ def _body_intero_from_payload(payload):
     return out
 
 
+def _appraisal_prior():
+    """内置手调矩阵摊平成 {"dim.channel": w}（只含 7 个特征维，不含 valence 这类外源）。"""
+    try:
+        from biocore_model import appraisal_rls as _rls
+        from biocore_model import appraisal as _ap
+        table = getattr(_ap, "V2_WEIGHTS", {}) or {}
+        out = {}
+        for channel, row in table.items():
+            if not isinstance(row, dict):
+                continue
+            for dim in _rls.DIMS:
+                value = row.get(dim)
+                if isinstance(value, (int, float)):
+                    out["%s.%s" % (dim, channel)] = float(value)
+        return out
+    except Exception:
+        return {}
+
+
 def _body_turn_impl(store, session_id, text, payload=None):
     """Feed one user turn into the digital-fly body and return its state.
 
@@ -6865,22 +6884,40 @@ def _body_turn_impl(store, session_id, text, payload=None):
             if dims:
                 # 有拟合好的权重就用它：那是从真实回合里学出来的映射，
                 # 没有就退回内置的手调矩阵。
-                _w = None
+                # 权重来源：手调矩阵当先验，RLS 在线估计做收缩（α = n/(n+k)）。
+                # n=0 时 α=0 → w_eff 与先验逐键相同，行为与改动前一致。
+                _prior = _appraisal_prior()
+                _w = _prior or None
+                _wsrc = "prior"
                 try:
-                    from biocore_model import appraisal_fit as _af
-                    _table = _af.load(store)
-                    if _table:
-                        _w = _af.flatten(_table) or None
+                    from biocore_model import appraisal_rls as _rls
+                    _w_eff, _wsrc = _rls.effective_weights(store, _prior)
+                    if _w_eff:
+                        _w = _w_eff
                 except Exception:
-                    _w = None
+                    _wsrc = "prior"
+                try:
+                    if isinstance(payload, dict):
+                        payload["weights_source"] = _wsrc
+                        _st_ws = payload.get("state")
+                        if isinstance(_st_ws, dict):
+                            _st_ws["weights_source"] = _wsrc
+                except Exception:
+                    pass
                 outs = _ap.appraise(dims, confidence=0.7, weights=_w)
         except Exception:
             outs = None
         state = _mb.turn(store, session_id, text, dims, with_memory=False, outs=outs)
         try:
             # 拟合评价矩阵要的数据：dims、outs、状态前后
-            _mb.log_learn(store, session_id, dims, outs,
-                          _mb.load_prev(store, session_id), state)
+            _before = _mb.load_prev(store, session_id)
+            _mb.log_learn(store, session_id, dims, outs, _before, state)
+            # 同一份观测立刻做一次 RLS（从第 1 行就开始，不等 8 行）
+            try:
+                from biocore_model import appraisal_rls as _rls2
+                _rls2.update(store, dims, _before, state, prior=_appraisal_prior())
+            except Exception:
+                pass
         except Exception:
             pass
         return state
@@ -8366,6 +8403,7 @@ def _injection_trace(store, session_id, text, state, payload=None):
             "mood": round(_num((body or {}).get("mood"), 0.0), 4),
             "load": round(_num((body or {}).get("allostatic_load"), 0.0), 4),
             "action": str((body or {}).get("action") or ""),
+            "weights": str((state or {}).get("weights_source") or ""),
             "text": str(text or ""),
         }
         with open(path, "a", encoding="utf-8") as fh:
@@ -11963,7 +12001,8 @@ def dispatch(action, payload=None):
                 _pdims = _ps.get("last_dims") if isinstance(_ps.get("last_dims"), dict) else None
                 if _pdims:
                     session_state["last_dims"] = dict(_pdims)
-                    for _k in ("push_source", "last_push_ts", "dims_source"):
+                    for _k in ("push_source", "last_push_ts", "dims_source",
+                               "weights_source"):
                         if _ps.get(_k) is not None:
                             session_state[_k] = _ps[_k]
             except Exception:
