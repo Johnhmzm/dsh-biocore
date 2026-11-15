@@ -6938,6 +6938,23 @@ def _body_turn_impl(store, session_id, text, payload=None):
             # 拟合评价矩阵要的数据：dims、outs、状态前后
             _before = _mb.load_prev(store, session_id)
             _mb.log_learn(store, session_id, dims, outs, _before, state)
+            # 收集"这句话 → 情绪差分"的观测对（标签自动，不用人标）。
+            # 向量此时还没有，训练时按文本回记忆库里对齐。
+            try:
+                import json as _json0
+                _pair = {"ts": round(time.time(), 3), "text": str(text or "")[:400],
+                         "dims": {k: round(float(v), 3) for k, v in (dims or {}).items()
+                                  if isinstance(v, (int, float))},
+                         "delta": {k: round(float(state.get(k) or 0.0)
+                                           - float((_before or {}).get(k) or 0.0), 4)
+                                   for k in ("valence", "arousal", "stress",
+                                             "social_drive", "drive_safety")}}
+                _pp = os.path.join(str(store), "affect_pairs.jsonl")
+                os.makedirs(os.path.dirname(_pp), exist_ok=True)
+                with open(_pp, "a", encoding="utf-8") as _fh:
+                    _fh.write(_json0.dumps(_pair, ensure_ascii=False) + chr(10))
+            except Exception:
+                pass
             # 同一份观测立刻做一次 RLS（从第 1 行就开始，不等 8 行）
             try:
                 from biocore_model import appraisal_rls as _rls2
