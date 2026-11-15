@@ -306,6 +306,32 @@ class DialogueBody:
                                         float(d.get("dominance") or 0.0),
                                         intensity=eff("push_gain", PUSH_GAIN) * _hab,
                                         blend=eff("push_gain", PUSH_GAIN) * _hab)
+                # 只喂 PAD 不够：压力、社交需求、信任、冲突都在状态层算过，
+                # 却从没进过身体。这里按同一套增益并进去，让主动推断看得到它们。
+                _k = eff("push_gain", PUSH_GAIN) * _hab
+                _aff3 = self.mind.affect
+                _stress_in = d.get("stress")
+                if isinstance(_stress_in, (int, float)):
+                    _aff3.stress = max(0.0, min(1.0,
+                        float(_aff3.stress) * (1.0 - _k) + float(_stress_in) * _k))
+                try:
+                    _drv = self.mind.drives.values
+                    _social_in = d.get("social")
+                    if isinstance(_social_in, (int, float)):
+                        _cur = float(_drv.get("social", 0.5))
+                        _drv["social"] = max(0.0, min(1.0,
+                            _cur * (1.0 - _k) + float(_social_in) * _k))
+                    _trust_in = d.get("trust")
+                    if isinstance(_trust_in, (int, float)):
+                        _cur = float(_drv.get("safety", 0.5))
+                        _drv["safety"] = max(0.0, min(1.0,
+                            _cur * (1.0 - _k) + (1.0 - float(_trust_in)) * _k))
+                    _conf_in = d.get("conflict")
+                    if isinstance(_conf_in, (int, float)):
+                        _cur = float(_drv.get("safety", 0.5))
+                        _drv["safety"] = max(0.0, min(1.0, _cur - float(_conf_in) * _k))
+                except Exception:
+                    pass
             except Exception:
                 pass
         else:

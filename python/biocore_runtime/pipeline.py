@@ -6683,6 +6683,23 @@ def _body_turn_impl(store, session_id, text, payload=None):
         if digest:
             probe = text + "\n（她刚想起：" + digest[:200] + "）"
         dims = _mb.appraise_text(probe, cfg.get("summarizer") or {})
+        # 评价只给出 PAD 与社交；状态层算过的压力/信任/冲突也要一起交给身体，
+        # 否则它们只停在面板上，进不到主动推断里。
+        try:
+            _st = payload.get("state") if isinstance(payload, dict) else None
+            _st = _st if isinstance(_st, dict) else {}
+            _core = _st.get("core") if isinstance(_st.get("core"), dict) else {}
+            _rel = _st.get("relationship") if isinstance(_st.get("relationship"), dict) else {}
+            _body_in = _st.get("body") if isinstance(_st.get("body"), dict) else {}
+            dims = dict(dims or {})
+            for _key, _val in (("stress", _core.get("stress", _body_in.get("stress"))),
+                               ("social", _core.get("social", _st.get("social"))),
+                               ("trust", _rel.get("trust", _core.get("trust"))),
+                               ("conflict", _rel.get("conflict", _core.get("conflict")))):
+                if isinstance(_val, (int, float)):
+                    dims.setdefault(_key, float(_val))
+        except Exception:
+            pass
         # 7x7 评价矩阵在这里第一次真正上电：dims 进去，八个输出各自落到身体
         outs = None
         try:
