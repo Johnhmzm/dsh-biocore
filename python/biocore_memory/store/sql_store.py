@@ -49,7 +49,10 @@ CREATE TABLE IF NOT EXISTS units (
   entry_id TEXT NOT NULL,
   ord INTEGER,
   text TEXT NOT NULL CHECK(length(text) > 0),
-  vector BLOB
+  vector BLOB,
+  -- 命题（第二层）：20–35 字的自足陈述，主语必须出现、禁代词。
+  -- 老库靠 _ensure_units_schema 的 ALTER TABLE ADD COLUMN 补上，不重建表。
+  gist TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_units_entry ON units(entry_id);
 CREATE TABLE IF NOT EXISTS events (
@@ -246,6 +249,22 @@ def _ensure_entries_schema(conn):
         pass
 
 
+def _ensure_units_schema(conn):
+    """老库补 gist 列（命题层）。只加列，不重建表、不删数据。
+
+    为什么用 ALTER 而不是重建：units 里可能已经有 16165 行向量（重算代价高），
+    ADD COLUMN 是 SQLite 的 O(1) 元数据操作，老行 gist 保持 NULL（= 还没生成），
+    回填脚本据此幂等补。
+    """
+    try:
+        cols = [row[1] for row in conn.execute('PRAGMA table_info(units)')]
+        if cols and 'gist' not in cols:
+            conn.execute('ALTER TABLE units ADD COLUMN gist TEXT')
+        conn.commit()
+    except Exception:
+        pass
+
+
 def connect(root, session_id):
     """A fresh connection per call; registered so store_close() can release it.
 
@@ -263,6 +282,7 @@ def connect(root, session_id):
     conn.executescript(SCHEMA)
     conn.commit()
     _ensure_entries_schema(conn)
+    _ensure_units_schema(conn)
     try:
         _OPEN_CONNS.append(weakref.ref(conn))
     except TypeError:       # a backend without weakref support: nothing to track
@@ -507,20 +527,109 @@ def save_units(root, session_id, entry_units):
             entry_id = str(entry_id or "")
             if not entry_id or not units:
                 continue
+            # 命题层（gist）是一条条落下来的，重写 units 不能把它丢掉：
+            # 单元 id 是确定的 "<entry_id>#<ord>"，先按 id 把已有 gist 抄下来，
+            # 重建后同 id 的行原样带上（只增不改的落地方式）。
+            kept = {}
+            try:
+                kept = {str(row[0]): row[1] for row in conn.execute(
+                    'SELECT id, gist FROM units WHERE entry_id=?' + ' AND gist IS NOT NULL'
+                    ' AND gist != \'\'', (entry_id,))}
+            except Exception:
+                kept = {}
             conn.execute('DELETE FROM units WHERE entry_id=?', (entry_id,))
             for idx, text, vector in units:
                 # 与 entries 同一档精度：units 也是召回用的向量，没有理由多存一倍
                 blob = _pack_entry_vector(conn, vector, precision)
                 if not blob or not str(text or "").strip():
                     continue
+                unit_id = "%s#%d" % (entry_id, int(idx))
                 conn.execute(
-                    'INSERT OR REPLACE INTO units (id, entry_id, ord, text, vector)'
-                    ' VALUES (?,?,?,?,?)',
-                    ("%s#%d" % (entry_id, int(idx)), entry_id, int(idx),
-                     str(text), blob))
+                    'INSERT OR REPLACE INTO units (id, entry_id, ord, text, vector, gist)'
+                    ' VALUES (?,?,?,?,?,?)',
+                    (unit_id, entry_id, int(idx), str(text), blob, kept.get(unit_id)))
                 written += 1
         conn.commit()
         return written
+    finally:
+        conn.close()
+
+
+def gist_stats(root, session_id):
+    """{total, with_gist, missing} —— 回填脚本的 dry-run 就报这三个数。"""
+    root = Path(root)
+    conn = connect(root, session_id)
+    try:
+        try:
+            row = conn.execute(
+                "SELECT COUNT(1),"
+                " SUM(CASE WHEN gist IS NOT NULL AND gist != '' THEN 1 ELSE 0 END)"
+                " FROM units").fetchone()
+        except Exception:
+            return {'total': 0, 'with_gist': 0, 'missing': 0}
+        total = int((row or [0, 0])[0] or 0)
+        done = int((row or [0, 0])[1] or 0)
+        return {'total': total, 'with_gist': done, 'missing': total - done}
+    finally:
+        conn.close()
+
+
+def units_missing_gist(root, session_id, limit=None):
+    """[(unit_id, entry_id, ord, text)] —— 还没写命题的单元（按写入顺序）。"""
+    root = Path(root)
+    conn = connect(root, session_id)
+    try:
+        sql = ("SELECT id, entry_id, ord, text FROM units"
+               " WHERE (gist IS NULL OR gist = '') AND length(text) > 0"
+               " ORDER BY entry_id, ord")
+        args = ()
+        if limit:
+            sql += ' LIMIT ?'
+            args = (int(limit),)
+        try:
+            return [tuple(row) for row in conn.execute(sql, args)]
+        except Exception:
+            return []
+    finally:
+        conn.close()
+
+
+def save_gist(root, session_id, unit_id, gist):
+    """写一条命题；已有命题的行不改（只增不改 + 幂等）。
+
+    返回 1 = 这次写进去了，0 = 已经有命题（重跑第二次所以必定是 0）。
+    """
+    text = str(gist or '').strip()
+    if not text:
+        return 0
+    root = Path(root)
+    conn = connect(root, session_id)
+    try:
+        cur = conn.execute(
+            "UPDATE units SET gist=? WHERE id=?"
+            " AND (gist IS NULL OR gist = '')", (text, str(unit_id)))
+        conn.commit()
+        return 1 if cur.rowcount > 0 else 0
+    finally:
+        conn.close()
+
+
+def load_gists(root, session_id, unit_ids=None):
+    """{unit_id: gist}；不给 unit_ids 就返回全部非空命题。"""
+    root = Path(root)
+    conn = connect(root, session_id)
+    try:
+        sql = "SELECT id, gist FROM units WHERE gist IS NOT NULL AND gist != ''"
+        args = ()
+        ids = [str(x) for x in (unit_ids or [])]
+        if ids:
+            marks = ','.join('?' * len(ids))
+            sql += ' AND id IN (%s)' % marks
+            args = tuple(ids)
+        try:
+            return {str(row[0]): str(row[1]) for row in conn.execute(sql, args)}
+        except Exception:
+            return {}
     finally:
         conn.close()
 
@@ -968,6 +1077,104 @@ def _ensure_events_centroid(conn):
 # 那一份，导致"改编解码点"看起来改了却没生效，已删。
 
 
+def _ensure_events_span(conn):
+    """老库补 started_ts / ended_ts 两列（事件的时间跨度）。只加列，不重建表。
+
+    为什么不让模型猜：起止时间是成员 ts 的 min/max，机械可得；模型只给
+    overview/claims。两列都可空：算不出来（成员没有 ts）就留 NULL，绝不填 0。
+    """
+    try:
+        cols = {row[1] for row in conn.execute("PRAGMA table_info(events)").fetchall()}
+        if "started_ts" not in cols:
+            conn.execute("ALTER TABLE events ADD COLUMN started_ts REAL")
+        if "ended_ts" not in cols:
+            conn.execute("ALTER TABLE events ADD COLUMN ended_ts REAL")
+        conn.commit()
+    except Exception:
+        pass
+
+
+def event_span(entries):
+    """成员 ts 的 (min, max)；拿不到就给 (None, None)。"""
+    stamps = []
+    for item in entries or []:
+        if not isinstance(item, dict):
+            continue
+        try:
+            value = float(item.get('ts') or 0.0)
+        except Exception:
+            continue
+        if value > 0:
+            stamps.append(value)
+    if not stamps:
+        return None, None
+    return min(stamps), max(stamps)
+
+
+def plan_event_spans(db_path):
+    """盘点一个库：多少行能算、多少行已经有了、多少行算不出来。只读。"""
+    import sqlite3 as _sq
+    from pathlib import Path as _Path
+    path = _Path(str(db_path))
+    out = {'rows': 0, 'fillable': 0, 'already': 0, 'uncomputable': 0, 'plan': []}
+    if not path.exists():
+        return out
+    conn = _sq.connect(str(path))
+    try:
+        _ensure_events_span(conn)
+        try:
+            rows = conn.execute('SELECT id, payload, started_ts, ended_ts'
+                                ' FROM events').fetchall()
+        except Exception:
+            return out
+        for eid, payload, started, ended in rows:
+            out['rows'] += 1
+            if started is not None and ended is not None:
+                out['already'] += 1
+                continue
+            try:
+                doc = json.loads(payload) if payload else {}
+            except Exception:
+                doc = {}
+            first, last = event_span((doc or {}).get('entries'))
+            if first is None:
+                out['uncomputable'] += 1
+                continue
+            out['fillable'] += 1
+            out['plan'].append((str(eid), float(first), float(last)))
+        return out
+    finally:
+        conn.close()
+
+
+def apply_event_spans(db_path, plan=None):
+    """把盘点结果写进去：只填 NULL 的行，已有的一个字节都不改（幂等）。"""
+    import sqlite3 as _sq
+    from pathlib import Path as _Path
+    path = _Path(str(db_path))
+    if not path.exists():
+        return 0
+    items = plan
+    if items is None:
+        items = plan_event_spans(db_path)['plan']
+    if not items:
+        return 0
+    conn = _sq.connect(str(path))
+    written = 0
+    try:
+        _ensure_events_span(conn)
+        for eid, first, last in items:
+            cur = conn.execute(
+                'UPDATE events SET started_ts=?, ended_ts=?'
+                ' WHERE id=? AND (started_ts IS NULL OR ended_ts IS NULL)',
+                (float(first), float(last), str(eid)))
+            written += 1 if cur.rowcount > 0 else 0
+        conn.commit()
+    finally:
+        conn.close()
+    return written
+
+
 def _event_payload(ev):
     """The event row minus the per-entry vectors, which hydrate from the cache."""
     out = dict(ev or {})
@@ -987,6 +1194,7 @@ def save_event_state(root, session_id, seen, events, global_state, open_buf):
     conn = connect(root, session_id)
     try:
         _ensure_events_centroid(conn)
+        _ensure_events_span(conn)
         live = {str(ev.get("event_id") or "") for ev in (events or [])
                 if isinstance(ev, dict)}
         # cheap fingerprint of what is already on disk: one small SELECT, then
@@ -1013,17 +1221,21 @@ def save_event_state(root, session_id, seen, events, global_state, open_buf):
                    len(str(ev.get("text") or "")), len(_payload))
             if existing.get(key[0]) == key[1:]:
                 continue
+            _first, _last = event_span(ev.get("entries"))
             conn.execute(
-                "INSERT INTO events (id,start,end,overview,text,closed_ts,payload,centroid)"
-                " VALUES (?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET"
+                "INSERT INTO events (id,start,end,overview,text,closed_ts,payload,"
+                " centroid,started_ts,ended_ts)"
+                " VALUES (?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET"
                 " start=excluded.start, end=excluded.end, overview=excluded.overview,"
                 " text=excluded.text, closed_ts=excluded.closed_ts,"
-                " payload=excluded.payload, centroid=excluded.centroid",
+                " payload=excluded.payload, centroid=excluded.centroid,"
+                " started_ts=COALESCE(events.started_ts, excluded.started_ts),"
+                " ended_ts=COALESCE(events.ended_ts, excluded.ended_ts)",
                 (str(ev.get("event_id") or ""), int(ev.get("start") or 0),
                  int(ev.get("end") or 0), str(ev.get("overview") or ""),
                  str(ev.get("text") or ""), float(ev.get("closed_ts") or 0.0),
                  _payload,
-                 pack_vector(ev.get("vector"))))
+                 pack_vector(ev.get("vector")), _first, _last))
         conn.execute(
             "INSERT INTO event_state (session,seen,global_state,open_buf,updated)"
             " VALUES (?,?,?,?,?) ON CONFLICT(session) DO UPDATE SET"

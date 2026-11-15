@@ -123,7 +123,7 @@ def fallback_due(rows, entries=None, events=None, now=None):
     return (stamp - last) > FALLBACK_SECONDS
 
 
-def settle_batch(rows, entries=None, events=None, now=None):
+def settle_batch(rows, entries=None, events=None, now=None, force=False):
     """按事件边界挑这一轮要结算的行：返回 (要结算的行, 原因)。
 
     切出 >=2 件 → 只结算第一件（groups[0]），其余留到下一轮；
@@ -144,6 +144,9 @@ def settle_batch(rows, entries=None, events=None, now=None):
         return [], 'empty'
     if len(groups) >= 2:
         return list(groups[0]), 'boundary'
+    if force:
+        # 00:00 的强制结算：哪怕只攒出 1 件，今天也必须结掉（明天又是新的一天）
+        return list(groups[0]), 'forced'
     if fallback_due(rows, entries=entries, events=events, now=now):
         return list(groups[0]), 'fallback'
     return [], 'accumulating'
@@ -348,6 +351,20 @@ def _commit_event(conn, session_id, key, rows, events, overview, claims, day, st
                         for item in (claims or [])],
              'closed_ts': 0.0,
              'entries': [dict(row) for row in rows]}
+    # 第三层的两张索引表：定型事件同时登记「落在哪一天」与「接在哪条后面」。
+    # 一个事务、只增不改；同天新建默认建边（reason=同一天），跨天是「顺序」。
+    try:
+        from biocore_memory.event import day_index as _day
+        _db = Path(conn.execute('PRAGMA database_list').fetchone()[2])
+        _stamps = [float(r.get('ts') or 0.0) for r in (rows or [])
+                   if isinstance(r, dict)]
+        _stamps = [value for value in _stamps if value > 0]
+        _day_key = _day.day_key_of(min(_stamps)) if _stamps else ''
+        if _day_key:
+            _day.record(_db, event['event_id'], _day_key, now=stamp)
+    except Exception as _de:
+        logger.warning('[day] 索引登记跳过（%s）：%s',
+                       type(_de).__name__, str(_de)[:120])
     # 老库可能还没有四层表：按迁移器的 DDL 就地建（幂等，不改旧表结构）
     for ddl in _mig.FOURLAYER_DDL:
         conn.execute(ddl)
@@ -374,12 +391,45 @@ def _commit_event(conn, session_id, key, rows, events, overview, claims, day, st
     return {'event_id': event['event_id'], 'ordinal': mapping['ordinal'], 'event': event}
 
 
+CONFIG_FILE = 'core_config.json'
+
+
+def _portrait_config(root_dir):
+    """从 store 目录或它的父目录读 core_config.json 的 recall.portrait_on。
+
+    面板把开关写在 <data>/core_config.json，而库在 <data>/memory/sessions/<sid>/memory.db，
+    所以两个位置都看：store 自己（<data>/memory）与它的父目录（<data>）。
+    读不到/写坏了都返回 None（= 没表态），交给 env 与缺省值。
+    """
+    import json
+    for base in (root_dir, root_dir.parent if root_dir is not None else None):
+        if base is None:
+            continue
+        try:
+            doc = json.loads((base / CONFIG_FILE).read_text(encoding='utf-8'))
+        except Exception:
+            continue
+        recall = doc.get('recall') if isinstance(doc, dict) else None
+        if isinstance(recall, dict) and recall.get('portrait_on') is not None:
+            return recall.get('portrait_on')
+    return None
+
+
 def _portrait_on(db_path):
-    """画像开关：config(recall.portrait_on) > env > 0。"""
+    """画像开关：config(recall.portrait_on，面板写的就是它) > env > 缺省 0。
+
+    以前这里把 payload 钉成 {'recall': {}}，等于**只读 env**——面板把
+    recall.portrait_on 写进 core_config.json 之后开关其实不生效（面板点开也不画像）。
+    现在先读配置文件，配置有值就以它为准（0 就是 0，不被 env 顶掉），没值才看 env。
+    """
     try:
         from biocore_memory.config import recall_params as _rp
         from pathlib import Path as _Path
         root_dir = _Path(str(db_path)).parents[2]
+        value = _portrait_config(root_dir)
+        if value is not None:
+            payload = {'recall': {'portrait_on': value}}
+            return int(_rp.resolve('portrait_on', payload, None)) == 1
         return int(_rp.resolve('portrait_on', {'recall': {}}, None)) == 1 or \
             _portrait_env(root_dir)
     except Exception:
@@ -506,6 +556,27 @@ def run(db_path, session_id, entries, events, summarizer=True, now=None, model='
             overview, claims, ev_summary, cache_info = _ask(summarizer, rows, day,
                                                 cache_dir=cache_dir,
                                                 model=str(model or ''))
+            # 改：把"旧值 -> 新值"落成一条边（append-only，幂等）。放在事件结算里是因为
+            # 这里同时握着新 claims 与历史事件里的旧 claims，compare 只需要一次合并。
+            edge_info = {}
+            try:
+                from biocore_memory.event import claims as _claims_mod
+                from biocore_memory.event import claim_edges as _edges
+                _all = []
+                for _ev in (events or []):
+                    for _item in (_ev.get('claims') or []):
+                        if isinstance(_item, dict):
+                            _all.append(_item)
+                # 新 claims 出生时没有 turn（模型不给轮次）：按 _commit_event 的同一口径
+                # 补成这一块的最大轮次，否则合并时会被当成"更老"，边就写反了。
+                _new_turn = max(turns) if turns else 0
+                _all.extend([dict(item, turn=int(_new_turn))
+                             for item in (claims or []) if isinstance(item, dict)])
+                edge_info = _edges.record(db_path, session_id,
+                                          _claims_mod.merge_claims(_all), now=stamp)
+            except Exception as _ee:
+                logger.warning('[edges] 纠正边落盘跳过（%s）：%s',
+                               type(_ee).__name__, str(_ee)[:120])
             seg_sums = _segment_summaries(summarizer, rows, cache_dir=cache_dir, model=str(model or ''))
             if seg_sums is None:
                 logger.warning('[consolidate] 分段小结跳过（失败或段数不符），块 %s', key[:12])
@@ -529,6 +600,7 @@ def run(db_path, session_id, entries, events, summarizer=True, now=None, model='
                     'event_id': written['event_id'],
                     'overview_chars': len(overview or ''),
                     'claims': len(claims),
+                    'claim_edges': edge_info,
                     'first_turn': min(turns), 'last_turn': max(turns),
                     'portrait': portrait_info}
         except Exception as exc:

@@ -130,11 +130,17 @@ def iter_events(path):
                         yield event
 
 
+def compaction_id_of(event):
+    """只取 id（不拼正文）：补扫用它判断"这条记过没有"，记过就不重建。"""
+    data = event.get('data') if isinstance(event.get('data'), dict) else {}
+    return str(data.get('compactionId') or '').strip()
+
+
 def payload_of(event):
     """compaction/summary -> compactions 的一行（字段映射只在这里定义一次）。"""
     data = event.get('data') if isinstance(event.get('data'), dict) else {}
     return {
-        'compaction_id': str(data.get('compactionId') or '').strip(),
+        'compaction_id': compaction_id_of(event),
         'range_start': (data.get('shadowedRange') or {}).get('start'),
         'range_end': (data.get('shadowedRange') or {}).get('end'),
         'shadowed_count': len(data.get('shadowedSeqs') or []),
@@ -164,7 +170,11 @@ def backfill(target, store, session_id=None, now=None):
     path = log_path(target)
     sid = runtime_session_id(session_id if session_id is not None else session_id_of(path))
     db = CR.db_path(store, sid)
-    written = skipped = seen = 0
+    # 只扫"没记录过"的：日志每次都得整份读（多帧 zstd 没法从中间 seek），但已记过的
+    # 那些不该再重建正文、更不该再发一条注定被 UNIQUE 挡掉的 INSERT。计数口径不变：
+    # 已记过的仍算在 skipped/duplicate 里，所以"第二次跑是 0 写入 + N skipped"照旧。
+    known = CR.known_ids(db, sid)
+    written = skipped = seen = known_hits = 0
     reasons = {}
     warnings = []
     last = None
@@ -172,11 +182,18 @@ def backfill(target, store, session_id=None, now=None):
         if event.get('type') != EVENT_TYPE:
             continue
         seen += 1
+        cid = compaction_id_of(event)
+        if cid and cid in known:
+            skipped += 1
+            known_hits += 1
+            reasons['duplicate'] = reasons.get('duplicate', 0) + 1
+            continue
         row = payload_of(event)
         out = CR.record(db, sid, row, now=now if now is not None else time.time())
         if out['recorded']:
             written += 1
             last = row
+            known.add(cid)
             continue
         skipped += 1
         reason = str(out.get('reason') or 'skipped')
@@ -185,7 +202,9 @@ def backfill(target, store, session_id=None, now=None):
             warnings.append((row.get('compaction_id') or '', reason))
     return {'session': sid, 'log': str(path), 'db': str(db), 'seen': seen,
             'written': written, 'skipped': skipped, 'reasons': reasons,
-            'warnings': warnings, 'last': last}
+            'warnings': warnings, 'last': last,
+            # 这次读日志时"已经记过、所以连正文都没重建"的条数（可观测，不参与写入）
+            'known': known_hits}
 
 
 def find_log(session_id, root=None):
@@ -237,4 +256,4 @@ def scan(session_id, store, root=None, store_session_id_override=None, now=None)
     out = backfill(path, store, session_id=sid, now=now)
     return {'ok': True, 'scanned': out['seen'], 'inserted': out['written'],
             'skipped': out['skipped'], 'log': out['log'], 'session_id': sid,
-            'db': out['db'], 'reasons': out['reasons']}
+            'db': out['db'], 'reasons': out['reasons'], 'known': out['known']}

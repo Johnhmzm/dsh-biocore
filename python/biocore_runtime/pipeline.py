@@ -147,6 +147,8 @@ RETRIEVE_TEMP = float(os.environ.get("BIOCORE_RETRIEVE_TEMP") or 0.0)
 RETRIEVE_TAIL = float(os.environ.get("BIOCORE_RETRIEVE_TAIL") or 0.15)
 
 BODY_SWITCH_KEY = "body"
+# 默认值保持 0：改默认值会连只读路径的契约一起改掉（recall 会多写 mirror 文件）。
+# 要开就写配置 switches.body=true，或设环境变量 BIOCORE_BODY=1。
 BODY_ON = str(os.environ.get("BIOCORE_BODY") or "0").strip().lower() in ("1", "true", "on", "yes")
 SENTENCE_RERANK_ON = str(os.environ.get("BIOCORE_SENTENCE_RERANK") or "1").strip().lower() not in ("0", "false", "off", "no")
 SENTENCE_RERANK_POOL = int(os.environ.get("BIOCORE_SENTENCE_RERANK_POOL") or 60)  # 兜底：_recall_param('pool')
@@ -5490,10 +5492,26 @@ def _rrf_fuse(rank_lists, k=None):
     order = sorted(scores, key=lambda key: (-scores[key], first_seen[key]))
     return [(key, round(scores[key], 6)) for key in order]
 
-def _claims_state_lines(events, limit=8, turn_dates=None):
-    """【状态】 lines from claims: the correction/conflict view."""
+def _claims_state_lines(events, limit=8, turn_dates=None, store=None,
+                        session_id=None):
+    """【状态】 lines from claims: the correction/conflict view.
+
+    有纠正边（claim_edges）就以边为准：边是结算时写下来的"旧值 -> 新值"，
+    交付不再靠并列重算。没有边（还没沉过、或这个会话确实没改过）就退回原来的
+    claims 现状视图 —— 一条信息都不少。
+    """
     try:
         from biocore_memory.event import claims as _CL
+        if store is not None and session_id:
+            try:
+                from biocore_memory.event import claim_edges as _edges
+                rows = _edges.edges(_db_path(_store_root(store), session_id),
+                                    session_id, limit=limit)
+                if rows:
+                    return _edges.lines(rows, limit=limit)
+            except Exception as exc:
+                logger.warning("[edges] 读边失败，退回 claims 视图：%s: %s",
+                               type(exc).__name__, str(exc)[:120])
         raw = []
         for ev in events or []:
             for item in ev.get("claims") or []:
@@ -7060,7 +7078,9 @@ def _inject_block_core(session_id, store, max_chars=None, top_k=TOP_K,
                                 _hit_events.append(_ev)
                                 break
                 _state_lines = _claims_state_lines(_hit_events or _evs, limit=8,
-                                                   turn_dates=_turn_dates)
+                                                   turn_dates=_turn_dates,
+                                                   store=store,
+                                                   session_id=session_id)
             except Exception as exc:
                 logger.warning("[claims] merge failed: %s: %s",
                                type(exc).__name__, str(exc)[:120])
@@ -7358,10 +7378,20 @@ def _constraints_block(state, switches, payload):
     tension = _num(intero.get("tension"), 0.5)
     v = _num(state.get("v", core.get("v", state.get("valence"))), 0.0)
     lines = []
-    if v <= -0.3 or tension >= 0.65:
-        lines.append("先接住情绪再谈事，句子短一点、语气放软。")
+    # 语气：不再只有两档。效价 × 支配 决定"这一轮用哪种打法"，
+    # 社交 决定"要不要开新话题"。只写做法，不写情绪名字。
+    dominance = _num(state.get("dominance", core.get("dominance")), 0.0)
+    social = _num(state.get("social", core.get("social")), 0.0)
+    if v <= -0.3 and dominance >= 0.2:
+        lines.append("可以直接把问题指出来，不必绕；句子短，不解释。")
+    elif v <= -0.3:
+        lines.append("只确认、不辩解；先接住，句子短一点。")
+    elif v >= 0.3:
+        lines.append("可以放松些，愿意多说一句，但别灌。")
     else:
         lines.append("语气自然平稳，先回应对方在意的事。")
+    if social <= -0.3:
+        lines.append("这一轮不开新话题，只接对方的话。")
     if _as_bool(payload.get("length_hint"), False):
         base_t = _int_param(payload.get("length_target"), 10, 1, 30)
         base_h = _int_param(payload.get("length_max"), 30, base_t, 60)
@@ -8539,6 +8569,32 @@ def _proactive_compose(loop, max_chars=PROACTIVE_DEFAULT_MAX_CHARS):
     return text if len(text) <= cap else text[:cap - 1] + "…"
 
 
+def _proactive_bump_reason(store, session_id, reason, extra=None):
+    """每次判定都记一笔原因计数（只增不改，写坏也不影响主流程）。"""
+    try:
+        path = _proactive_state_path(store)
+        if path is None:
+            return
+        import os as _os
+        stats_path = _os.path.join(_os.path.dirname(path), "proactive_reasons.json")
+        doc = _load_json(stats_path, {})
+        if not isinstance(doc, dict):
+            doc = {}
+        reasons = doc.get("reasons") if isinstance(doc.get("reasons"), dict) else {}
+        key = str(reason or "unknown")[:40]
+        reasons[key] = int(reasons.get(key) or 0) + 1
+        doc["reasons"] = reasons
+        doc["updated_at"] = time.strftime("%Y-%m-%dT%H:%M:%S")
+        if isinstance(extra, dict) and extra:
+            last = doc.get("last") if isinstance(doc.get("last"), dict) else {}
+            last.update({str(k)[:24]: v for k, v in extra.items()})
+            doc["last"] = last
+        doc["session_id"] = str(session_id or "")[:60]
+        _atomic_write(stats_path, doc)
+    except Exception:
+        pass
+
+
 def proactive_tick(session_id, last_human_ts=None, switches=None, store=None,
                    now=None, state_file=None):
     """One proactive decision tick (policy only; the caller performs delivery).
@@ -8560,29 +8616,55 @@ def proactive_tick(session_id, last_human_ts=None, switches=None, store=None,
     gap_minutes = round(max(0.0, now_ms - last_ms) / 60000.0, 1) if last_ms > 0 else 0.0
     result = {"ok": True, "should_send": False, "text": "",
               "reason": "", "gap_minutes": gap_minutes}
-    if not enabled:
-        result["reason"] = "disabled"
-        return result
-    if not send:
-        result["reason"] = "send_off"
-        return result
-    if not str(session_id or "").strip():
-        result["reason"] = "no_session"
-        return result
 
-    min_gap = _int_param(data.get("proactiveMinGapMinutes",
-                                  data.get("proactive_min_gap_minutes")),
-                         PROACTIVE_DEFAULT_MIN_GAP, 10, 48 * 60)
-    if last_ms <= 0 or gap_minutes < min_gap:
-        result["reason"] = "too_soon"
+    def _stop(reason):
+        """不发：记一笔原因计数，然后返回。计数写坏也不影响判定。"""
+        result["reason"] = reason
+        _proactive_bump_reason(store, sid, reason,
+                               {"gap_minutes": gap_minutes,
+                                "thresholds": result.get("thresholds")})
         return result
+    if not enabled:
+        return _stop("disabled")
+    if not send:
+        return _stop("send_off")
+    if not str(session_id or "").strip():
+        return _stop("no_session")
+
+    # 状态先读出来：阈值要按它松紧，而不是全由配置写死。
+    session_state = _proactive_session_state(store, sid, state_file=state_file)
+    core_now = session_state.get("core") if isinstance(
+        session_state.get("core"), dict) else {}
+    social_now = _num(session_state.get("social",
+                       core_now.get("social", 0.0)), 0.0)
+    dominance_now = _num(session_state.get("dominance",
+                          core_now.get("dominance", 0.0)), 0.0)
+    intero_now = session_state.get("intero") if isinstance(
+        session_state.get("intero"), dict) else {}
+    tension_now = _num(intero_now.get("tension",
+                        core_now.get("tension", 0.0)), 0.0)
+    # 社交/支配越低、越绷，就越不愿意主动开口：门槛抬高、间隔拉长。
+    reluctance = max(0.0, -social_now) * 0.6 + max(0.0, -dominance_now) * 0.4
+    strain = max(0.0, tension_now - 0.5) * 0.8
+    base_gap = _int_param(data.get("proactiveMinGapMinutes",
+                                   data.get("proactive_min_gap_minutes")),
+                          PROACTIVE_DEFAULT_MIN_GAP, 10, 48 * 60)
+    min_gap = int(round(base_gap * (1.0 + reluctance + strain)))
+    min_gap = max(10, min(48 * 60, min_gap))
+    result["thresholds"] = {"min_gap": min_gap, "reluctance": round(reluctance, 3),
+                            "strain": round(strain, 3)}
+    if last_ms <= 0 or gap_minutes < min_gap:
+        return _stop("too_soon")
 
     per_hour = _int_param(data.get("proactivePerHour",
                                    data.get("proactive_per_hour")),
                           PROACTIVE_DEFAULT_PER_HOUR, 1, 6)
-    min_trust = _num(data.get("proactiveMinTrust",
-                              data.get("proactive_min_trust")),
-                     PROACTIVE_DEFAULT_MIN_TRUST)
+    base_trust = _num(data.get("proactiveMinTrust",
+                               data.get("proactive_min_trust")),
+                      PROACTIVE_DEFAULT_MIN_TRUST)
+    min_trust = base_trust + reluctance * 0.25 + strain * 0.15
+    min_trust = max(0.0, min(0.95, min_trust))
+    result["thresholds"]["min_trust"] = round(min_trust, 3)
     max_chars = _int_param(data.get("proactiveMaxChars",
                                     data.get("proactive_max_chars")),
                            PROACTIVE_DEFAULT_MAX_CHARS, 10, 120)
@@ -8599,27 +8681,22 @@ def proactive_tick(session_id, last_human_ts=None, switches=None, store=None,
             sent.append(value)
     sent = [stamp for stamp in sent if now_ms - stamp < _HOUR * 1000.0]
     if len(sent) >= per_hour:
-        result["reason"] = "hourly_cap"
-        return result
+        return _stop("hourly_cap")
     last_sent_ms = _ms(persist.get("lastSentAt"), 0.0)
     if last_sent_ms > 0 and now_ms - last_sent_ms < min_gap * 60000.0:
-        result["reason"] = "cooldown"
-        return result
+        return _stop("cooldown")
 
-    session_state = _proactive_session_state(store, sid, state_file=state_file)
     rel = session_state.get("relationship") if isinstance(
         session_state.get("relationship"), dict) else {}
     trust = _num(rel.get("trust"), 0.5)
     if trust < min_trust:
-        result["reason"] = "not_close"
         result["trust"] = round(trust, 4)
-        return result
+        return _stop("not_close")
 
     loops = _proactive_commitments(store, sid)
     loop = _proactive_pick(loops)
     if require_loop and loop is None:
-        result["reason"] = "no_commitment"
-        return result
+        return _stop("no_commitment")
 
     # the body gets a vote: a body that does not want to open its mouth should
     # not be overruled by a clock. Until now speak/silence only coloured wording.
@@ -8629,8 +8706,7 @@ def proactive_tick(session_id, last_human_ts=None, switches=None, store=None,
             result["body"] = {"action": _bs.get("action"),
                               "stress": round(float(_bs.get("stress") or 0.0), 3)}
             if str(_bs.get("action") or "") == "silence":
-                result["reason"] = "body_silence"
-                return result
+                return _stop("body_silence")
     except Exception:
         pass
     # the learned policy finally has a reader: if this hour and this mood have
@@ -8638,9 +8714,8 @@ def proactive_tick(session_id, last_human_ts=None, switches=None, store=None,
     try:
         _pol = q_decision(store, sid, data)
         if _pol.get("samples", 0) >= 5 and _pol.get("top") in ("withdraw", "rest"):
-            result["reason"] = "learned_withdraw"
             result["policy"] = _pol
-            return result
+            return _stop("learned_withdraw")
         q_note_choice(store, sid, _pol.get("top") or "approach", data)
         result["policy"] = _pol
     except Exception:
@@ -10009,6 +10084,142 @@ def sanitize_config(doc):
     return out
 
 
+DAY_RECALL_HEADER = "【那天】"
+
+
+def day_recall(store, session_id, day_key, payload=None, budget_chars=None,
+               max_events=4, max_entries=3):
+    """按天取回：日期 → 日总结 → 事件 → 原文（新入口，旧入口一动不动）。
+
+    一次只给"这一天的一段"，不灌整天：日总结（至多 2 段）+ 若干事件的概述 +
+    每件事最多 max_entries 条原文。取不到的分层跳过，绝不编。
+    """
+    data = payload if isinstance(payload, dict) else {}
+    root = _store_root(store)
+    if root is None:
+        return {"ok": False, "reason": "no_store", "text": "", "chars": 0}
+    sid = sanitize_session_id(session_id)
+    key = str(day_key or "").strip()
+    if not key:
+        return {"ok": False, "reason": "no_day_key", "text": "", "chars": 0}
+    from biocore_memory.event import day_index as _day
+    from biocore_memory.event import day_summary as _ds
+    db = _db_path(root, sid)
+    try:
+        budget = int(budget_chars or recall_settings(store, data)["inject_chars"])
+    except Exception:
+        budget = 14000
+    max_events = _int_param(max_events, 4, 1, 20)
+    max_entries = _int_param(max_entries, 3, 0, 20)
+    parts = []
+    days = _ds.load(db, key, limit=2)
+    events = _day.events_of_day(db, key)
+    if not days and not events:
+        return {"ok": True, "reason": "empty_day", "text": "", "chars": 0,
+                "day_key": key, "day_summaries": 0, "events": 0, "entries": 0}
+    if days:
+        parts.append("日总结：" + chr(10) + chr(10).join(
+            "- " + str(row.get("text") or "").strip() for row in days
+            if str(row.get("text") or "").strip()))
+    shown_events = 0
+    shown_entries = 0
+    conn = None
+    try:
+        import sqlite3 as _sq
+        conn = _sq.connect(str(db))
+        for item in events[:max_events]:
+            eid = str(item.get("event_id") or "")
+            row = conn.execute(
+                "SELECT overview, text, payload FROM events WHERE id=?",
+                (eid,)).fetchone()
+            if not row:
+                continue
+            overview = str(row[0] or "").strip()
+            body = str(row[1] or "").strip()
+            lines = []
+            if overview:
+                lines.append("· " + overview)
+            try:
+                doc = json.loads(row[2]) if row[2] else {}
+            except Exception:
+                doc = {}
+            rows = (doc or {}).get("entries") or []
+            picked = [str(r.get("text") or "").strip() for r in rows
+                      if isinstance(r, dict) and str(r.get("text") or "").strip()]
+            for text in picked[:max_entries]:
+                lines.append("  - " + text)
+                shown_entries += 1
+            if not lines:
+                continue
+            shown_events += 1
+            parts.append(chr(10).join(lines))
+    except Exception as exc:
+        logger.warning("[day] 取事件失败：%s: %s", type(exc).__name__, str(exc)[:120])
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
+    if not parts:
+        return {"ok": True, "reason": "empty_day", "text": "", "chars": 0,
+                "day_key": key, "day_summaries": len(days), "events": 0, "entries": 0}
+    body = DAY_RECALL_HEADER + chr(10) + chr(10).join(parts)
+    body = _trim_lines(body, budget)
+    return {"ok": True, "text": body, "chars": len(body), "day_key": key,
+            "day_summaries": len(days), "events": shown_events,
+            "entries": shown_entries, "mode": "day"}
+
+
+def day_rollover(store, session_id, payload=None, now=None):
+    """00:00（UTC+8 的切天点）的收尾：强制结算当天尾巴 + 给过去每天补日总结。
+
+    两步都是幂等的：
+      1) 强制结算：`settle_batch(force=True)` 把当天攒着的那一件也结掉；
+      2) 日总结：只看 **今天以前** 的天（当天还在长，不提前总结），
+         每 8 条事件总结再总结一次；已有分块跳过。
+
+    返回 {'ok', 'settled', 'days', 'written', 'reason'}，任何异常都不抛。
+    """
+    data = payload if isinstance(payload, dict) else {}
+    root = _store_root(store)
+    if root is None:
+        return {"ok": False, "reason": "no_store", "settled": 0, "days": 0, "written": 0}
+    sid = sanitize_session_id(session_id)
+    stamp = float(now) if isinstance(now, (int, float)) else time.time()
+    from biocore_memory.event import day_index as _day
+    from biocore_memory.event import day_summary as _ds
+    db = _db_path(root, sid)
+    today = _day.day_key_of(stamp)
+    report = {"ok": True, "settled": 0, "days": 0, "written": 0, "day_keys": []}
+    try:
+        settle = _run_turn_end_consolidate(store, sid, dict(data, force=True))
+        report["settled"] = int(settle.get("settled") or 0)
+    except Exception as exc:
+        logger.warning("[day] 强制结算跳过：%s: %s", type(exc).__name__, str(exc)[:120])
+    try:
+        summarizer = _inject_summarizer(store, data)
+        model = ""
+        try:
+            model = str((_load_runtime_config(store).get("summarizer") or {}).get("model") or "")
+        except Exception:
+            model = ""
+        cache_dir = Path(_store_data_dir(store)) / "cache" / "summary" if _store_data_dir(store) else None
+        for item in _ds.days(db):
+            key = item["day_key"]
+            if not key or key >= today:
+                continue          # 当天还在长，不提前总结
+            out = _ds.generate(db, key, summarizer, model=model, now=stamp,
+                               cache_dir=cache_dir)
+            if out.get("written"):
+                report["days"] += 1
+                report["written"] += int(out["written"])
+                report["day_keys"].append(key)
+    except Exception as exc:
+        logger.warning("[day] 日总结跳过：%s: %s", type(exc).__name__, str(exc)[:120])
+    return report
+
+
 def _run_turn_end_consolidate(store, session_id, payload=None):
     """沉：turn_end 写入路径的登记入口。
 
@@ -10039,8 +10250,10 @@ def _run_turn_end_consolidate(store, session_id, payload=None):
         # 行数 >=30 或距上次结算 >12 小时兜底强制。字数不参与，事件数才是预算。
         stamp = time.time()
         _pending = _rc.pending_rows(entries, events)
+        # force=True 只在 00:00 的 day_rollover 里给：平时继续按事件边界攒
+        _force = bool(payload.get("force")) if isinstance(payload, dict) else False
         _batch, _why = _rc.settle_batch(_pending, entries=entries, events=events,
-                                        now=stamp)
+                                        now=stamp, force=_force)
         if not _batch:
             return {"enabled": True, "pending": len(_pending), "settled": 0,
                     "settle": _why}
@@ -10915,10 +11128,25 @@ def dispatch(action, payload=None):
             try:
                if _require_feature(store, BODY_SWITCH_KEY, data):
                     from biocore_runtime import mindbase_bridge as _mbj
-                    _jcfg = _load_runtime_config(store) or {}
-                    _grade = _mbj.judge_exchange(
-                        str(data.get("user_text") or ""), raw_assistant,
-                        _jcfg.get("summarizer") or {})
+                    # 反向注入：她说完这句话，自己的身体要吃下它的影响。
+                    # 以前只有 turn_start 的输入侧，输出侧从没喂过身体。
+                    try:
+                        _body_out = _mbj.body_for(store, session_id)
+                        _body_out.reply(raw_assistant)
+                        _mbj.save_state(store, session_id, _body_out.state())
+                    except Exception as _exc:
+                        logger.warning("[body] reply inject failed: %s", str(_exc)[:100])
+                    # 奖励不再问模型：用这一轮的情绪差分（效价升、紧张降 = 正）。
+                    # 评分器是外挂，情绪本身就是那套评价函数的输出。
+                    try:
+                        _prev = _mbj.load_prev(store, session_id) or {}
+                        _now_b = body_state(store, session_id) or {}
+                        _dv = float(_now_b.get("valence") or 0.0) - float(_prev.get("valence") or 0.0)
+                        _ds = float(_prev.get("stress") or 0.0) - float(_now_b.get("stress") or 0.0)
+                        _reward = max(-1.0, min(1.0, _dv + _ds))
+                    except Exception:
+                        _reward = 0.0
+                    _grade = {"reward": _reward, "source": "emotion_delta"}
                     if _grade:
                         q_reward_last(store, session_id, True, None, data,
                                       reward=_grade.get("reward"))
@@ -11680,6 +11908,21 @@ def dispatch(action, payload=None):
             return {"ok": True, "best": out.get("best"),
                     "fitness": out.get("fitness"),
                     "history": out.get("history")}
+        if action == "day_recall":
+            # 新入口：日期 -> 日总结 -> 事件 -> 原文（旧入口不动）
+            session_id = str(data.get("session_id") or "").strip()
+            if not session_id:
+                return bad("missing session_id")
+            return day_recall(store, session_id, data.get("day_key"), data,
+                              budget_chars=data.get("budget_chars"),
+                              max_events=data.get("max_events"),
+                              max_entries=data.get("max_entries"))
+        if action == "day_rollover":
+            # 00:00 的收尾：强制结清当天尾巴 + 给过去每天补日总结（幂等）
+            session_id = str(data.get("session_id") or "").strip()
+            if not session_id:
+                return bad("missing session_id")
+            return day_rollover(store, session_id, data)
         if action == "compaction_record":
             # DSH 官方压缩的摘要：只收下、落库（append-only），不调模型
             session_id = str(data.get("session_id") or "").strip()

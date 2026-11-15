@@ -282,6 +282,31 @@ def _row_dict(row):
     return dict(zip(COLUMNS, row))
 
 
+def known_ids(db_path, session_id):
+    """这个会话已经落过库的 compaction_id（补扫据此跳过的就是"已记录过的"）。
+
+    补扫每次都会把日志读一遍（多帧 zstd 没法从中间seek），但已经记过的那些不该
+    再重建正文、更不该再发一条 INSERT：9k 字的摘要拼一次不便宜，而结果必然被
+    UNIQUE 挡掉。所以先取 id 集合，已知的直接跳。返回空集合：库不存在/还没建表。
+    """
+    path = Path(str(db_path))
+    if not path.exists():
+        return set()
+    try:
+        conn = sqlite3.connect(str(path))
+    except Exception:
+        return set()
+    try:
+        rows = conn.execute(
+            'SELECT compaction_id FROM %s WHERE session_id=?' % TABLE,
+            (str(session_id or ''),)).fetchall()
+    except Exception:
+        return set()
+    finally:
+        conn.close()
+    return {str(row[0]) for row in rows if row and row[0]}
+
+
 def load(db_path, session_id, limit=None):
     """按写入顺序读出这个会话的压缩记录（recall 与检查用）。"""
     path = Path(str(db_path))
