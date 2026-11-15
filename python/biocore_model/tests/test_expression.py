@@ -210,13 +210,21 @@ class ExpressionPipelineTest(unittest.TestCase):
         self.assertIn("relationship", row["sources"])
         self.assertTrue(row["enabled"])
 
-    def test_prompt_block_carries_one_short_policy_line(self):
+    def test_policy_line_has_no_emoji_and_no_imperative(self):
+        """契约：数字允许出现在状态块里，被禁的是表情与命令口吻。
+
+        旧断言“caption 不含 0.4 / 0.5”是文字标签时代的产物；状态块改成
+        「数字 + 读法键」后数字本就该出现（为了不抹平 -0.5 与 -0.6 的差别）。
+        因此这里只查表情与命令口吻，不再把数字当污染。
+        """
         self.relationship(0.2, 0.3)
         out = self.turn(deltas=self.CONFLICT)
         caption = out["prompt_block"]
         self.assertEqual(self.policy_line(caption), ["- " + MASK_LINE])
-        self.assertNotIn("0.4", caption)          # the readout stays inside
-        self.assertNotIn("0.5", caption)
+        # 数字是状态读数，允许出现；禁止的是表情与命令口吻
+        self.assertEqual([ch for ch in caption if ord(ch) >= 0x1F000], [])  # 表情符号平面
+        for word in ("你必须", "马上执行"):
+            self.assertNotIn(word, caption)
         state = json.loads((self.store / "sessions" / "s1" / "state.json")
                            .read_text(encoding="utf-8"))
         block = pl.prompt_block({"state": state, "switches": {},

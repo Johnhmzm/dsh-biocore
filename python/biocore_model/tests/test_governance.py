@@ -1,4 +1,4 @@
-﻿# -*- coding: utf-8 -*-
+# -*- coding: utf-8 -*-
 """task-223: memory governance (decay/index/consolidate/concepts) + relationship."""
 import json
 import tempfile
@@ -93,10 +93,19 @@ class IndexAndConceptTest(StoreCase):
         self.assertTrue(doc["terms"])
 
     def test_inject_uses_index_and_counts_hit(self):
+        """窗口会插入邻居：ids 是全部交付行，hits 只记真正的命中行。
+
+        _mark_block_access 只给 hits 写 hits/last_used —— 邻居不能算“被用到”，
+        否则 last_used 虚高，遗忘的年龄判定跟着失真。位置也不再写死：窗口会
+        在命中行前面插入它的邻居，谁排第一取决于池顺序。
+        """
         governance.run(self.store, now=self.NOW, force=True)
         out = pipeline.inject_block("s1", str(self.store), query="苹果",
                                     mode="query", top_k=3)
-        self.assertEqual(out["ids"][0], "mid")
+        self.assertIn("mid", out["ids"])                       # 命中行一定在交付里
+        self.assertIn("mid", out.get("hits") or [])            # 且被记成命中
+        self.assertTrue(set(out.get("hits") or []).issubset(set(out["ids"])))
+        self.assertLessEqual(len(out.get("hits") or []), len(out["ids"]))  # 邻居不算命中
         gov = json.loads((self.store / "governance.json").read_text(encoding="utf-8"))
         self.assertGreaterEqual(gov.get("index_hits", 0), 1)
 

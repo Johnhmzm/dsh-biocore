@@ -26,9 +26,20 @@ def render_rules(affect=None, relation=None, certainty=0.7, soft_target=0, soft_
     wary = _num(r.get("wary", a.get("wary", conflict)))
     cert = max(0.0, min(1.0, _num(certainty, 0.7)))
     lines = []
-    if valence < 0.35:
+    # 阈值不能按 -1..1 的直觉写：实际效价长期在 ±0.1 内，写 0.35 就永远命中第一支。
+    # 优先用"相对自己平常"的 σ 位置；没有参照系时按小量程的绝对值兜底。
+    z = a.get("v_z")
+    try:
+        z = None if z is None else float(z)
+    except Exception:
+        z = None
+    if z is not None:
+        low, high = z < -0.5, z > 0.5
+    else:
+        low, high = valence < -0.02, valence > 0.02
+    if low:
         lines.append("先接住情绪，再谈事情；句子短一点、语气放软。")
-    elif valence > 0.65:
+    elif high:
         lines.append("气氛不错，可以更放松地回应，但别过度热闹。")
     else:
         lines.append("语气保持自然平稳，先回应对方在意的事。")

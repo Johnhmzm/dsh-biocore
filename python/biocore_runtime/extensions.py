@@ -284,11 +284,22 @@ def turn_memory_view(trace_rows, reply="", now=None):
 def expression_block(store=None, state=None, relationship=None,
                      soft_target=0, soft_max=0, hour=None):
     """Wording constraints from the expression P0 modules."""
-    core = (state or {}).get("core") if isinstance(state, dict) else {}
-    core = core if isinstance(core, dict) else {}
-    affect = {"valence": float(core.get("v") or 0.0),
+    st = state if isinstance(state, dict) else {}
+    core = st.get("core") if isinstance(st.get("core"), dict) else {}
+    # core.v 常年是 0，真正的效价在 state["v"] 与身体里——
+    # 原来只读 core，规则永远落在"先接住情绪"那一支，八条从此不变。
+    _v = st.get("v")
+    if _v is None:
+        _v = core.get("v")
+    body = st.get("body") if isinstance(st.get("body"), dict) else {}
+    if _v is None:
+        _v = body.get("valence")
+    norm = st.get("norm") if isinstance(st.get("norm"), dict) else {}
+    affect = {"valence": float(_v or 0.0),
               "arousal": float(core.get("a") or 0.5),
-              "stress": float(core.get("stress") or 0.2)}
+              "stress": float(body.get("stress") or core.get("stress") or 0.2),
+              # 相对自己平常的位置（σ）；没有参照系时给 None，规则退回绝对值
+              "v_z": norm.get("效价", norm.get("v"))}
     rel = relationship if isinstance(relationship, dict) else {}
     out = {"rules": "", "template": "", "topic": "", "voice": "",
            "template_name": "default", "topic_name": "", "voice_name": ""}

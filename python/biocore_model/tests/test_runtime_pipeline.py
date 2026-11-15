@@ -124,11 +124,18 @@ class InjectTest(unittest.TestCase):
         self.assertIn("你记得这些事：", out["text"])
 
     def test_inject_char_truncation(self):
+        """02c2d35: 装不下就整条跳过，原文绝不截断。
+
+        旧断言要求文本以省略号结尾（= 从句子中间切开）。现在一条 600 字的记忆
+        放不进 80 字预算，就整条不交付：块为空、ids 为空、正文里不出现截断符号。
+        """
         root = store_root()
         self._seed(root, "s", ["很长很长的记忆" * 60])
         out = pl.inject_block("s", root, max_chars=80, top_k=5)
         self.assertLessEqual(out["chars"], 80)
-        self.assertTrue(out["text"].endswith("…"))
+        self.assertEqual(out["text"], "")
+        self.assertEqual(out["ids"], [])
+        self.assertNotIn("…", out["text"])
 
     def test_inject_missing_session_is_empty(self):
         root = store_root()
@@ -1233,7 +1240,13 @@ class InteroTest(unittest.TestCase):
         self.assertTrue(any(intero[key] > 0.0 for key in
                             ("tension", "warmth", "heaviness", "clarity")))
 
-    def test_turn_start_state_contains_intero_and_prompt_text(self):
+    def test_turn_start_block_shows_intero_numbers_and_legend(self):
+        """契约：状态块用「数字 + 读法键」，不再渲染固定文字标签。
+
+        文字标签会把效价 -0.5 与 -0.6 压成同一句，信息被抹平；改数字优先再给
+        一次读法键就是为了不再抹平（见 pipeline._state_block 的注释）。所以这里
+        断言数值与读法键，而不是「绷得有点紧」这类旧标签。
+        """
         payload = {"session_id": "A", "user_text": "今天有点累",
                    "store": self.root,
                    "state": {"core": {"stress": 1.0, "a": 0.9,
@@ -1243,7 +1256,11 @@ class InteroTest(unittest.TestCase):
         intero = out["state"]["intero"]
         self.assertEqual(set(("tension", "warmth", "heaviness", "clarity"))
                          - set(intero), set())
-        self.assertIn("绷得有点紧", out["prompt_block"])
+        block = out["prompt_block"]
+        self.assertIn("此刻：", block)
+        self.assertTrue(any(key in block for key in
+                            ("效价", "唤醒", "支配", "紧张", "社交")))
+        self.assertIn("读法：", block)
         self.assertIn("intero", out["state"]["core"])
 
     def test_state_action_ui_payload_contains_intero(self):
@@ -1306,15 +1323,21 @@ class LengthHintTest(unittest.TestCase):
         self.assertIn("先不主动发新消息", "\n".join(default))
         self.assertIn("允许改口", "\n".join(default))
 
-    def test_prompt_still_has_intero_and_persona(self):
+    def test_block_keeps_intero_numbers_legend_and_persona(self):
+        """契约：数字读法取代文字标签（同 _state_block 注释）；人设行与长度提示照旧。
+
+        旧的“任一文字标签出现”断言会随这次有意变更永久失败，故改为断言数值与
+        读法键；长度提示仍以“字以内”不在块内来验。
+        """
         self._write_profile()
         block = self._turn(state={"core": {"stress": 1.0, "a": 0.9,
                                            "sleep_debt": 0.8,
                                            "conflict": 0.8,
                                            "energy": 0.1, "v": -0.6}})["prompt_block"]
         self.assertIn("此刻：", block)
-        self.assertTrue(any(word in block for word in
-                            ("绷得有点紧", "还算松", "有点沉", "想靠近一点")))
+        self.assertTrue(any(key in block for key in
+                            ("效价", "唤醒", "支配", "紧张", "社交")))
+        self.assertIn("读法：", block)
         self.assertIn("人设：", block)
         self.assertNotIn("字以内", block)
 
