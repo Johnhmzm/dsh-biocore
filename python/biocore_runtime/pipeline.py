@@ -7414,6 +7414,28 @@ def _body_loop_impl(store, session_id, now=None, seed=BODY_LOOP_SEED, payload=No
                           "over_threshold": over}}
 
         # ---------- L1 内感受 <- L0 ----------
+        # 四需要 + 睡眠债（needs_esteem / needs_sleep / needs_events）：只在开关打开时算。
+        # 关着时下面的 source 里 sleep_debt 仍是写死的 0.0，与改动前逐字一致。
+        _needs4 = {}
+        _needs4_on = False
+        try:
+            from biocore_runtime import needs4 as _n4
+            _needs4_on = _n4.enabled()
+            if _needs4_on:
+                # ticks 是"分钟数"，dt_hours 必须换算：以前把 60 直接当小时数，
+                # 一拍就能把睡眠债顶到上限（实测 debt 24.0/norm 1.0）。
+                _dt_hours = max(0.0, float(max(1, int(ticks or 1))) * 60.0 / 3600.0)
+                # dims 在 payload 的 state 里（心跳自己加载的 state 没有 last_dims）
+                _n4_payload_state = data.get("state") if isinstance(
+                    data.get("state"), dict) else {}
+                _n4_dims = (_n4_payload_state.get("last_dims")
+                            if isinstance(_n4_payload_state.get("last_dims"), dict)
+                            else state.get("last_dims"))
+                _needs4 = _n4.step(store, sid, stamp, dims=_n4_dims,
+                                   dt_hours=_dt_hours)
+        except Exception:
+            _needs4 = {}
+            _needs4_on = False
         source = {"v": base_v, "a": base_a,
                   # L1 只吃 L0 本 tick 的 discomfort（不用上一 tick 的 intero 缓存）
                   "stress": max(base_stress, discomfort),
@@ -7421,7 +7443,9 @@ def _body_loop_impl(store, session_id, now=None, seed=BODY_LOOP_SEED, payload=No
                   "trust": float(state.get("drive_safety") or 0.5),
                   "closeness": float(state.get("social_drive") or 0.5),
                   "energy": base_energy, "allostatic_load": load0,
-                  "sleep_debt": 0.0, "conflict": 0.0,
+                  "sleep_debt": (float(_needs4.get("debt_norm") or 0.0)
+                                 if _needs4_on else 0.0),
+                  "conflict": 0.0,
                   "noise": abs(noise_val)}
         try:
             from biocore_model import intero_core as _intero
@@ -7566,6 +7590,24 @@ def _body_loop_impl(store, session_id, now=None, seed=BODY_LOOP_SEED, payload=No
                                 state[_k] = _v
                     except Exception:
                         pass
+                # 四需要落进状态（扁平数字键才跨进程活）：只在开关打开时出现
+                if _needs4_on and _needs4:
+                    try:
+                        for _name in ("belonging", "self_esteem", "control",
+                                      "meaningful_existence"):
+                            if isinstance(_needs4.get(_name), (int, float)):
+                                state["n4_" + _name] = round(float(_needs4[_name]), 4)
+                        for _src, _dst in (("sleep_debt", "n4_sleep_debt"),
+                                           ("debt_norm", "n4_debt_norm"),
+                                           ("silence_hours", "n4_silence_h")):
+                            if isinstance(_needs4.get(_src), (int, float)):
+                                state[_dst] = round(float(_needs4[_src]), 4)
+                        state["needs4"] = {k: _needs4.get(k) for k in
+                                           ("belonging", "self_esteem", "control",
+                                            "meaningful_existence", "sleep_debt",
+                                            "debt_norm", "silence_hours")}
+                    except Exception:
+                        pass
                 # 记下自家不适度的平常水平，供下一拍判断"这次算不算异常"
                 try:
                     _prev_dash = float(state.get("discomfort_baseline") or 0.25)
@@ -7591,7 +7633,17 @@ def _body_loop_impl(store, session_id, now=None, seed=BODY_LOOP_SEED, payload=No
         # ---------- L5 意图 <- L4 ----------
         intent_text = ""
         pending = None
-        if over:
+        # 起念不该要求"先难受"：果蝇的自发行为不需要外部刺激。
+        # 强度 = 情绪（由头）+ 噪声；超过 0 就起念，没有情绪也可以被噪声推一下。
+        # 起念的水平来自"不带对象的唤醒"（Panksepp 的 SEEKING + 唤醒度），
+        # 不是"想分享/想照料"那种带对象的由头——对象由走神再挑一件出来。
+        # 噪声幅度随唤醒与压力放大：越绷，抖得越厉害。
+        try:
+            _seek = float((_systems or {}).get("SEEKING") or 0.0)
+        except Exception:
+            _seek = 0.0
+        _lvl = 0.5 * _seek + 0.5 * float(state.get("arousal") or 0.0)
+        if True:
             try:
                 from biocore_model import (criticality as _crit,
                                            intent_render as _render,
@@ -7613,8 +7665,19 @@ def _body_loop_impl(store, session_id, now=None, seed=BODY_LOOP_SEED, payload=No
                 topic = str(pull.get("topic") or "muse")
                 action = {"rest": "rest", "share": "share",
                           "muse": "question"}.get(topic, "question")
+                # 情绪给高低，噪声给起伏：这一拍要不要起念看这个合量。
+                _arousal_i = float(state.get("arousal") or 0.0)
+                _load_i = float(state.get("allostatic_load") or 0.0)
+                _dom_i = float(getattr(body.mind.affect, "dominance", 0.0) or 0.0)
+                _amp_i = max(0.0, min(2.0,
+                    0.35 + 0.8 * _arousal_i + 0.5 * _load_i
+                    - 0.3 * max(0.0, -_dom_i)))
+                import random as _ri
+                _gi = _ri.Random(int(stamp) % 2000003).gauss(0.0, 1.0)
+                _drive = float(_lvl) - 0.35 + _amp_i * 0.30 * _gi
+                # 超过 0 才起念：平静时偶尔被噪声推过线，绷紧时门更容易过。
                 pending = {"action": action, "reason": "life-loop wander",
-                           "weight": float(pull.get("weight") or 0.0),
+                           "weight": max(0.0, _drive),
                            "ts": stamp,
                            "burst": float(_crit.burst_value(int(stamp),
                                                            int(stamp // 60)))}
@@ -7754,6 +7817,15 @@ def _body_loop_impl(store, session_id, now=None, seed=BODY_LOOP_SEED, payload=No
                "over_threshold": over, "intent": intent_text,
                "layers": layers, "decision": decision,
                "mushroom": mushroom}
+        # 四需要进心跳行（开关关着时不多这个键）
+        if _needs4_on and _needs4:
+            try:
+                row["needs4"] = {k: round(float(_needs4.get(k) or 0.0), 4)
+                                 for k in ("belonging", "self_esteem", "control",
+                                           "meaningful_existence", "sleep_debt",
+                                           "debt_norm", "silence_hours")}
+            except Exception:
+                pass
         # 七套系统进心跳行（关着的时候整行与改动前一致，不多这个键）
         if isinstance(_systems, dict) and _systems:
             row["systems"] = {k: round(float(_systems.get(k) or 0.0), 4)
@@ -7766,6 +7838,7 @@ def _body_loop_impl(store, session_id, now=None, seed=BODY_LOOP_SEED, payload=No
                 "over_threshold": over, "intent_text": intent_text,
                 "pending_intent": pending or {}, "layers": layers,
                 "decision": decision, "mushroom": mushroom,
+                "needs4": dict(_needs4) if (_needs4_on and _needs4) else {},
                 "state": state}
     except Exception as exc:
         logger.warning("[body-loop] 心跳跳过：%s: %s",
