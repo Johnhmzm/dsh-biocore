@@ -24,9 +24,8 @@ DEPTHS = ("gist", "event", "raw")
 DEFAULT_DEPTH = "gist"
 DEPTH_LABELS = {"gist": "命题层", "event": "事件总结层", "raw": "原文层"}
 
-_RAW_WORDS = ("原文", "原话", "逐字", "一字不差", "原句", "原样", "verbatim")
-_EVENT_WORDS = ("具体", "怎么写的", "哪一句", "哪句话", "具体内容", "具体说",
-                "细节", "发生了什么", "当时说")
+# 不设词表：核心层不许用中文词做判定（CORE-CONTRACT）。
+# 只用结构特征——编号、路径、引号，以及调用方显式给的 depth。
 
 # 编号 / ID：M0001、EV001、EV-12、session-xxxx
 _ID_PATTERNS = (
@@ -65,11 +64,6 @@ def _event_signals(text):
             if snippet:
                 signals.append({"kind": "quote", "match": snippet[:80]})
             break
-    lowered = text.lower()
-    for word in _EVENT_WORDS:
-        if word in text:
-            signals.append({"kind": "keyword", "match": word})
-            break
     return signals
 
 
@@ -90,12 +84,6 @@ def decide_depth(query, depth=None):
     if not text:
         return {"depth": DEFAULT_DEPTH, "reason": "默认：无查询，读命题层",
                 "signals": []}
-    lowered_text = text.lower()
-    for word in _RAW_WORDS:
-        if word in text or word in lowered_text:
-            return {"depth": "raw",
-                    "reason": "明确要原文：%s" % word,
-                    "signals": [{"kind": "raw_word", "match": word}]}
     signals = _event_signals(text)
     if signals:
         first = signals[0]
@@ -104,10 +92,8 @@ def decide_depth(query, depth=None):
             reason = "事件层：编号 %s" % detail
         elif first["kind"] == "path":
             reason = "事件层：文件路径 %s" % detail
-        elif first["kind"] == "quote":
-            reason = "事件层：引号原话片段 %s" % detail
         else:
-            reason = "事件层：具体化词 %s" % detail
+            reason = "事件层：引号原话片段 %s" % detail
         return {"depth": "event", "reason": reason, "signals": signals}
     return {"depth": DEFAULT_DEPTH, "reason": "默认：无展开信号，读命题层",
             "signals": []}
