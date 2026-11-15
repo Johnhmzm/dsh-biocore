@@ -137,6 +137,10 @@ HYBRID_RETRIEVAL = str(os.environ.get("BIOCORE_HYBRID") or "0").strip().lower() 
 MEMORY_CODES = str(os.environ.get("BIOCORE_MEMORY_CODES") or "0").strip().lower() in ("1", "true", "on", "yes")
 # 提示词前缀稳定性：稳定内容放前面，变化的数值放后面，能让上游的缓存命中更多。
 # 默认关：顺序会改变模型读到的优先级，必须先量。
+# 打开后：常量（约束/人设）在前，会变的状态排在整块最后 —— 前缀才命中缓存。
+# 默认仍是 0，保持既有契约（boot 以状态开头、人设结尾）；生产用环境变量打开。
+# 人设只在 boot 注入一次（宿主开头就缓存了）；打开后每轮不再重复塞两千字。
+PERSONA_BOOT_ONLY = str(os.environ.get("BIOCORE_PERSONA_BOOT_ONLY") or "0").strip().lower() in ("1", "true", "on", "yes")
 STABLE_PREFIX = str(os.environ.get("BIOCORE_STABLE_PREFIX") or "0").strip().lower() in ("1", "true", "on", "yes")
 # 原子门禁：注入块要么整块成立，要么整块不注入，绝不交付半块。
 ATOMIC_BLOCKS = str(os.environ.get("BIOCORE_ATOMIC_BLOCKS") or "1").strip().lower() in ("1", "true", "on", "yes")
@@ -7627,11 +7631,21 @@ def prompt_block(payload):
     if policy_rows:
         text = text + "\n" + "\n".join("- " + row for row in policy_rows[:2])
     thinking_line = thinking_style_line(data)
+    # 人设一开场就在最前面给过了（boot 那条）；每轮再塞一遍等于把两千字常量
+    # 重复注入，还把会变的状态挤到后面，缓存也命不中。
     persona_line = persona_prompt_line(data)
-    if thinking_line:
-        text = text + "\n" + thinking_line
-    if persona_line:
-        text = text + "\n" + persona_line
+    if PERSONA_BOOT_ONLY and phase == "turn":
+        persona_line = ""
+    if STABLE_PREFIX:
+        # 常量在前、会变的状态在最后：前缀命中缓存，每轮只有尾巴是新的。
+        text = (constraints + ("\n" + thinking_line if thinking_line else "")
+                + ("\n" + persona_line if persona_line else "")
+                + ("\n" + state_text if state_text else "")).strip()
+    else:
+        if thinking_line:
+            text = text + "\n" + thinking_line
+        if persona_line:
+            text = text + "\n" + persona_line
     sections = {"state": state_text, "constraints": constraints}
     if thinking_line:
         sections["thinking_style"] = thinking_line
