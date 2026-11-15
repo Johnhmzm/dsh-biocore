@@ -124,6 +124,9 @@ class DialogueBody:
         self.anchor = {"valence": 0.0, "arousal": 0.5, "stress": 0.0}
         self.commit = {"open": 0.0, "kept": 0.0}
         self.integral = {"valence": 0.0, "stress": 0.0}
+        # 三层（Structural Affect 式）：feeling 在 affect 里（秒级），
+        # mood 是它的慢积分，load 是"偏离基线的时间累计"（只涨、极慢回落）。
+        self.slow = {"mood": 0.0, "load": 0.0}
         self.noise = None
         if noise:
             try:
@@ -168,6 +171,21 @@ class DialogueBody:
                     float(getattr(_aff_now, "a", 0.5)) * (1.0 - _keep) + _a_before * _keep))
             except Exception:
                 pass
+        # 慢层在这里推进：mood 跟 feeling 走但慢得多，load 记偏离的累计。
+        try:
+            _v = float(getattr(self.mind.affect, "v", 0.0))
+            _mood = float(self.slow.get("mood") or 0.0)
+            _mood += eff("mood_alpha", MOOD_ALPHA) * (_v - _mood)
+            _load = float(self.slow.get("load") or 0.0)
+            _base = float(self.anchor.get("valence") or 0.0)
+            # 只有“低于基线”才算欠账：高兴不该累积负荷，平静时它该慢慢退。
+            _deficit = max(0.0, -_v)  # 以中性为参照：低于 0 才算欠账
+            _load = (_load * (1.0 - eff("load_decay", LOAD_DECAY))
+                     + _deficit * eff("load_gain", LOAD_GAIN))
+            self.slow["mood"] = round(max(-1.0, min(1.0, _mood)), 5)
+            self.slow["load"] = round(max(0.0, min(1.0, _load)), 5)
+        except Exception:
+            pass
         try:
             a = self.anchor
             aff = self.mind.affect
@@ -317,7 +335,9 @@ class DialogueBody:
                 "anchor_valence": round(float(self.anchor["valence"]), 4),
                 "anchor_stress": round(float(self.anchor["stress"]), 4),
                 "commit_open": float(self.commit["open"]),
-                "commit_kept": float(self.commit["kept"])}
+                "commit_kept": float(self.commit["kept"]),
+                "mood": round(float(self.slow.get("mood") or 0.0), 4),
+                "allostatic_load": round(float(self.slow.get("load") or 0.0), 4)}
 
 
 def appraise_text(text: str, config: Optional[Dict[str, object]] = None,
@@ -374,6 +394,10 @@ ANCHOR_GAIN = float(_os.environ.get("BIOCORE_ANCHOR_GAIN") or 0.04)
 ANCHOR_LEARN = float(_os.environ.get("BIOCORE_ANCHOR_LEARN") or 0.25)
 # 一次冲击在下一轮还能留住多少：0 = 立刻抹平（旧行为），0.7 = 三轮左右退干净
 PUSH_KEEP = float(_os.environ.get("BIOCORE_PUSH_KEEP") or 0.7)
+# 慢层参数：mood 每轮只跟 feeling 走一小步；load 是偏离的累计，回得极慢。
+MOOD_ALPHA = float(_os.environ.get("BIOCORE_MOOD_ALPHA") or 0.05)
+LOAD_GAIN = float(_os.environ.get("BIOCORE_LOAD_GAIN") or 0.15)
+LOAD_DECAY = float(_os.environ.get("BIOCORE_LOAD_DECAY") or 0.002)
 # how much one idle recollection moves the baseline (small: only volume counts)
 REPLAY_LEARN = float(_os.environ.get("BIOCORE_REPLAY_LEARN") or 0.06)
 ANCHOR_RELAX = float(_os.environ.get("BIOCORE_ANCHOR_RELAX") or 0.02)
@@ -477,6 +501,9 @@ def body_for(store, session_id, seed: int = 1) -> "DialogueBody":
         try:
             body.anchor["valence"] = float(prev.get("anchor_valence") or 0.0)
             body.anchor["stress"] = float(prev.get("anchor_stress") or 0.0)
+            # 慢层要跨轮活着，否则每轮都从 0 开始，等于没有 mood 与 load
+            body.slow["mood"] = float(prev.get("mood") or 0.0)
+            body.slow["load"] = float(prev.get("allostatic_load") or 0.0)
             body.commit["open"] = float(prev.get("commit_open") or 0.0)
             body.commit["kept"] = float(prev.get("commit_kept") or 0.0)
             try:
