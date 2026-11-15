@@ -7017,6 +7017,17 @@ def _body_turn_impl(store, session_id, text, payload=None):
                     _fh.write(_json0.dumps(_pair, ensure_ascii=False) + chr(10))
             except Exception:
                 pass
+            # 解释风格：用**数值**累进（blame → internality，连续负向 → stability）；
+            # 不读字面、不写句子。关着时一行不落。
+            try:
+                from biocore_runtime import attribution_style as _astyle
+                if _astyle.enabled():
+                    _astyle.observe(store, session_id, dims,
+                                    outcome=float(state.get("valence") or 0.0)
+                                    - float((_before or {}).get("valence") or 0.0),
+                                    now=time.time())
+            except Exception:
+                pass
             # 同一份观测立刻做一次 RLS（从第 1 行就开始，不等 8 行）
             try:
                 from biocore_model import appraisal_rls as _rls2

@@ -1,26 +1,29 @@
 # -*- coding: utf-8 -*-
-"""解释风格（Weiner 归因 × Abramson/Seligman 归因风格）：跨轮的一贯倾向，不是一个标签。
+"""解释风格（Weiner 归因 × Abramson/Seligman 归因风格）：跨轮的一贯倾向，只从数值推。
 
 现状缺口（带文件:行）：
-  - `biocore_model/attribution.py:18` 的 `infer` 只看**当前这句**（关键词），
-    `perception.py:457` 每轮调一次 → 得到一个 per-turn 标签，渲染进状态块；
-  - `attribution.apply`（per-event 的情绪增量）**没有任何调用点**；
-  - 没有"她一贯怎么解释这些事"的**状态**：单次的 internal/stable 不会累积，
-    所以"同一类事第二次发生"时，她的预期与行动倾向和第一次完全一样。
+  - `biocore_model/attribution.py:18` 的 `infer` 只看当前这句（关键词），
+    `perception.py:457` 每轮调一次 → per-turn 标签，渲染进状态块；
+  - `attribution.apply`（per-event 情绪增量）**没有任何调用点**；
+  - 没有"她一贯怎么解释这些事"的**状态**：单次 internal/stable 不累积，
+    所以"同一类事第二次发生"时，预期与行动倾向和第一次完全一样。
 
-本模块只补状态，不写句子：
-  - 把非中性的 locus/stability 累进 EMA（`internality`/`stability`/`n`）；
-  - 给 hazard 一个乘子：内-稳定归因越一贯，开口越少（"说了也没用"的努力撤回）。
+本模块只补状态，且**不用词表**（核心契约：不靠字面判语义）：
+  - internality ← 七维里的 `blame`（0 是自己 .. 1 是别人）→ 1 − blame；
+  - stability   ← 事件历史：连续负向事件占比（连续几次都不是偶然 → 稳定）；
+  - controllability 只记录、不参与乘子（`control` 已是 0..1）；
+  - 给 hazard 一个乘子：内-稳定越一贯，开口越少（"说了也没用"的努力撤回）。
     至少 MIN_EVENTS 次之后才算"风格"（Abramson 1978：风格是倾向，不是一次）。
 
 开关：`BIOCORE_ATTRIB_STYLE`（缺省 0）。关着时不落盘、乘子恒 1.0。
 参数（**无文献值，我们的选择 + 回退开关**）：
   ALPHA = 0.25（EMA 步长，`BIOCORE_ATTRIB_ALPHA`）
-  GAIN  = 0.5 （乘子最多压到 1−0.5=0.5，`BIOCORE_ATTRIB_GAIN`）
+  GAIN  = 0.5 （乘子最多压到 0.5，`BIOCORE_ATTRIB_GAIN`）
+  STREAK_FULL = 3（连续三次负向事件 = 稳定度 1.0，`BIOCORE_ATTRIB_STREAK`）
   MIN_EVENTS = 2（两次同类归因才算风格）
 
-文献方向（AFFECT-LIT §17）：Weiner 1985（归因→情绪→行为链）；Abramson, Seligman &
-Teasdale 1978（解释风格是稳定的倾向；内-稳定-全局的归因导致"努力撤回"）。
+文献方向（AFFECT-LIT §17）：Weiner 1985（稳定性改下一次同类事件的主观成功概率）；
+Abramson, Seligman & Teasdale 1978（解释风格是稳定的倾向；内-稳定归因把未来无助变慢性）。
 """
 from __future__ import annotations
 
@@ -31,13 +34,15 @@ import time
 FILE = "attribution_style.json"
 ALPHA = float(os.environ.get("BIOCORE_ATTRIB_ALPHA") or 0.25)
 GAIN = float(os.environ.get("BIOCORE_ATTRIB_GAIN") or 0.5)
+STREAK_FULL = float(os.environ.get("BIOCORE_ATTRIB_STREAK") or 3.0)
 MIN_EVENTS = 2
-INTERNAL = ("internal", "内部")
-STABLE = ("stable", "稳定")
+NEGATIVE_DELTA = -0.02
 
 
 def enabled(value=None) -> bool:
-    raw = value if value is not None else os.environ.get("BIOCORE_ATTRIB_STYLE")
+    raw = value if isinstance(value, str) or value is None else None
+    if raw is None:
+        raw = os.environ.get("BIOCORE_ATTRIB_STYLE")
     return str(raw or "0").strip().lower() in ("1", "true", "on", "yes")
 
 
@@ -48,7 +53,18 @@ def _path(store, session_id) -> str:
 
 
 def _blank() -> dict:
-    return {"internality": 0.5, "stability": 0.5, "n": 0, "updated_at": 0.0}
+    return {"internality": 0.5, "stability": 0.0, "control": 0.5,
+            "streak": 0, "n": 0, "updated_at": 0.0}
+
+
+def _num(value, default=0.0) -> float:
+    try:
+        out = float(value)
+    except Exception:
+        return float(default)
+    if out != out:
+        return float(default)
+    return out
 
 
 def load(store, session_id) -> dict:
@@ -77,33 +93,36 @@ def _save(store, session_id, doc) -> bool:
         return False
 
 
-def _axis(value, words) -> float:
-    """internal/stable → 1，external/unstable → 0，其余（neutral/空）→ -1（不更新）。"""
-    text = str(value or "").strip()
-    if not text or text == "neutral":
-        return -1.0
-    if text in words:
-        return 1.0
-    return 0.0
+def observe(store, session_id, dims, outcome=None, now=None) -> dict:
+    """用一次评价的**数值**累进风格：blame → internality，连续负向 → stability。
 
-
-def observe(store, session_id, attribution, now=None) -> dict:
-    """把一次归因累进风格；中性/缺失不动。返回更新后的 view。"""
+    `dims` 就是 appraisal 的七维（blame 0=自己 .. 1=别人，control 0..1）。
+    `outcome` 是这一轮的实际结果（通常用 valence 的变化量）：< 0 记为负向事件。
+    """
     if not enabled():
         return {"updated": False, "reason": "disabled"}
-    data = attribution if isinstance(attribution, dict) else {}
-    locus = _axis(data.get("locus"), INTERNAL)
-    stable = _axis(data.get("stability"), STABLE)
-    if locus < 0.0 and stable < 0.0:
-        return {"updated": False, "reason": "neutral"}
+    data = dims if isinstance(dims, dict) else {}
+    raw_blame = data.get("blame")
+    if raw_blame is None:
+        return {"updated": False, "reason": "no_dims"}
+    blame = max(0.0, min(1.0, _num(raw_blame, 0.5)))
+    control = max(0.0, min(1.0, _num(data.get("control"), 0.5)))
     stamp = float(now if now is not None else time.time())
     doc = load(store, session_id)
-    if locus >= 0.0:
-        doc["internality"] = round(float(doc.get("internality") or 0.5)
-                                   + ALPHA * (locus - float(doc.get("internality") or 0.5)), 4)
-    if stable >= 0.0:
-        doc["stability"] = round(float(doc.get("stability") or 0.5)
-                                 + ALPHA * (stable - float(doc.get("stability") or 0.5)), 4)
+    internality = 1.0 - blame
+    doc["internality"] = round(_num(doc.get("internality"), 0.5)
+                               + ALPHA * (internality - _num(doc.get("internality"), 0.5)), 4)
+    doc["control"] = round(_num(doc.get("control"), 0.5)
+                           + ALPHA * (control - _num(doc.get("control"), 0.5)), 4)
+    streak = int(doc.get("streak") or 0)
+    if outcome is not None and _num(outcome, 0.0) < NEGATIVE_DELTA:
+        streak += 1
+    elif outcome is not None:
+        streak = 0
+    doc["streak"] = streak
+    # 稳定度是"连续几次"的直接读数，不做平滑：连着三次负向就是稳定度 1.0，
+    # 中间出现一次正性就清零。平滑只用在 internality（那才是需要跨事件平均的倾向）。
+    doc["stability"] = round(min(1.0, float(streak) / max(1.0, STREAK_FULL)), 4)
     doc["n"] = int(doc.get("n") or 0) + 1
     doc["updated_at"] = round(stamp, 3)
     _save(store, session_id, doc)
@@ -113,13 +132,14 @@ def observe(store, session_id, attribution, now=None) -> dict:
 def view(store, session_id, now=None) -> dict:
     doc = load(store, session_id)
     n = int(doc.get("n") or 0)
-    internality = float(doc.get("internality") or 0.5)
-    stability = float(doc.get("stability") or 0.5)
+    internality = max(0.0, min(1.0, _num(doc.get("internality"), 0.5)))
+    stability = max(0.0, min(1.0, _num(doc.get("stability"), 0.0)))
     factor = 1.0
     if n >= MIN_EVENTS:
         factor = round(max(0.0, min(1.0, 1.0 - GAIN * internality * stability)), 4)
     return {"internality": round(internality, 4), "stability": round(stability, 4),
-            "n": n, "factor": factor, "style": "internal_stable" if factor < 0.85 else "other"}
+            "control": round(_num(doc.get("control"), 0.5), 4),
+            "streak": int(doc.get("streak") or 0), "n": n, "factor": factor}
 
 
 def factor(store, session_id, now=None) -> float:

@@ -455,14 +455,6 @@ def snapshot(store, session_id="s1", payload=None, state=None, now=None,
 
     # 7) attribution (rule-based; ambiguous text stays neutral)
     attribution = _value(_call("attribution", "infer", {"text": user_text}), {}) or {}
-    # 解释风格：把这次归因累进"跨轮的一贯倾向"（状态，不是标签）。
-    # 关着时不落盘；任何失败都不影响本轮的 perception。
-    try:
-        from biocore_runtime import attribution_style as _astyle
-        if _astyle.enabled() and attribution:
-            _astyle.observe(store, session_id, attribution, now or time.time())
-    except Exception:
-        pass
     out["attribution"] = {"locus": str(attribution.get("locus") or "neutral"),
                           "stability": str(attribution.get("stability") or "neutral"),
                           "controllability": str(
