@@ -8034,6 +8034,23 @@ def _note_prefix(session_id, text):
 PREFIX_STATS = {}
 
 
+def _brevity_of(state):
+    """从七套系统的读数取"该短说"的程度（0..1）。
+
+    生物层算出 brevity 却没人消费，等于算完就丢；这里把它接进长度约束。
+    没有七系统数据时返回 0，行为与改动前一致。
+    """
+    st = state if isinstance(state, dict) else {}
+    body = st.get("body") if isinstance(st.get("body"), dict) else {}
+    src = body or st
+    try:
+        rage = float(src.get("sys_RAGE") or 0.0)
+        fear = float(src.get("sys_FEAR") or 0.0)
+        return max(0.0, min(1.0, 0.5 * rage + 0.5 * fear))
+    except Exception:
+        return 0.0
+
+
 def _cause_line(state):
     """七维 → "这次是什么引起的"（短，给模型一个抓手，不是结论）。
 
@@ -8300,6 +8317,10 @@ def _constraints_block(state, switches, payload):
         # shortens the sentence, a settled one allows more. The caller still
         # owns the ceiling; the body decides where inside it she lands.
         strain = max(0.0, -v) * 0.6 + max(0.0, tension - 0.5) * 0.8
+        # 七套系统算出的"短说"必须有人接：愤怒/恐惧会把句子压短。
+        # 生物层只给数，长度仍由这里渲染（边界不变）。
+        _brev = _brevity_of(state)
+        strain = strain + 0.5 * _brev
         scale = max(0.45, 1.0 - strain)
         target = max(4, min(base_t, int(round(base_t * scale))))
         hard = max(target, min(base_h, int(round(base_h * scale))))
