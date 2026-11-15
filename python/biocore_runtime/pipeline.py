@@ -6763,6 +6763,17 @@ def _body_turn_impl(store, session_id, text, payload=None):
         if digest:
             probe = text + "\n（她刚想起：" + digest[:200] + "）"
         dims = _mb.appraise_text(probe, cfg.get("summarizer") or {})
+        # 记下这一轮"是什么引起的"：光给数字，模型不知道是谁在推它。
+        try:
+            if isinstance(dims, dict) and dims:
+                _st0 = payload.get("state") if isinstance(payload, dict) else None
+                _st0 = _st0 if isinstance(_st0, dict) else {}
+                _st0["last_dims"] = {k: round(float(v), 3) for k, v in dims.items()
+                                     if isinstance(v, (int, float))}
+                _st0["push_source"] = "对方那句"
+                _st0["last_push_ts"] = round(time.time(), 3)
+        except Exception:
+            pass
         # 评价只给出 PAD 与社交；状态层算过的压力/信任/冲突也要一起交给身体，
         # 否则它们只停在面板上，进不到主动推断里。
         try:
@@ -7805,6 +7816,80 @@ def _note_prefix(session_id, text):
 PREFIX_STATS = {}
 
 
+def _cause_line(state):
+    """七维 → "这次是什么引起的"（短，给模型一个抓手，不是结论）。
+
+    数字本身没有意义：-0.13 是被怪责出来的还是被忽视出来的，模型看不出来。
+    这里只做命名，不表态。
+    """
+    st = state if isinstance(state, dict) else {}
+    dims = st.get("last_dims") if isinstance(st.get("last_dims"), dict) else {}
+    src = str(st.get("push_source") or "对方那句")
+    if not dims:
+        return ""
+    goal = float(dims.get("goal") or 0.0)
+    blame = float(dims.get("blame") or 0.0)
+    control = float(dims.get("control") or 0.5)
+    certainty = float(dims.get("certainty") or 0.5)
+    novelty = float(dims.get("novelty") or 0.0)
+    invoke = float(dims.get("involve") or 0.0)
+    hit = float(dims.get("hit") or 0.0)
+    marks = []
+    if goal <= -0.25:
+        marks.append("事情没往想要的方向走")
+    elif goal >= 0.25:
+        marks.append("事情顺了")
+    if blame >= 0.45:
+        # 不叫"被怪"：情绪是被"谁推的"推动的，措辞要落在推力上，不做指控式的解读。
+        marks.append("像是冲着我来的")
+    if control <= 0.3:
+        marks.append("拦不住")
+    elif control >= 0.75:
+        marks.append("握得住")
+    if certainty <= 0.35:
+        marks.append("摸不准")
+    if novelty >= 0.6:
+        marks.append("出乎意料")
+    if hit >= 0.5:
+        marks.append("戳到痛处")
+    if invoke >= 0.7 and not marks:
+        marks.append("很在意")
+    # 因果有两股：这次的注入（谁推的、推成什么形状），和它落地时的底子。
+    # 底子由时间与环境决定 —— 同一句话，深夜和午后、隔两小时和隔两分钟，性质不同。
+    base = []
+    mood = float(st.get("mood") or 0.0)
+    load = float(st.get("allostatic_load") or 0.0)
+    if mood <= -0.08:
+        base.append("这阵子本就低")
+    elif mood >= 0.08:
+        base.append("这阵子还算顺")
+    if load >= 0.35:
+        base.append("欠账压着")
+    gap_h = None
+    try:
+        now = time.time()
+        last = st.get("last_push_ts")
+        if isinstance(last, (int, float)) and last > 0:
+            gap_h = max(0.0, now - float(last)) / 3600.0
+        else:
+            last_bio = st.get("last_bio_tick_ts")
+            if isinstance(last_bio, (int, float)) and last_bio > 0:
+                gap_h = max(0.0, now - float(last_bio)) / 3600.0
+    except Exception:
+        gap_h = None
+    if gap_h is not None:
+        if gap_h < 0.05:
+            base.append("紧接着上一句")
+        elif gap_h >= 1.0:
+            base.append("隔了%.0f小时" % gap_h)
+    # 显影响：这一轮看得见的那一下（谁推的、推成什么形状）
+    # 隐影响：看不见的底子（这阵子、欠账、隔了多久）—— 它决定这一下有多重
+    head = "显：%s → %s" % (src, "、".join(marks[:3]) or "说不上为什么")
+    if base:
+        head = head + " ｜ 隐：" + "，".join(base[:3])
+    return head
+
+
 def _intero_gloss(intero):
     """把内感受四量说成人话（不给数值）。"""
     data = intero if isinstance(intero, dict) else {}
@@ -7879,6 +7964,9 @@ def _state_block(state, budget):
             _felt, a, d, stress, social - 0.5)
         numbers = numbers + " ｜ 心里%+.2f 相差%.2f" % (
             _known, abs(_felt - _known)) + _spell
+    _cause = _cause_line(state)
+    if _cause:
+        numbers = numbers + " ｜ 因：" + _cause
     # 内感受四量每轮都在算，但契约规定原始数值不外露（test_runtime_pipeline 钉着）。
     # 所以只把它们说成话：暖不暖、沉不沉、清不清楚——信息在，数字不泄。
     _intero_words = _intero_gloss(intero) if intero else ""
@@ -11799,7 +11887,16 @@ def dispatch(action, payload=None):
                     try:
                         _body_out = _mbj.body_for(store, session_id)
                         _body_out.reply(raw_assistant)
-                        _mbj.save_state(store, session_id, _body_out.state())
+                        _st_out = _body_out.state()
+                        # 记来源：这一下是"我自己刚说的那句"推的，不是对方。
+                        # 两者完全不同：前者是自我影响，后者是外部刺激。
+                        _st_out["push_source"] = "我上一句"
+                        _st_out["push_dims"] = {
+                            "valence": round(float(getattr(
+                                _body_out.mind.affect, "v", 0.0)), 4),
+                            "stress": round(float(getattr(
+                                _body_out.mind.affect, "stress", 0.0)), 4)}
+                        _mbj.save_state(store, session_id, _st_out)
                     except Exception as _exc:
                         logger.warning("[body] reply inject failed: %s", str(_exc)[:100])
                     # 奖励不再问模型：用这一轮的情绪差分（效价升、紧张降 = 正）。
