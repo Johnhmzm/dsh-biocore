@@ -7528,6 +7528,9 @@ def _constraints_block(state, switches, payload):
     return "\n".join("- " + line for line in lines[:6])
 
 
+_INJECTION_LAST = {}
+
+
 def _injection_trace(store, session_id, text, state, payload=None):
     """把每轮注入的内容追一行到 <store>/sessions/<sid>/injection.log。
 
@@ -7538,6 +7541,14 @@ def _injection_trace(store, session_id, text, state, payload=None):
     try:
         sid = sanitize_session_id(session_id)
         path = _os.path.join(str(store), "sessions", sid, "injection.log")
+        # 一轮里 prompt_block 会被调两次（inject 取文本 + turn_start 内部），
+        # 内容相同就只记一次，否则日志里每轮出现两行一样的。
+        _sig = "%d|%s" % (len(str(text or "")), str(text or "")[:80])
+        _prev = _INJECTION_LAST.get(sid)
+        _now_ms = time.time()
+        if _prev and _prev[0] == _sig and (_now_ms - _prev[1]) < 5.0:
+            return path
+        _INJECTION_LAST[sid] = (_sig, _now_ms)
         _os.makedirs(_os.path.dirname(path), exist_ok=True)
         core = (state or {}).get("core") if isinstance(state, dict) else {}
         body = (state or {}).get("body") if isinstance(state, dict) else {}
