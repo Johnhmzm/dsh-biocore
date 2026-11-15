@@ -7419,11 +7419,13 @@ def body_loop(store, session_id, now=None, seed=BODY_LOOP_SEED, payload=None):
                     "pending_action": str((pending or {}).get("action") or "")}
         _mb_read = state.get("mb_emotion") if isinstance(
             state.get("mb_emotion"), dict) else {}
+        # 心不设限：这些数原样报出（可以超出 ±1），夹紧只属于身体那一侧。
         mushroom = {"affect": {"v": round(float(_mb_read.get("valence",
                                                             L4["v"])), 4),
                                 "a": round(float(_mb_read.get("arousal",
                                                               L4["a"])), 4),
-                                "stress": L4["stress"]},
+                                "stress": round(float(_mb_read.get("stress",
+                                                               L4["stress"]) or L4["stress"]), 4)},
                     "action": str(state.get("action") or ""),
                     "over_threshold": over,
                     "intent": intent_text,
@@ -7855,6 +7857,20 @@ def _state_block(state, budget):
     # of words and cap what the model can infer. The dimensions are what the
     # body actually computed; the words after them are only a gloss.
     numbers = "效价%+.2f 唤醒%.2f 支配%+.2f 紧张%.2f 社交%+.2f" % (v, a, d, stress, social - 0.5)
+    # 身体与"心"是两套读数：身上那个快而准，蘑菇体那个慢而钝。两者之差
+    # 本身就是"说不上来哪里不对"。这里只给数字，不给结论 —— 要不要说、
+    # 怎么说，是模型的事；写死一句"说不上来"等于替她知道了。
+    _body_src = state.get("body") if isinstance(state.get("body"), dict) else {}
+    _raw_felt = _body_src.get("valence") if _body_src else None
+    _raw_known = _body_src.get("mb_valence") if _body_src else None
+    _felt = _num(_raw_felt, 0.0) if isinstance(_raw_felt, (int, float)) else None
+    _known = _num(_raw_known, 0.0) if isinstance(_raw_known, (int, float)) else None
+    if _felt is not None and _known is not None:
+        # 效价那个位置写"身上"的值（身体的读数才快而准），再单列"心里"与差。
+        numbers = "效价%+.2f 唤醒%.2f 支配%+.2f 紧张%.2f 社交%+.2f" % (
+            _felt, a, d, stress, social - 0.5)
+        numbers = numbers + " ｜ 心里%+.2f 相差%.2f" % (
+            _known, abs(_felt - _known))
     # 内感受四量每轮都在算，但契约规定原始数值不外露（test_runtime_pipeline 钉着）。
     # 所以只把它们说成话：暖不暖、沉不沉、清不清楚——信息在，数字不泄。
     _intero_words = _intero_gloss(intero) if intero else ""

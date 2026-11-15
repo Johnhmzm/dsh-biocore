@@ -404,6 +404,30 @@ class DialogueBody:
         for _ in range(max(0, int(ticks))):
             self._tick_once()
         if d:
+            # 情绪必须先被蘑菇体"感知"一次，否则它只在心跳里更新，
+            # 对话中的情绪对蘑菇体等于不存在（mb_valence 一直贴着 0）。
+            try:
+                _v = float(d.get("valence") or 0.0)
+                _intero = None
+                try:
+                    st = self.state()
+                    _intero = {"tension": float(st.get("stress") or 0.0),
+                               "warmth": float(d.get("social") or 0.5),
+                               "heaviness": max(0.0, -_v),
+                               "clarity": float(d.get("certainty") or 0.5)}
+                except Exception:
+                    _intero = None
+                # 注意键名：蘑菇体读的是 v / a / stress，而评价给的是
+                # valence / arousal —— 直接传 d 会让它读到全 0，等于没接。
+                _aff = {"v": _v,
+                        "a": float(d.get("arousal") or 0.5),
+                        "stress": float(d.get("stress") or 0.0)}
+                self.mind.circuit.update(
+                    max(0.0, min(1.0, abs(_v))),
+                    reward=max(0.0, _v), punishment=max(0.0, -_v),
+                    intero=_intero, affect=_aff)
+            except Exception:
+                pass
             try:
                 self.anchor["valence"] = round(
                     self.anchor["valence"] * (1 - ANCHOR_LEARN)
@@ -547,7 +571,9 @@ class DialogueBody:
                 valence = float(circuit.valence())
                 reward = max(0.0, float(getattr(circuit, "dan_reward", 0.0)))
                 punishment = max(0.0, float(getattr(circuit, "dan_punishment", 0.0)))
-                arousal = min(1.0, abs(approach - avoid) + 0.5 * (reward + punishment))
+                # 心不设限：蘑菇体的读数原样报出，不夹到 [0,1] 或 [-1,1]。
+                # 限制是身体的属性（它得在量程里），不是心的。
+                arousal = abs(approach - avoid) + 0.5 * (reward + punishment)
                 bias = 0
                 try:
                     bias_value = circuit.behavior_bias()
