@@ -129,7 +129,7 @@ class DialogueBody:
         self.integral = {"valence": 0.0, "stress": 0.0}
         # 三层（Structural Affect 式）：feeling 在 affect 里（秒级），
         # mood 是它的慢积分，load 是"偏离基线的时间累计"（只涨、极慢回落）。
-        self.slow = {"mood": 0.0, "load": 0.0}
+        self.slow = {"mood": 0.0, "load": 0.0, "heart": 0.0}
         # 习惯化：同一个刺激反复推，力度递减；隔久了才恢复。
         # 现在按"文本前 16 字的指纹"归并，键与时间都存在 self.habit 里。
         self.habit = {}
@@ -202,7 +202,11 @@ class DialogueBody:
         try:
             _v = float(getattr(self.mind.affect, "v", 0.0))
             _mood = float(self.slow.get("mood") or 0.0)
-            _mood += eff("mood_alpha", MOOD_ALPHA) * (_v - _mood)
+            # mood 是"小时到天"的泄漏积分（Mood as integrated advantage）。
+            # 按每拍固定百分比更新会让它二十分钟就追平，那等于把 mood 做成了心。
+            _mood_tau = max(60.0, eff("mood_tau_s", MOOD_TAU_S))
+            _mood_step = 1.0 - math.exp(-max(0.0, float(dt)) / _mood_tau)
+            _mood += _mood_step * (_v - _mood)
             _load = float(self.slow.get("load") or 0.0)
             _base = float(self.anchor.get("valence") or 0.0)
             # 只有“低于基线”才算欠账：高兴不该累积负荷，平静时它该慢慢退。
@@ -211,6 +215,25 @@ class DialogueBody:
                      + _deficit * eff("load_gain", LOAD_GAIN))
             self.slow["mood"] = round(max(-1.0, min(1.0, _mood)), 5)
             self.slow["load"] = round(max(0.0, min(1.0, _load)), 5)
+        except Exception:
+            pass
+        # 心是时间连续的：它不跟着单句跳，而是按一条时间常数去追蘑菇体的读数。
+        # 追的是时间，不是消息条数 —— 隔得久就多走一点，连着说就少走一点。
+        try:
+            _raw = None
+            try:
+                _c = getattr(self.mind, "circuit", None)
+                if _c is not None:
+                    _raw = float(_c.valence())
+            except Exception:
+                _raw = None
+            if _raw is not None:
+                _tau = max(1.0, eff("heart_tau_s", HEART_TAU_S))
+                _step = 1.0 - math.exp(-max(0.0, float(dt)) / _tau)
+                _h = float(self.slow.get("heart") or 0.0)
+                self.slow["heart"] = round(_h + (_raw - _h) * _step, 5)
+        except Exception:
+            pass
         except Exception:
             pass
         try:
@@ -422,10 +445,19 @@ class DialogueBody:
                 _aff = {"v": _v,
                         "a": float(d.get("arousal") or 0.5),
                         "stress": float(d.get("stress") or 0.0)}
-                self.mind.circuit.update(
+                _act = self.mind.circuit.update(
                     max(0.0, min(1.0, abs(_v))),
                     reward=max(0.0, _v), punishment=max(0.0, -_v),
                     intero=_intero, affect=_aff)
+                # 心跟着走，但只走一小步：它追的是时间，不是这一句。
+                try:
+                    _raw = float(self.mind.circuit.valence())
+                    _tau = max(1.0, eff("heart_tau_s", HEART_TAU_S))
+                    _h = float(self.slow.get("heart") or 0.0)
+                    self.slow["heart"] = round(
+                        _h + (_raw - _h) * (1.0 - math.exp(-60.0 / _tau)), 5)
+                except Exception:
+                    pass
             except Exception:
                 pass
             try:
@@ -448,6 +480,15 @@ class DialogueBody:
                 pass
             try:
                 _hab = self._habituation(text)
+                # 参照点（文献里的"情境性"）：同一个事件，在低潮里和在平稳里推的量
+                # 不一样。离参照点越远，推得越少 —— 地板效应，不是 bug。
+                try:
+                    _mood_now = float(self.slow.get("mood") or 0.0)
+                    _v_in = float(d.get("valence") or 0.0)
+                    _dist = abs(_v_in - _mood_now)
+                    _hab = _hab * max(0.35, min(1.0, 1.0 - 0.45 * _dist))
+                except Exception:
+                    pass
                 self.mind.inject_affect(float(d.get("valence") or 0.0),
                                         float(d.get("arousal") or 0.5),
                                         float(d.get("dominance") or 0.0),
@@ -589,6 +630,8 @@ class DialogueBody:
                     "punishment": round(punishment, 4),
                     "bias": bias,
                 }
+                # 心 = 蘑菇体读数的时间连续版本（低通）；原始读数仍留在 mb_emotion 里
+                out["heart"] = round(float(self.slow.get("heart") or 0.0), 4)
                 out["mb_approach"] = round(approach, 4)
                 out["mb_avoid"] = round(avoid, 4)
                 out["mb_valence"] = round(valence, 4)
@@ -665,6 +708,10 @@ PUSH_KEEP = float(_os.environ.get("BIOCORE_PUSH_KEEP") or 0.7)
 # 慢层参数：mood 每轮只跟 feeling 走一小步；load 是偏离的累计，回得极慢。
 MOOD_ALPHA = float(_os.environ.get("BIOCORE_MOOD_ALPHA") or 0.05)
 LOAD_GAIN = float(_os.environ.get("BIOCORE_LOAD_GAIN") or 0.15)
+# 心的追赶时间常数（秒）：越大越迟钝。600s ≈ 十来分钟追上大半。
+HEART_TAU_S = float(_os.environ.get("BIOCORE_HEART_TAU_S") or 600.0)
+# mood 的时间常数（秒）：文献给的是"小时到天"，取 4 小时。
+MOOD_TAU_S = float(_os.environ.get("BIOCORE_MOOD_TAU_S") or 14400.0)
 LOAD_DECAY = float(_os.environ.get("BIOCORE_LOAD_DECAY") or 0.002)
 # 习惯化：同一刺激重复推的衰减系数，以及恢复的时间常数（小时）
 HAB_GAIN = float(_os.environ.get("BIOCORE_HAB_GAIN") or 0.6)

@@ -7865,12 +7865,20 @@ def _state_block(state, budget):
     _raw_known = _body_src.get("mb_valence") if _body_src else None
     _felt = _num(_raw_felt, 0.0) if isinstance(_raw_felt, (int, float)) else None
     _known = _num(_raw_known, 0.0) if isinstance(_raw_known, (int, float)) else None
+    _raw_mood = _body_src.get("mood") if _body_src else None
+    _raw_load = _body_src.get("allostatic_load") if _body_src else None
+    _mood_v = _num(_raw_mood, 0.0) if isinstance(_raw_mood, (int, float)) else None
+    _load_v = _num(_raw_load, 0.0) if isinstance(_raw_load, (int, float)) else None
+    _spell = ""
+    if _mood_v is not None and _load_v is not None:
+        # "这一阵子"与"这一件事"要分开：mood 没有具体对象，事件才有。
+        _spell = " ｜ 这阵子 mood%+.2f 欠账%.2f" % (_mood_v, _load_v)
     if _felt is not None and _known is not None:
         # 效价那个位置写"身上"的值（身体的读数才快而准），再单列"心里"与差。
         numbers = "效价%+.2f 唤醒%.2f 支配%+.2f 紧张%.2f 社交%+.2f" % (
             _felt, a, d, stress, social - 0.5)
         numbers = numbers + " ｜ 心里%+.2f 相差%.2f" % (
-            _known, abs(_felt - _known))
+            _known, abs(_felt - _known)) + _spell
     # 内感受四量每轮都在算，但契约规定原始数值不外露（test_runtime_pipeline 钉着）。
     # 所以只把它们说成话：暖不暖、沉不沉、清不清楚——信息在，数字不泄。
     _intero_words = _intero_gloss(intero) if intero else ""
