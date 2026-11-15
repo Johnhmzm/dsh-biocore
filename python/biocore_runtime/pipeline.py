@@ -2285,8 +2285,16 @@ def _units_with_vectors(store, session_id):
         return []
     try:
         rows = conn.execute(
-            "SELECT id, entry_id, text, vector, ord FROM units"
+            "SELECT id, entry_id, text, vector, ord, gist FROM units"
             " WHERE vector IS NOT NULL AND text IS NOT NULL ORDER BY ord").fetchall()
+    except sqlite3.OperationalError:
+        # 很老的库还没有 gist 列：退回没有命题的版本（仍能检索）
+        try:
+            rows = conn.execute(
+                "SELECT id, entry_id, text, vector, ord, NULL FROM units"
+                " WHERE vector IS NOT NULL AND text IS NOT NULL ORDER BY ord").fetchall()
+        except Exception:
+            return []
     except Exception:
         return []
     finally:
@@ -2317,7 +2325,9 @@ def _units_with_vectors(store, session_id):
         if not vector:
             continue
         out.append({"id": str(row[0]), "entry_id": str(row[1] or ""),
-                    "text": str(row[2] or ""), "vector": [float(x) for x in vector]})
+                    "text": str(row[2] or ""),
+                    "gist": str(row[5] or ""),
+                    "vector": [float(x) for x in vector]})
     return out
 
 
@@ -2358,7 +2368,7 @@ def _rerank_search_rows(query, rows, cfg, top_k):
     }
     try:
         ranked = _rerank_mod.rerank_documents(
-            query, [str(row.get("sentence") or "") for row in rows], flat) or []
+            query, [_row_rank_text(row) for row in rows], flat) or []
     except Exception as exc:
         logger.warning("[search] rerank 失败，退回 embedding 排序：%s: %s",
                        type(exc).__name__, str(exc)[:120])
@@ -2395,7 +2405,72 @@ def _pick_sentence(text, query, want_chars=200):
     return best
 
 
-def memory_search(store, session_id, query, top_k=8, scope="all", include_context=False):
+def _depth_module():
+    try:
+        from biocore_runtime import recall_depth as _mod
+    except Exception:
+        try:
+            from . import recall_depth as _mod
+        except Exception:
+            return None
+    return _mod
+
+
+def _depth_info(query, depth=None):
+    """选择性解压的判定：默认 gist，命中信号才展开（纯规则，不调模型）。"""
+    mod = _depth_module()
+    if mod is None:
+        return {"depth": "gist", "reason": "默认：无展开信号，读命题层",
+                "signals": []}
+    try:
+        return mod.decide_depth(query, depth)
+    except Exception:
+        return {"depth": "gist", "reason": "默认：判定失败，读命题层",
+                "signals": []}
+
+
+def _first_clause(text, limit=80):
+    """首句压缩（命题层没有 gist 时的兜底；不是新的事实，只是缩短原句）。"""
+    body = str(text or "").strip()
+    if not body:
+        return ""
+    first = re.split(r"[。！？!?\n；;]", body)[0].strip() or body
+    return first[:limit]
+
+
+def _gist_of(unit, entry, sentence):
+    """命题层文本：units.gist > 条目 summary > 命中句首句压缩。"""
+    gist = str((unit or {}).get("gist") or "").strip()
+    if gist:
+        return gist[:120]
+    summary = str((entry or {}).get("summary") or "").strip()
+    if summary:
+        return summary[:120]
+    return _first_clause(sentence or ((entry or {}).get("text") or ""))
+
+
+def _search_row(depth, date, role, sentence, event, entry, unit, entry_id, match):
+    """按深度装一行结果（只加字段：raw 与旧返回完全一致）。"""
+    row = {"date": date, "role": role, "entry_id": entry_id,
+           "event_id": str((event or {}).get("event_id") or ""),
+           "match": match}
+    if depth == "raw":
+        row["sentence"] = str(sentence or "")[:200]
+        row["event_summary"] = _event_summary(event, entry)
+        return row
+    row["gist"] = _gist_of(unit, entry, sentence)
+    if depth == "event":
+        row["event_summary"] = _event_summary(event, entry)
+    return row
+
+
+def _row_rank_text(row):
+    return str(row.get("sentence") or row.get("gist")
+               or row.get("event_summary") or "")
+
+
+def memory_search(store, session_id, query, top_k=8, scope="all",
+                  include_context=False, depth=None):
     """三层检索的第一层：命中到句子，并带上事件摘要与两个 id。
 
     句子层优先用 units 的向量（真·句子级相似度）；没有 units 向量时退到
@@ -2409,6 +2484,8 @@ def memory_search(store, session_id, query, top_k=8, scope="all", include_contex
     text = clean_text(query, 2000)
     if not text:
         return {"ok": False, "reason": "query_required"}
+    depth_info = _depth_info(text, depth)
+    depth_value = str(depth_info.get("depth") or "gist")
     try:
         limit = int(top_k)
     except Exception:
@@ -2425,7 +2502,11 @@ def memory_search(store, session_id, query, top_k=8, scope="all", include_contex
     cutoff, cut_reason = _cutoff_for(store, sid)
     if cutoff is None and not include_context:
         # 整段会话都还在上下文里：没有"需要回忆"的东西，别让模型以为记忆是空的
-        return {"ok": True, "query": text, "count": 0, "results": [], "layer": "sentence",
+        return {"ok": True, "query": text, "count": 0, "results": [],
+                "layer": "sentence", "chars": 0,
+                "depth": depth_value,
+                "depth_reason": depth_info.get("reason") or "",
+                "depth_signals": list(depth_info.get("signals") or []),
                 "reason": "nothing_beyond_context"}
 
     entries = _entry_map(store, sid)
@@ -2453,16 +2534,13 @@ def memory_search(store, session_id, query, top_k=8, scope="all", include_contex
             for score, unit in scored[:max(limit * 5, 20)]:
                 entry = entries.get(unit["entry_id"]) or {}
                 event = by_entry_event.get(unit["entry_id"])
-                results.append({
-                    "date": _search_date(entry.get("ts")),
-                    "role": str(entry.get("role") or "user"),
-                    "sentence": str(unit.get("text") or "")[:200],
-                    "event_summary": _event_summary(event, entry),
-                    "entry_id": unit["entry_id"],
-                    "event_id": str((event or {}).get("event_id") or ""),
-                    "_ts": float(entry.get("ts") or 0.0),
-                    "match": "embedding",
-                })
+                row = _search_row(
+                    depth_value, _search_date(entry.get("ts")),
+                    str(entry.get("role") or "user"),
+                    str(unit.get("text") or ""), event, entry, unit,
+                    unit["entry_id"], "embedding")
+                row["_ts"] = float(entry.get("ts") or 0.0)
+                results.append(row)
     if len(results) < pool:
         # 候选不足：条目召回 + 逐句挑最贴的补进来（标 match='lexical'）
         picked = []
@@ -2486,16 +2564,12 @@ def memory_search(store, session_id, query, top_k=8, scope="all", include_contex
             sentence = _pick_sentence(entry.get("text"), text)
             if not sentence:
                 continue
-            results.append({
-                "date": _search_date(entry.get("ts")),
-                "role": str(entry.get("role") or "user"),
-                "sentence": sentence[:200],
-                "event_summary": _event_summary(event, entry),
-                "entry_id": entry_id,
-                "event_id": str((event or {}).get("event_id") or ""),
-                "_ts": float(entry.get("ts") or 0.0),
-                "match": "lexical",
-            })
+            row = _search_row(
+                depth_value, _search_date(entry.get("ts")),
+                str(entry.get("role") or "user"), sentence, event, entry,
+                None, entry_id, "lexical")
+            row["_ts"] = float(entry.get("ts") or 0.0)
+            results.append(row)
     # 只留"不在当前上下文里"的：早于压缩边界（或 include_context 全要）
     # 同一件事只占一行：多句命中同一事件就合并（留分最高那句 + hits_in_event）。
     # 事件的标识是它的总结：没有 event_id 的老数据按总结文本归并。
@@ -2506,7 +2580,8 @@ def memory_search(store, session_id, query, top_k=8, scope="all", include_contex
     for row in results:
         row.pop("_ts", None)
         key = ("ev:" + row["event_id"]) if row.get("event_id") else \
-            ("sum:" + (row.get("event_summary") or row.get("sentence") or "")[:40])
+            ("sum:" + (row.get("event_summary") or row.get("sentence")
+                       or row.get("gist") or "")[:40])
         if key in seen_keys:
             merged[seen_keys[key]]["hits_in_event"] += 1
             continue
@@ -2517,10 +2592,18 @@ def memory_search(store, session_id, query, top_k=8, scope="all", include_contex
     # 先宽取候选，再 rerank，最后才截 top_k
     rerank_cfg = _search_rerank_config(store)
     ranked, reranked, rerank_model = _rerank_search_rows(text, merged, rerank_cfg, limit)
+    content_chars = 0
+    for row in ranked:
+        for key in ("gist", "sentence", "event_summary"):
+            content_chars += len(str(row.get(key) or ""))
     out = {"ok": True, "query": text, "count": len(ranked), "results": ranked,
            "layer": "sentence", "context_cutoff": _search_date(cutoff) if cutoff else "",
            "candidates": len(merged), "rerank": bool(reranked),
-           "rerank_model": rerank_model}
+           "rerank_model": rerank_model,
+           "depth": depth_value,
+           "depth_reason": str(depth_info.get("reason") or ""),
+           "depth_signals": list(depth_info.get("signals") or []),
+           "chars": content_chars}
     if cut_reason == "recent_fallback":
         out["reason"] = "recent_fallback"
     elif not ranked:
@@ -10088,20 +10171,30 @@ DAY_RECALL_HEADER = "【那天】"
 
 
 def day_recall(store, session_id, day_key, payload=None, budget_chars=None,
-               max_events=4, max_entries=3):
+               max_events=4, max_entries=3, query="", depth=None):
     """按天取回：日期 → 日总结 → 事件 → 原文（新入口，旧入口一动不动）。
 
-    一次只给"这一天的一段"，不灌整天：日总结（至多 2 段）+ 若干事件的概述 +
-    每件事最多 max_entries 条原文。取不到的分层跳过，绝不编。
+    选择性解压（SeDeM）：默认只给命题层（日总结，当天最压缩的一层，最省）；
+    查询里有编号/路径/引号片段/具体化词 → 展开到事件概述层；明确要
+    原文/原话/逐字 → 展开到原文层（成员原句）。取不到的分层跳过，绝不编。
     """
     data = payload if isinstance(payload, dict) else {}
     root = _store_root(store)
+    depth_query = str(query or data.get("query") or data.get("question") or "")
+    depth_param = depth if depth is not None else data.get("depth")
+    depth_info = _depth_info(depth_query, depth_param)
+    depth_value = str(depth_info.get("depth") or "gist")
+    depth_extra = {"depth": depth_value,
+                   "depth_reason": str(depth_info.get("reason") or ""),
+                   "depth_signals": list(depth_info.get("signals") or [])}
     if root is None:
-        return {"ok": False, "reason": "no_store", "text": "", "chars": 0}
+        return dict({"ok": False, "reason": "no_store", "text": "", "chars": 0},
+                    **depth_extra)
     sid = sanitize_session_id(session_id)
     key = str(day_key or "").strip()
     if not key:
-        return {"ok": False, "reason": "no_day_key", "text": "", "chars": 0}
+        return dict({"ok": False, "reason": "no_day_key", "text": "", "chars": 0},
+                    **depth_extra)
     from biocore_memory.event import day_index as _day
     from biocore_memory.event import day_summary as _ds
     db = _db_path(root, sid)
@@ -10114,20 +10207,28 @@ def day_recall(store, session_id, day_key, payload=None, budget_chars=None,
     parts = []
     days = _ds.load(db, key, limit=2)
     events = _day.events_of_day(db, key)
+    depth_fallback = ""
     if not days and not events:
-        return {"ok": True, "reason": "empty_day", "text": "", "chars": 0,
-                "day_key": key, "day_summaries": 0, "events": 0, "entries": 0}
+        return dict({"ok": True, "reason": "empty_day", "text": "", "chars": 0,
+                     "day_key": key, "day_summaries": 0, "events": 0,
+                     "entries": 0}, **depth_extra)
     if days:
         parts.append("日总结：" + chr(10) + chr(10).join(
             "- " + str(row.get("text") or "").strip() for row in days
             if str(row.get("text") or "").strip()))
+    # 命题层没有日总结时退一步：给事件概述（返回里标 depth_fallback），
+    # 不让默认档变成"这一天什么都没有"。
+    if depth_value == "gist" and not days and events:
+        depth_fallback = "no_day_summary"
+    show_events = depth_value in ("event", "raw") or bool(depth_fallback)
+    show_entries = depth_value == "raw"
     shown_events = 0
     shown_entries = 0
     conn = None
     try:
         import sqlite3 as _sq
         conn = _sq.connect(str(db))
-        for item in events[:max_events]:
+        for item in (events[:max_events] if show_events else []):
             eid = str(item.get("event_id") or "")
             row = conn.execute(
                 "SELECT overview, text, payload FROM events WHERE id=?",
@@ -10135,20 +10236,20 @@ def day_recall(store, session_id, day_key, payload=None, budget_chars=None,
             if not row:
                 continue
             overview = str(row[0] or "").strip()
-            body = str(row[1] or "").strip()
             lines = []
             if overview:
                 lines.append("· " + overview)
-            try:
-                doc = json.loads(row[2]) if row[2] else {}
-            except Exception:
-                doc = {}
-            rows = (doc or {}).get("entries") or []
-            picked = [str(r.get("text") or "").strip() for r in rows
-                      if isinstance(r, dict) and str(r.get("text") or "").strip()]
-            for text in picked[:max_entries]:
-                lines.append("  - " + text)
-                shown_entries += 1
+            if show_entries:
+                try:
+                    doc = json.loads(row[2]) if row[2] else {}
+                except Exception:
+                    doc = {}
+                rows = (doc or {}).get("entries") or []
+                picked = [str(r.get("text") or "").strip() for r in rows
+                          if isinstance(r, dict) and str(r.get("text") or "").strip()]
+                for text in picked[:max_entries]:
+                    lines.append("  - " + text)
+                    shown_entries += 1
             if not lines:
                 continue
             shown_events += 1
@@ -10162,13 +10263,18 @@ def day_recall(store, session_id, day_key, payload=None, budget_chars=None,
             except Exception:
                 pass
     if not parts:
-        return {"ok": True, "reason": "empty_day", "text": "", "chars": 0,
-                "day_key": key, "day_summaries": len(days), "events": 0, "entries": 0}
+        return dict({"ok": True, "reason": "empty_day", "text": "", "chars": 0,
+                     "day_key": key, "day_summaries": len(days), "events": 0,
+                     "entries": 0}, **depth_extra)
     body = DAY_RECALL_HEADER + chr(10) + chr(10).join(parts)
     body = _trim_lines(body, budget)
-    return {"ok": True, "text": body, "chars": len(body), "day_key": key,
-            "day_summaries": len(days), "events": shown_events,
-            "entries": shown_entries, "mode": "day"}
+    result = {"ok": True, "text": body, "chars": len(body), "day_key": key,
+              "day_summaries": len(days), "events": shown_events,
+              "entries": shown_entries, "mode": "day"}
+    result.update(depth_extra)
+    if depth_fallback:
+        result["depth_fallback"] = depth_fallback
+    return result
 
 
 def day_rollover(store, session_id, payload=None, now=None):
@@ -11916,7 +12022,9 @@ def dispatch(action, payload=None):
             return day_recall(store, session_id, data.get("day_key"), data,
                               budget_chars=data.get("budget_chars"),
                               max_events=data.get("max_events"),
-                              max_entries=data.get("max_entries"))
+                              max_entries=data.get("max_entries"),
+                              query=data.get("query") or data.get("question") or "",
+                              depth=data.get("depth"))
         if action == "day_rollover":
             # 00:00 的收尾：强制结清当天尾巴 + 给过去每天补日总结（幂等）
             session_id = str(data.get("session_id") or "").strip()
@@ -11936,7 +12044,8 @@ def dispatch(action, payload=None):
             return memory_search(store, session_id, data.get("query"),
                                  data.get("top_k", data.get("limit", 8)),
                                  data.get("scope") or "all",
-                                 bool(data.get("include_context")))
+                                 bool(data.get("include_context")),
+                                 depth=data.get("depth"))
         if action == "memory_list":
             session_id = str(data.get("session_id") or "").strip()
             if not session_id:
