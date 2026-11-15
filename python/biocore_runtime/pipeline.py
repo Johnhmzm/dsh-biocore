@@ -7496,6 +7496,35 @@ def _constraints_block(state, switches, payload):
     return "\n".join("- " + line for line in lines[:6])
 
 
+def _injection_trace(store, session_id, text, state, payload=None):
+    """把每轮注入的内容追一行到 <store>/sessions/<sid>/injection.log。
+
+    只写不读、失败不影响主流程。目的是留证据：模型每轮到底看到了什么。
+    """
+    import json as _json
+    import os as _os
+    try:
+        sid = sanitize_session_id(session_id)
+        path = _os.path.join(str(store), "sessions", sid, "injection.log")
+        _os.makedirs(_os.path.dirname(path), exist_ok=True)
+        core = (state or {}).get("core") if isinstance(state, dict) else {}
+        body = (state or {}).get("body") if isinstance(state, dict) else {}
+        row = {
+            "ts": round(time.time(), 3),
+            "chars": len(str(text or "")),
+            "v": round(_num((state or {}).get("v", (core or {}).get("v")), 0.0), 4),
+            "mood": round(_num((body or {}).get("mood"), 0.0), 4),
+            "load": round(_num((body or {}).get("allostatic_load"), 0.0), 4),
+            "action": str((body or {}).get("action") or ""),
+            "text": str(text or ""),
+        }
+        with open(path, "a", encoding="utf-8") as fh:
+            fh.write(_json.dumps(row, ensure_ascii=False) + "\n")
+        return path
+    except Exception:
+        return ""
+
+
 def prompt_block(payload):
     """State block (<=200 chars) + short expression constraints (task-204)."""
     data = payload if isinstance(payload, dict) else {}
@@ -11205,6 +11234,13 @@ def dispatch(action, payload=None):
                 length_target=data.get("length_target"),
                 length_max=data.get("length_max"),
                 allow_correction=data.get("allow_correction")))
+            # 留痕：把这一轮真正注入的文本与状态快照追一行到会话目录，
+            # 只增不改。改渲染之前先有证据，才谈得上改什么。
+            try:
+                _left = _injection_trace(store, session_id, block["text"],
+                                         session_state, data)
+            except Exception:
+                _left = ""
             return {"ok": True, "prompt_block": block["text"],
                     "constraints": self_layer_constraints(
                         dict(data, user_text=user_text)),
