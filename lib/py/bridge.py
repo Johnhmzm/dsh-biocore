@@ -264,6 +264,13 @@ def _json_arg(value):
 _SUMMARIZER_STORE = [""]
 
 
+# Where the DSH credential store lives. This module referenced _DSH_HOME without
+# ever defining it: every lookup raised NameError, the bare except swallowed it,
+# and the credential fallback was dead code — the summariser could only ever get
+# a key from the environment.
+_DSH_HOME = Path(os.environ.get("DSH_HOME") or (Path.home() / ".dsh"))
+
+
 def _deepseek_key():
     """API key for the summariser: env first, then the DSH credential store."""
     key = str(os.environ.get("DEEPSEEK_API_KEY") or "").strip()
