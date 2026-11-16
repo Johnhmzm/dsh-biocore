@@ -8696,13 +8696,28 @@ def _constraints_block(state, switches, payload):
     try:
         _st_b = state.get("body") if isinstance(state.get("body"), dict) else {}
         _now_gloss = _systems_gloss(state)
-        _prev_gloss = str((_st_b or {}).get("sys_gloss") or "")
+        # 上一次报过的心里状态单独存一个小文件：身体状态每轮会被整体重写，
+        # 把"报过什么"放在身体里会被抹掉（实测每轮都当第一次，每轮重复一句）。
+        _prev_gloss = ""
+        try:
+            from biocore_runtime import mindbase_bridge as _mbg
+            _prev_gloss = str(_mbg.gloss_get(payload.get("store"),
+                                             payload.get("session_id")) or "")
+        except Exception:
+            _prev_gloss = str((_st_b or {}).get("sys_gloss") or "")
         # 顺序不算变：按词集比，免得因为排位微调每轮都"变了"
         if set(x for x in _now_gloss.split("、") if x) != set(x for x in _prev_gloss.split("、") if x):
             if _now_gloss:
                 lines.append("心里现在：" + _now_gloss)
             elif _prev_gloss:
                 lines.append("刚才那点心里动静下去了")
+        try:
+            from biocore_runtime import mindbase_bridge as _mbg2
+            if _now_gloss != _prev_gloss:
+                _mbg2.gloss_set(payload.get("store"), payload.get("session_id"),
+                                _now_gloss)
+        except Exception:
+            pass
         if isinstance(_st_b, dict):
             _st_b["sys_gloss"] = _now_gloss
     except Exception:
@@ -12584,6 +12599,12 @@ def dispatch(action, payload=None):
                                 _body_out.mind.affect, "v", 0.0)), 4),
                             "stress": round(float(getattr(
                                 _body_out.mind.affect, "stress", 0.0)), 4)}
+                        # 记下"这一轮已经说过的心里状态"：下一轮只有变了才再报。
+                        # 不存的话每轮都当作"第一次"，那句话会每轮重复。
+                        try:
+                            _st_out["sys_gloss"] = _systems_gloss({"body": _st_out})
+                        except Exception:
+                            pass
                         _mbj.save_state(store, session_id, _st_out)
                     except Exception as _exc:
                         logger.warning("[body] reply inject failed: %s", str(_exc)[:100])

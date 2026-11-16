@@ -1821,6 +1821,42 @@ def heartbeat_last(store, session_id):
     return {}
 
 
+def _gloss_path(store, session_id):
+    if not store or not session_id:
+        return ""
+    return _body_path(store, session_id).replace(BODY_STATE_FILE, "sys_gloss.json")
+
+
+def gloss_get(store, session_id):
+    """上一次报给模型的"心里状态"（词集）。单独成文件，避免被身体状态整份覆盖。"""
+    import json
+    path = _gloss_path(store, session_id)
+    if not path:
+        return ""
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            return str((json.load(fh) or {}).get("gloss") or "")
+    except Exception:
+        return ""
+
+
+def gloss_set(store, session_id, gloss):
+    import json
+    import os
+    path = _gloss_path(store, session_id)
+    if not path:
+        return False
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        tmp = path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump({"gloss": str(gloss or "")}, fh, ensure_ascii=False)
+        os.replace(tmp, path)
+        return True
+    except Exception:
+        return False
+
+
 def wish_path(store, session_id):
     return _body_path(store, session_id).replace(BODY_STATE_FILE, "mindbase_wishes.jsonl")
 
