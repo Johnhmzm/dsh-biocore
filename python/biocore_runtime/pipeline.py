@@ -8515,7 +8515,7 @@ def _intero_gloss(intero):
     return "、".join(out)
 
 
-def _state_block(state, budget):
+def _state_block(state, budget, phase="turn"):
     state = state if isinstance(state, dict) else {}
     core = state.get("core") if isinstance(state.get("core"), dict) else {}
     intero = state.get("intero") if isinstance(state.get("intero"), dict) else {}
@@ -8583,8 +8583,10 @@ def _state_block(state, budget):
     _intero_words = _intero_gloss(intero) if intero else ""
     # The interchange layer's job: numbers alone are unreadable, single words
     # collapse them. Give the reading key, once, in the same line.
+    # 图例是常量：只在开场（boot）给一次，之后每轮不再重复 ——
+    # 它占了状态行里最大的一块死字，每轮重念等于把缓存冲掉。
     reading = ("读法：效价-1难受…+1舒服；唤醒0…1越高越激动；支配-1被推着…+1握得住；"
-               "紧张0…1越高越绷；社交-1想退开…+1想靠近")
+               "紧张0…1越高越绷；社交-1想退开…+1想靠近") if phase == "boot" else ""
     parts = []   # no single-word gloss: the numbers and the reading key carry it
     if _intero_words:
         parts.append(_intero_words)
@@ -8759,7 +8761,7 @@ def prompt_block(payload):
                         MAX_STATE_CHARS)
     state = data.get("state") if isinstance(data.get("state"), dict) else {}
     switches = normalize_switches(data.get("switches"))
-    state_text = _state_block(state, budget)
+    state_text = _state_block(state, budget, phase=phase)
     constraints = _constraints_block(state, switches, data)
     if STABLE_PREFIX:
         # 约束（规则为主，变化慢）在前，状态（每轮都变）在后
