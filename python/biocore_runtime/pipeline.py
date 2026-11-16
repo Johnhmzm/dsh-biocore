@@ -8515,7 +8515,8 @@ def _intero_gloss(intero):
     return "、".join(out)
 
 
-def _state_block(state, budget, phase="turn"):
+def _state_block(state, budget, phase="turn", payload=None):
+    payload = payload if isinstance(payload, dict) else {}
     state = state if isinstance(state, dict) else {}
     core = state.get("core") if isinstance(state.get("core"), dict) else {}
     intero = state.get("intero") if isinstance(state.get("intero"), dict) else {}
@@ -8575,9 +8576,54 @@ def _state_block(state, budget, phase="turn"):
         if _known is not None and abs(_known - _heart) >= INSTANT_GAP:
             numbers = numbers + " ｜ 瞬时%+.2f" % _known
         numbers = numbers + _spell
+    # 首轮给全量，之后只报变动：上一轮的文本还在上下文里，重述是浪费。
+    try:
+        from biocore_runtime import mindbase_bridge as _mbs
+        _store = payload.get("store")
+        _sid = payload.get("session_id")
+        _cur = {"v": round(float(state.get("v") or 0.0), 2),
+                "a": round(float(a), 2),
+                "stress": round(float(stress), 2),
+                "social": round(float(social - 0.5), 2),
+                "heart": round(float(_heart or 0.0), 2) if _heart is not None else None,
+                "mood": round(float(_mood_v or 0.0), 3) if _mood_v is not None else None,
+                "load": round(float(_load_v or 0.0), 3) if _load_v is not None else None}
+        _prev = {}
+        try:
+            _prev = _mbs.snapshot_get(_store, _sid) or {}
+        except Exception:
+            _prev = {}
+        _names = (("v", "效价"), ("a", "唤醒"), ("stress", "紧张"),
+                  ("social", "社交"), ("heart", "心里"), ("mood", "mood"), ("load", "欠账"))
+        _diffs = []
+        for _k, _label in _names:
+            _now_v = _cur.get(_k)
+            if _now_v is None:
+                continue
+            _old_v = _prev.get(_k)
+            if _old_v is None:
+                _diffs.append("%s%+.2f" % (_label, _now_v))
+            else:
+                _d = abs(float(_now_v) - float(_old_v))
+                _thr = 0.01 if _k in ("mood", "load", "heart") else 0.02
+                if _d >= _thr:
+                    _diffs.append("%s%+.2f→%+.2f" % (_label, float(_old_v), _now_v))
+        _boot_like = (phase == "boot") or not _prev
+        if _boot_like or len(_diffs) > 4:
+            _text_state = numbers          # 全量
+        elif _diffs:
+            _text_state = "变：" + "，".join(_diffs[:6]) + "（其余同前）"
+        else:
+            _text_state = "此刻：无变化"
+        try:
+            _mbs.snapshot_set(_store, _sid, _cur)
+        except Exception:
+            pass
+    except Exception:
+        _text_state = numbers
     _cause = _cause_line(state)
     if _cause:
-        numbers = numbers + " ｜ 因：" + _cause
+        _text_state = _text_state + " ｜ 因：" + _cause
     # 内感受四量每轮都在算，但契约规定原始数值不外露（test_runtime_pipeline 钉着）。
     # 所以只把它们说成话：暖不暖、沉不沉、清不清楚——信息在，数字不泄。
     _intero_words = _intero_gloss(intero) if intero else ""
@@ -8640,7 +8686,8 @@ def _state_block(state, budget, phase="turn"):
         if bits:
             zline = "｜相对你平常：" + " ".join(bits)
     tail = ("；".join(parts) + "。") if parts else ""
-    text = "此刻：" + numbers + "。" + reading + zline + ("｜" + tail if tail else "")
+    # _text_state 已经是"全量 或 只报变动"的成品（含因），这里直接用它
+    text = _text_state + "。" + reading + zline + ("｜" + tail if tail else "")
     if len(text) > budget:
         text = text[:max(1, budget - 1)] + "…"
     return text
@@ -8776,7 +8823,7 @@ def prompt_block(payload):
                         MAX_STATE_CHARS)
     state = data.get("state") if isinstance(data.get("state"), dict) else {}
     switches = normalize_switches(data.get("switches"))
-    state_text = _state_block(state, budget, phase=phase)
+    state_text = _state_block(state, budget, phase=phase, payload=data)
     constraints = _constraints_block(state, switches, data)
     if STABLE_PREFIX:
         # 约束（规则为主，变化慢）在前，状态（每轮都变）在后
@@ -13049,6 +13096,45 @@ def dispatch(action, payload=None):
                 body["field"] = field_view["field"]
                 body["field_version"] = int(field_view.get("version") or 0)
                 body["arbiter"] = field_view.get("arbiter") or {}
+            # 面板要看的"核心读数"：七套系统、慢层、权重来源、该短说多少。
+            # 只读，不写；缺字段就不给，由面板显示破折号。
+            try:
+                from biocore_runtime import mindbase_bridge as _mbc0
+                _bs = _mbc0.load_state(store, session_id) or {}
+                if _bs:
+                    _systems = {}
+                    for _name in getattr(_mbc0, "SYSTEMS", ()) or ():
+                        _val = _bs.get("sys_" + str(_name))
+                        if isinstance(_val, (int, float)):
+                            _systems[str(_name)] = round(float(_val), 4)
+                    _core = {
+                        "valence": _bs.get("valence"),
+                        "arousal": _bs.get("arousal"),
+                        "stress": _bs.get("stress"),
+                        "mood": _bs.get("mood"),
+                        "load": _bs.get("allostatic_load"),
+                        "heart": _bs.get("heart"),
+                        "mb_emotion": _bs.get("mb_emotion") or {},
+                        "systems": _systems,
+                        "weights_source": _bs.get("weights_source") or "",
+                        "action": _bs.get("action") or "",
+                        "silent_beats": _bs.get("silent_beats"),
+                    }
+                    if _systems:
+                        _core["brevity"] = round(
+                            0.5 * float(_systems.get("RAGE") or 0.0)
+                            + 0.5 * float(_systems.get("FEAR") or 0.0), 4)
+                    try:
+                        _wr = _mbc0.wish_last(store, session_id) or {}
+                        if _wr:
+                            _core["wishes"] = {"wanted": _wr.get("wanted"),
+                                               "unmet": _wr.get("unmet"),
+                                               "sent": _wr.get("sent")}
+                    except Exception:
+                        pass
+                    body["core_readout"] = _core
+            except Exception:
+                pass
             if _perception is not None:
                 perception_view = _perception.summary(
                     store, session_id,

@@ -464,8 +464,93 @@
         ? ' · MB ' + fmt(Number(m.mb_approach) - Number(m.mb_avoid)) : '')
   }
 
+  /* 核心读数：第一次给全部，之后只报变动（跨档才算变） */
+  var CORE_LAST = null
+  var CORE_AT = 0
+
+  function coreBand(v) {
+    var n = Number(v)
+    if (!Number.isFinite(n)) return '-'
+    if (n >= 0.45) return 'high'
+    if (n >= 0.25) return 'mid'
+    return 'low'
+  }
+
+  function coreRow(label, value, text) {
+    return '<div class="core-cell" data-k="' + label + '"><span class="k">'
+      + label + '</span><span class="v">' + text + '</span></div>'
+  }
+
+  function renderCore(data) {
+    var core = (data && data.core_readout) || null
+    var board = $('coreBoard')
+    var log = $('coreLog')
+    var steady = $('coreSteady')
+    if (!board || !log) return
+    if (!core || !core.systems) {
+      board.innerHTML = '<div class="core-cell"><span class="k">CORE</span><span class="v">—</span></div>'
+      return
+    }
+    var systems = core.systems || {}
+    var now = Date.now()
+    var cells = []
+    var changes = []
+    Object.keys(systems).forEach(function (name) {
+      var v = Number(systems[name])
+      var band = coreBand(v)
+      if (CORE_LAST) {
+        var prev = CORE_LAST[name]
+        if (prev !== undefined && coreBand(prev) !== band) {
+          changes.push(name + ' ' + fmt(prev) + '→' + fmt(v))
+        }
+      }
+      cells.push(coreRow(name, v, fmt(v)))
+    })
+    cells.push(coreRow('MOOD', core.mood, fmt(core.mood)))
+    cells.push(coreRow('LOAD', core.load, fmt(core.load)))
+    cells.push(coreRow('HEART', core.heart, fmt(core.heart)))
+    cells.push(coreRow('BREVITY', core.brevity, fmt(core.brevity)))
+    if (core.weights_source) cells.push(coreRow('W', core.weights_source, String(core.weights_source)))
+    board.innerHTML = cells.join('')
+    // 慢层：变化超过一个阈值才记
+    if (CORE_LAST) {
+      if (CORE_LAST.__mood !== undefined && Math.abs(Number(core.mood) - CORE_LAST.__mood) >= 0.01) {
+        changes.push('mood ' + fmt(CORE_LAST.__mood) + '→' + fmt(core.mood))
+      }
+      if (CORE_LAST.__load !== undefined && Math.abs(Number(core.load) - CORE_LAST.__load) >= 0.02) {
+        changes.push('欠账 ' + fmt(CORE_LAST.__load) + '→' + fmt(core.load))
+      }
+      if (CORE_LAST.__w !== undefined && String(core.weights_source || '') !== CORE_LAST.__w) {
+        changes.push('权重 ' + (CORE_LAST.__w || '先验') + '→' + (core.weights_source || '先验'))
+      }
+    }
+    var snap = Object.assign({}, systems, {
+      __mood: Number(core.mood), __load: Number(core.load),
+      __w: String(core.weights_source || '')
+    })
+    if (!CORE_LAST) {
+      steady.textContent = '首次：全量'
+    } else if (changes.length) {
+      var t = new Date(now)
+      var hh = String(t.getHours()).padStart(2, '0')
+      var mm = String(t.getMinutes()).padStart(2, '0')
+      var li = document.createElement('li')
+      li.innerHTML = '<time>' + hh + ':' + mm + '</time><span>'
+        + changes.slice(0, 6).join('，') + '</span>'
+      log.insertBefore(li, log.firstChild)
+      while (log.children.length > 40) log.removeChild(log.lastChild)
+      steady.textContent = '刚变化'
+      CORE_AT = now
+    } else {
+      var mins = CORE_AT ? Math.round((now - CORE_AT) / 60000) : 0
+      steady.textContent = mins > 0 ? (mins + ' 分钟无变化') : '无变化'
+    }
+    CORE_LAST = snap
+  }
+
   function renderState(data) {
     renderBodyTruth(data)
+    try { renderCore(data) } catch (e) {}
     var on = live(data)
     setText('stateRelation', on ? joinRelation(data) : DASH)
     setText('stateTone', on ? (scalarLabel(data.tone, '') || DASH) : DASH)

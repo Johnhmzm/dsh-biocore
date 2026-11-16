@@ -1144,3 +1144,14 @@ body[data-tab='settings'] .card.open .field-wide { grid-column: auto; }
   body[data-tab='settings'] .card.open .field { grid-template-columns: minmax(0, 1fr); gap: 6px; }
 }
 
+
+.core-head{display:flex;align-items:center;gap:6px;margin:10px 0 4px;font-size:11px;letter-spacing:.08em;opacity:.75}
+.core-head.small{margin-top:8px}
+.core-board{display:grid;grid-template-columns:repeat(auto-fit,minmax(96px,1fr));gap:4px 8px;font-size:11px}
+.core-cell{display:flex;justify-content:space-between;gap:6px;padding:1px 0;border-bottom:1px dotted rgba(127,127,127,.25)}
+.core-cell .k{opacity:.6}
+.core-cell.changed .v{font-weight:700}
+.core-log{list-style:none;margin:0;padding:0;max-height:112px;overflow:auto;font-size:11px;line-height:1.5}
+.core-log li{display:flex;gap:6px;opacity:.85}
+.core-log time{opacity:.5;font-variant-numeric:tabular-nums}
+

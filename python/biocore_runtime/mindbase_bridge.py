@@ -1827,6 +1827,43 @@ def _gloss_path(store, session_id):
     return _body_path(store, session_id).replace(BODY_STATE_FILE, "sys_gloss.json")
 
 
+def _snapshot_path(store, session_id):
+    if not store or not session_id:
+        return ""
+    return _body_path(store, session_id).replace(BODY_STATE_FILE, "state_snapshot.json")
+
+
+def snapshot_get(store, session_id):
+    """上一次已经报给模型的状态（只报变动时用来对比）。"""
+    import json
+    path = _snapshot_path(store, session_id)
+    if not path:
+        return {}
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            doc = json.load(fh)
+        return doc if isinstance(doc, dict) else {}
+    except Exception:
+        return {}
+
+
+def snapshot_set(store, session_id, snap):
+    import json
+    import os
+    path = _snapshot_path(store, session_id)
+    if not path:
+        return False
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        tmp = path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump(snap or {}, fh, ensure_ascii=False)
+        os.replace(tmp, path)
+        return True
+    except Exception:
+        return False
+
+
 def gloss_get(store, session_id):
     """上一次报给模型的"心里状态"（词集）。单独成文件，避免被身体状态整份覆盖。"""
     import json
