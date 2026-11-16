@@ -140,7 +140,10 @@ MEMORY_CODES = str(os.environ.get("BIOCORE_MEMORY_CODES") or "0").strip().lower(
 # 打开后：常量（约束/人设）在前，会变的状态排在整块最后 —— 前缀才命中缓存。
 # 默认仍是 0，保持既有契约（boot 以状态开头、人设结尾）；生产用环境变量打开。
 # 人设只在 boot 注入一次（宿主开头就缓存了）；打开后每轮不再重复塞两千字。
-PERSONA_BOOT_ONLY = str(os.environ.get("BIOCORE_PERSONA_BOOT_ONLY") or "0").strip().lower() in ("1", "true", "on", "yes")
+# 2026-11-16 翻默认：**默认开**。3081 实测每轮注入 2,023 字、其中人设占 1,600+，
+# 前缀缓存基本失效；人设是常量，开场给过一次就够。要回到"每轮都塞"写
+# BIOCORE_PERSONA_BOOT_ONLY=0（关掉时行为与翻默认前逐字一致，测试钉着）。
+PERSONA_BOOT_ONLY = str(os.environ.get("BIOCORE_PERSONA_BOOT_ONLY") or "1").strip().lower() in ("1", "true", "on", "yes")
 STABLE_PREFIX = str(os.environ.get("BIOCORE_STABLE_PREFIX") or "0").strip().lower() in ("1", "true", "on", "yes")
 # 原子门禁：注入块要么整块成立，要么整块不注入，绝不交付半块。
 ATOMIC_BLOCKS = str(os.environ.get("BIOCORE_ATOMIC_BLOCKS") or "1").strip().lower() in ("1", "true", "on", "yes")
@@ -151,9 +154,15 @@ RETRIEVE_TEMP = float(os.environ.get("BIOCORE_RETRIEVE_TEMP") or 0.0)
 RETRIEVE_TAIL = float(os.environ.get("BIOCORE_RETRIEVE_TAIL") or 0.15)
 
 BODY_SWITCH_KEY = "body"
-# 默认值保持 0：改默认值会连只读路径的契约一起改掉（recall 会多写 mirror 文件）。
-# 要开就写配置 switches.body=true，或设环境变量 BIOCORE_BODY=1。
-BODY_ON = str(os.environ.get("BIOCORE_BODY") or "0").strip().lower() in ("1", "true", "on", "yes")
+# 缺省开（2026-11-16 翻默认）：身体层属于核心行为，主要路径就该带身体。
+# 要关就写 BIOCORE_BODY=0，或配置 switches.body=false —— 关着时逐字回到翻默认前的行为。
+# 每次现读环境变量（不是 import 时快照）：这样进程内也能开关，测试才能钉住"关掉=旧行为"。
+def _body_default_on():
+    return str(os.environ.get("BIOCORE_BODY") or "1").strip().lower() in (
+        "1", "true", "on", "yes")
+
+
+BODY_ON = _body_default_on()
 SENTENCE_RERANK_ON = str(os.environ.get("BIOCORE_SENTENCE_RERANK") or "1").strip().lower() not in ("0", "false", "off", "no")
 SENTENCE_RERANK_POOL = int(os.environ.get("BIOCORE_SENTENCE_RERANK_POOL") or 60)  # 兜底：_recall_param('pool')
 
@@ -207,6 +216,144 @@ SPEAK_NOISE = float(os.environ.get("BIOCORE_SPEAK_NOISE") or 0.6)
 SPONT_GAIN = float(os.environ.get("BIOCORE_SPONT_GAIN") or 0.05)
 SPONT_TAU_H = float(os.environ.get("BIOCORE_SPONT_TAU_H") or 1.5)
 REFRACTORY_BEATS = float(os.environ.get("BIOCORE_REFRACTORY_BEATS") or 6.0)
+
+# ---- 混合刺激噪声（BIOCORE_MIXED_NOISE，默认关；2026-11-16） ---------------
+# 旧路径把"这一拍开不开口"交给单个高斯（_amp·0.25·N(0,1)）。这里换成三路
+# 加权和：输入（随本轮刺激强度）、自发（Lévy 型重尾、按块持续）、体内（随
+# allostatic_load / sleep_debt / tension）。文献只给方向，不给常数：权重、α、
+# 跳跃率、块长都是"我们的选择"（数值与前后对比见 docs/NOISE-LEDGER.md）。
+#
+# 三条路的形状不一样，是要解释的东西不一样：
+#   · 输入噪声是白的（刺激每拍都新），幅度 ∝ 刺激强度；
+#   · 自发噪声必须是**慢的**：每拍独立的白噪声只会把同一个几何分布再抽一次，
+#     改的是开口次数，不是间隔分布的形状（几何分布 max/median ≈ ln n，与噪声无关）。
+#     所以它按块（默认 5 拍）持有一段 Lévy 型重尾合量，一段低值能连续压住几十拍；
+#   · 体内噪声是白的，但幅度随负荷/睡眠债/紧张变慢，所以它自己会漂。
+NOISE_DEFAULTS = {
+    "win": 0.55,        # 输入路权重（乘在刺激强度上）
+    "wspont": 0.85,     # 自发路权重（乘在 Lévy 合量上）
+    "wbody": 0.45,      # 体内路权重（乘在负荷/睡眠债/紧张上）
+    "levy_alpha": 1.5,  # 幂律跳跃的尾指数：P(J>x) = x^-α
+    "jump_p": 0.06,     # 每块发生一次大幅度跳跃的概率
+    "rho": 0.98,        # 块间衰减：1.0 = 永不忘，0 = 纯白噪声（控制组）
+    "block": 5.0,       # 一块几拍（60 秒一拍 → 300 秒）
+    "clip": 3.5,        # 单块合量的截断（防止一步跳穿整个分布）
+    "k": 0.85,          # 合量 → 开口增益的斜率：gain = clamp(1 + k·z, 0, cap)
+    "cap": 3.0,         # 增益上限（一次最多把这一拍的开口概率抬到 3 倍）
+}
+_SPONT_VAR = {}
+
+
+def _noise_opt(name):
+    """BIOCORE_NOISE_<名>，没有就用 NOISE_DEFAULTS（每次读，测试可 monkeypatch）。"""
+    raw = os.environ.get("BIOCORE_NOISE_" + str(name).upper())
+    if raw is None or str(raw).strip() == "":
+        return float(NOISE_DEFAULTS[name])
+    try:
+        return float(raw)
+    except Exception:
+        return float(NOISE_DEFAULTS[name])
+
+
+def _levy_step(rng, alpha, clip, jump_p):
+    """0.5·N(0,1) + 偶发幂律跳跃（stdlib only，不引新依赖）。
+
+    跳跃幅度 J = u^(-1/α)，u~U(0,1]：于是 P(J>x) = x^-α。α=1.5 时均值存在
+    （E[J]=3）、方差不存在 —— 这正是"重尾"：大多数步子很小，偶尔一大步。
+    """
+    step = 0.5 * rng.gauss(0.0, 1.0)
+    if rng.random() < max(0.0, min(1.0, jump_p)):
+        u = max(1e-9, rng.random())
+        mag = min(max(1.0, clip), u ** (-1.0 / max(0.6, alpha)))
+        step += mag if rng.random() < 0.5 else -mag
+    return step
+
+
+def _spont_walk(seed, block, alpha, rho, clip, jump_p, depth=24):
+    """第 block 块的自发合量：指数加权的 Lévy 步长和（块间记忆 = ρ^j）。
+
+    没有状态：第 b 块只由 (seed, b) 决定，所以同一 stamp 重放逐位相同，
+    也就不用为它新开一个持久化字段。24 块截断 + sqrt(1-ρ²) 归一：ρ 越大，
+    截断丢掉的尾巴越多、合量越窄，所以 ρ 的取值连同实测一起写进了台账。
+    """
+    import random as _rw
+    total = 0.0
+    for j in range(int(depth)):
+        rng = _rw.Random((int(seed) * 2654435761 + (int(block) - j) * 7919)
+                         % 2147483647)
+        total += float(rho) ** j * _levy_step(rng, alpha, clip, jump_p)
+    return max(-clip, min(clip, total * math.sqrt(max(0.0, 1.0 - rho * rho))))
+
+
+def _spont_var(alpha, rho, clip, jump_p):
+    """块间合量的方差：固定种子 256 块估出。
+
+    只用来把起念那一侧的合量归一到单位方差（开口用的是原尺度的 gain，
+    所以幅度随状态缩放不会被归一化抹掉）。改 ρ / 跳跃率时它跟着变，
+    不用人去手调一个魔数。
+    """
+    key = (round(float(alpha), 3), round(float(rho), 3),
+           round(float(clip), 3), round(float(jump_p), 4))
+    hit = _SPONT_VAR.get(key)
+    if hit is not None:
+        return hit
+    n = 256
+    total = 0.0
+    total2 = 0.0
+    for b in range(n):
+        z = _spont_walk(20261116, 700000 + b, alpha, rho, clip, jump_p)
+        total += z
+        total2 += z * z
+    mean = total / n
+    out = max(1e-6, total2 / n - mean * mean)
+    _SPONT_VAR[key] = out
+    return out
+
+
+def _mixed_noise_parts(stamp, stim, load, debt, tension, seed=0):
+    """三路加权和 → (z_std, gain, evidence)。
+
+    z_std：合量的单位方差版本（起念用，替掉旧的 N(0,1)）；
+    gain：均值 1 的开口增益（开口用，替掉旧的 1+amp·0.25·N(0,1)）；
+    evidence：三路读数（只在开关打开时进 why，便于对照）。
+    """
+    import random as _rn
+
+    def _u(value):
+        try:
+            return max(0.0, min(1.0, float(value)))
+        except Exception:
+            return 0.0
+
+    # SPEAK_NOISE 仍是总振幅：设成 0 等于不掷骰子（gain≡1）。
+    scale = max(0.0, float(SPEAK_NOISE)) / 0.6
+    alpha = _noise_opt("levy_alpha")
+    rho = max(0.0, min(0.999, _noise_opt("rho")))
+    clip = max(0.5, _noise_opt("clip"))
+    jump_p = _noise_opt("jump_p")
+    block_beats = max(1.0, _noise_opt("block"))
+    sig_in = _noise_opt("win") * (0.25 + 0.75 * _u(stim)) * scale
+    sig_spont = _noise_opt("wspont") * scale
+    sig_body = _noise_opt("wbody") * (0.60 * _u(load) + 0.30 * _u(debt)
+                                      + 0.10 * _u(tension)) * scale
+    block = int(float(stamp) // (60.0 * block_beats))
+    z_spont = _spont_walk(seed, block, alpha, rho, clip, jump_p)
+    # 两条白噪声各有自己的种子流：不消耗别处的 rng，重放逐位相同。
+    z_in = _rn.Random(int(stamp) % 2000003 + 101).gauss(0.0, 1.0)
+    z_body = _rn.Random(int(stamp) % 1999993 + 211).gauss(0.0, 1.0)
+    var_spont = (_spont_var(alpha, rho, clip, jump_p)
+                 if sig_spont > 0 else 0.0)
+    var = sig_in * sig_in + sig_body * sig_body + (sig_spont * sig_spont) * var_spont
+    z = sig_in * z_in + sig_spont * z_spont + sig_body * z_body
+    # 增益是"加法、均值 1"：E[gain]=1，于是平均开口次数不随噪声变，变的只是
+    # 什么时候开；截断（0 与 cap）会把均值拉偏一点，实测数在台账。
+    gain = max(0.0, min(_noise_opt("cap"), 1.0 + _noise_opt("k") * z))
+    evidence = {"in": round(sig_in, 4), "spont": round(sig_spont, 4),
+                "body": round(sig_body, 4), "z": round(z, 4),
+                "gain": round(gain, 4)}
+    return (z / math.sqrt(var) if var > 1e-9 else 0.0), gain, evidence
+
+
 MAX_ENTRIES = 500         # [engineering]
 SESSION_MAX_LEN = 80
 _HOUR = 3600.0
@@ -503,6 +650,37 @@ try:  # self-layer modules (all pure; optional so a stripped checkout still runs
 except Exception:  # pragma: no cover
     _x_directives = _self_intent = _value_order = None
     _boundary = _secrecy = _narrative = _dissonance = _attributor = None
+
+try:  # wire8 #12: state self-esteem (Leary 1995 sociometer) + the four needs
+    from biocore_model import self_esteem as _self_esteem
+    from biocore_model import needs_esteem as _needs_esteem
+except Exception:  # pragma: no cover
+    _self_esteem = _needs_esteem = None
+
+try:  # wire8 #13: the Amsel frustration curve behind repeated blocked attempts
+    from biocore_model import frustration_curve as _frustration
+except Exception:  # pragma: no cover
+    _frustration = None
+
+try:  # wire8 #14: the Vaillant ladder (denial / rationalization / projection / displacement)
+    from biocore_model import defense_mechanisms as _defense
+except Exception:  # pragma: no cover
+    _defense = None
+
+try:  # wire8 #15: what waiting for a reply feels like from the inside
+    from biocore_model import waiting_sense as _waiting
+except Exception:  # pragma: no cover
+    _waiting = None
+
+try:  # wire8 #17: theory of mind from message shape (lengths / delays)
+    from biocore_model import social_theory as _social_theory
+except Exception:  # pragma: no cover
+    _social_theory = None
+
+try:  # wire8 #18: perception -> decision -> action -> feedback -> learning, per send
+    from biocore_model import autonomy_loop as _autonomy_loop
+except Exception:  # pragma: no cover
+    _autonomy_loop = None
 
 
 # ---------------------------------------------------------------- utilities
@@ -1675,6 +1853,26 @@ def _embedding_provider(store):
         cfg, _rerank = _vector_space_config(store)
     except Exception:
         cfg = None
+    # 接线（A1）：`BIOCORE_EMBED_LOCAL=1` 且没有远端配置时，改用仓库里现成的
+    # 本地 int8 ONNX（biocore_memory/embedding_local.py，CPU、512 维）。
+    # 开关关着时这一段不执行，返回值与接线前逐字一致（仍是 None）。
+    try:
+        from biocore_memory.recall import embedding as _emb_wire
+        if _emb_wire.embed_local_wired():
+            remote = str((cfg or {}).get('base_url') or '').strip()
+            model = str((cfg or {}).get('model') or '').strip()
+            if not remote and not model:
+                provider = _emb_wire.load_provider({'embedding_mode': 'local'})
+                if provider is not None:
+                    local_cfg = dict(cfg or {})
+                    local_cfg['model'] = _emb_wire.local_model_name()
+                    local_cfg['dim'] = int(getattr(provider, 'dim', 0) or 0)
+                    return provider, local_cfg
+    except Exception as exc:
+        if not _EMBED_LOG_LIMIT['warned']:
+            _EMBED_LOG_LIMIT['warned'] = True
+            logger.warning("[vector] 本地 embedding 不可用：%s: %s",
+                           type(exc).__name__, str(exc)[:120])
     if not cfg or not str(cfg.get('model') or '').strip():
         return None, None
     try:
@@ -1716,8 +1914,12 @@ def _sessions_of(store, session=None):
                   if path.is_dir() and (path / 'memory.db').is_file())
 
 
-def _missing_rows(store, session_id, table, limit=None):
-    """{table} 里 vector IS NULL 的行：[{id, text}]（只读）。"""
+def _missing_rows(store, session_id, table, limit=None, replace=False):
+    """{table} 里 vector IS NULL 的行：[{id, text}]（只读）。
+
+    `replace=True`（A1 全量重嵌）：不看有没有向量，整表都取回来重算。
+    缺省 False —— 行为与接线前一致。
+    """
     root = _store_root(store)
     if root is None:
         return []
@@ -1732,7 +1934,9 @@ def _missing_rows(store, session_id, table, limit=None):
     except Exception:
         return []
     try:
-        sql = 'SELECT id, text FROM %s WHERE vector IS NULL' % table
+        sql = 'SELECT id, text FROM %s' % table
+        if not replace:
+            sql += ' WHERE vector IS NULL'
         args = []
         if limit:
             sql += ' LIMIT ?'
@@ -1961,11 +2165,15 @@ def vectors_check(store, session=None):
     return result
 
 
-def vectors_backfill(store, session=None, limit=200):
+def vectors_backfill(store, session=None, limit=200, replace=False):
     """补齐缺失向量：entries / units / compactions 都补；幂等、可反复跑。
 
     只调 embedding（不调 chat）。每批最多 limit 行，超出留给下一次——这样它既能在
     面板里"一键补齐"，也能在 turn_end 后做一次很小的兜底。
+
+    `replace=True`（A1）：不看有没有向量，entries / units 整表重算并覆盖写入。
+    换后端（远端 1024 维 → 本地 512 维）时只能这么做：两种维度混在一个库里，
+    `meta['vector_dim']` 只能对一个，读回来必定一半是错的。
     """
     started = time.time()
     root = _store_root(store)
@@ -1991,7 +2199,7 @@ def vectors_backfill(store, session=None, limit=200):
 
     for sid in sessions:
         # ---- entries
-        rows = _missing_rows(store, sid, 'entries', limit=budget)
+        rows = _missing_rows(store, sid, 'entries', limit=budget, replace=replace)
         if rows:
             vectors = embed_batch([row['text'] for row in rows])
             if len(vectors) == len(rows):
@@ -2015,7 +2223,7 @@ def vectors_backfill(store, session=None, limit=200):
                 finally:
                     conn.close()
         # ---- units
-        rows = _missing_rows(store, sid, 'units', limit=budget)
+        rows = _missing_rows(store, sid, 'units', limit=budget, replace=replace)
         if rows:
             vectors = embed_batch([row['text'] for row in rows])
             if len(vectors) == len(rows):
@@ -5911,6 +6119,14 @@ def _sentence_recall_block(store, session_id, query, entries, events, payload=No
         # Always order by score. This used to run only when a concept pin
         # existed, so an ordinary query got the pool in chronological order --
         # the block then had nothing to do with the question.
+        # 峰值召回（A3）：`BIOCORE_PEAK_RECALL=1` 时把"当时多激动"折进分数。
+        # 关着时这一段不执行，scored 与改动前逐项相同（测试钉着"关掉一致"）。
+        try:
+            from biocore_runtime import peak_recall as _peak
+            if _peak.enabled() and scored:
+                scored = _peak.boost_rows(scored)
+        except Exception as exc:
+            logger.warning("[peak] 跳过：%s: %s", type(exc).__name__, str(exc)[:100])
         scored = sorted(scored, key=lambda pair: (
             0 if str(pair[1].get("id") or "") in _pinned else 1,
             -float(pair[0])))
@@ -6651,6 +6867,11 @@ class ModeDisabled(RuntimeError):
 
 
 def _feature_enabled(store, name, payload=None):
+    # body 只有一个判定点（P0-2）：走 _body_enabled，那边把 env 放在最前面。
+    # 不这样做的话，CORE_DEFAULTS 里的 body=True 会盖住 BIOCORE_BODY=0，
+    # "显式关"就失效了（tests/test_memory_recall_readonly.py 正好钉这一条）。
+    if name == BODY_SWITCH_KEY:
+        return bool(_body_enabled(store, payload))
     data = payload if isinstance(payload, dict) else {}
     if isinstance(data.get(name), bool):
         return bool(data[name])
@@ -6664,12 +6885,31 @@ def _feature_enabled(store, name, payload=None):
     except Exception:
         pass
     if name == BODY_SWITCH_KEY:
-        return bool(BODY_ON)
+        return bool(_body_default_on())
     return False
 
 
 _STRICT_FEATURES = str(os.environ.get("BIOCORE_STRICT_FEATURES") or "").strip().lower() in ("1", "true", "on", "yes")
 _seen_disabled = set()
+
+
+def _feature_source(store, name, payload=None):
+    """这个开关**是哪一层**说的（P0-2 诊断）：「之前只报 disabled，说不出谁关的」。"""
+    data = payload if isinstance(payload, dict) else {}
+    if isinstance(data.get(name), bool):
+        return "payload.%s=%s" % (name, data[name])
+    nested = data.get("switches")
+    if isinstance(nested, dict) and isinstance(nested.get(name), bool):
+        return "payload.switches.%s=%s" % (name, nested[name])
+    try:
+        switches = _effective_switches(store, None)
+        if isinstance(switches.get(name), bool):
+            return "config.switches.%s=%s" % (name, switches[name])
+    except Exception:
+        pass
+    if name == BODY_SWITCH_KEY:
+        return "env BIOCORE_BODY=%r（缺省开）" % (os.environ.get("BIOCORE_BODY"),)
+    return "缺省"
 
 
 def _require_feature(store, name, payload=None):
@@ -6680,7 +6920,8 @@ def _require_feature(store, name, payload=None):
         raise ModeDisabled("feature disabled: %s" % name)
     if name not in _seen_disabled:
         _seen_disabled.add(name)
-        logger.warning("[feature] %s disabled — 相关能力整块跳过（不产生半成品数据）", name)
+        logger.warning("[feature] %s disabled — 相关能力整块跳过（不产生半成品数据）；"
+                       "判定来源：%s", name, _feature_source(store, name, payload))
     return False
 
 
@@ -6689,13 +6930,14 @@ def _require_feature(store, name, payload=None):
 COMMIT_SPEAK_GAIN = float(os.environ.get("BIOCORE_COMMIT_SPEAK_GAIN") or 0.15)
 
 
-# 预测误差 → 学习率（predictor 的 learning_rate_scale）：默认关。
-# 关着时 RLS 的 λ 与改动前逐字一致（调用方不传 lam）。
+# 预测误差 → 学习率（predictor 的 learning_rate_scale）：缺省开（2026-11-16 翻默认）。
+# 写 BIOCORE_PREDICTOR_LR=0 关掉；关着时 RLS 的 λ 与改动前逐字一致（调用方不传 lam）。
 PREDICTOR_LR_BASE_SCALE = 0.6      # learning_rate_scale 的下界，用来把 0 归一成"不放大"
 
 
 def _predictor_lr_enabled():
-    return str(os.environ.get("BIOCORE_PREDICTOR_LR") or "0").strip().lower() in (
+    """缺省开（2026-11-16 翻默认）；写 BIOCORE_PREDICTOR_LR=0 关。"""
+    return str(os.environ.get("BIOCORE_PREDICTOR_LR") or "1").strip().lower() in (
         "1", "true", "on", "yes")
 
 
@@ -6725,13 +6967,26 @@ def _surprise_lambda(payload=None):
 
 
 def _commitment_enabled():
-    """承诺接线开关：BIOCORE_COMMITMENT，缺省 0（开 = 1/true/on/yes）。"""
-    return str(os.environ.get("BIOCORE_COMMITMENT") or "0").strip().lower() in (
+    """承诺接线开关：BIOCORE_COMMITMENT，缺省开（2026-11-16 翻默认；写 0 关）。
+
+    关掉时 L1–L5 与 turn_end 的 kind 逐字回到翻默认前（tests/test_commitment_wiring.py）。
+    """
+    return str(os.environ.get("BIOCORE_COMMITMENT") or "1").strip().lower() in (
         "1", "true", "on", "yes")
 
 
 def _body_enabled(store, payload=None):
-    """body: payload flag > switches config > env > default OFF."""
+    """body: **env > payload flag > switches config > 缺省开**。
+
+    顺序与宿主侧 lib/modules/bio-heartbeat.js 的 bodyEnabled() 逐条一致：
+    环境变量先判（两个方向都算数），这样测试与运维写的 BIOCORE_BODY=0 一定生效，
+    不会被 CORE_DEFAULTS 里的 body:true 盖掉。
+    """
+    raw = str(os.environ.get("BIOCORE_BODY") or "").strip().lower()
+    if raw in ("0", "false", "off", "no"):
+        return False
+    if raw in ("1", "true", "on", "yes"):
+        return True
     data = payload if isinstance(payload, dict) else {}
     if isinstance(data.get(BODY_SWITCH_KEY), bool):
         return bool(data[BODY_SWITCH_KEY])
@@ -6745,7 +7000,7 @@ def _body_enabled(store, payload=None):
             return bool(switches[BODY_SWITCH_KEY])
     except Exception:
         pass
-    return bool(BODY_ON)
+    return bool(_body_default_on())
 
 
 def _affect_scope_values(store, session_id):
@@ -7391,6 +7646,27 @@ def inject_block(session_id, store, max_chars=None, top_k=TOP_K,
                 body_turn(store, session_id, text_query, payload)
     except Exception as exc:
         logger.warning("[body] feed failed: %s: %s", type(exc).__name__, str(exc)[:120])
+    # 脱敏（A5）：交付口唯一一处，默认关。`BIOCORE_REDACT` 没开时 mask_block
+    # 是恒等函数，返回的 _core 与改动前逐字节一致（开关关掉 = 行为不变）。
+    # 只改"念给模型听"的这一段；归档原文（entries.text / entries.raw）不动，
+    # 原文另存可逆映射（密文），见 biocore_runtime/redact.py 的头注释。
+    try:
+        from biocore_runtime import redact as _redact
+        if _redact.enabled() and isinstance(_core, dict) and _core.get("text"):
+            _masked, _hits = _redact.mask_block(store, session_id,
+                                               _core.get("text"))
+            if _hits:
+                _core = dict(_core, text=_masked, chars=len(_masked),
+                             redacted=len(_hits))
+    except Exception as exc:
+        logger.warning("[redact] 跳过：%s: %s", type(exc).__name__, str(exc)[:100])
+    # [mirror patch] 留痕不只走 dispatch：worker 不可用时宿主退回 spawn-per-call，
+    # 走的是 bridge.memory_inject -> 本函数，那段路径以前一行 injection.log 都没有。
+    try:
+        if isinstance(_core, dict) and _core.get("text"):
+            _injection_trace(store, session_id, _core.get("text"), None, None)
+    except Exception:
+        pass
     return _core
 
 
@@ -7747,12 +8023,12 @@ def _body_loop_impl(store, session_id, now=None, seed=BODY_LOOP_SEED, payload=No
         # ---------- L5 意图 <- L4 ----------
         intent_text = ""
         pending = None
-        # 话题封闭（BIOCORE_TOPIC_CLOSURE，缺省关）：关着时 _closure 恒 1.0
+        # 话题封闭（BIOCORE_TOPIC_CLOSURE，缺省开；写 0 关）：关着时 _closure 恒 1.0
         _closure = 1.0
         _topic_key = ""
-        # 解释风格（BIOCORE_ATTRIB_STYLE，缺省关）：关着时 _attrib 恒 1.0
+        # 解释风格（BIOCORE_ATTRIB_STYLE，缺省开；写 0 关）：关着时 _attrib 恒 1.0
         _attrib = 1.0
-        # 照顾的代价（BIOCORE_CARE_FATIGUE，缺省关）：关着时 _care_factor 恒 1.0
+        # 照顾的代价（BIOCORE_CARE_FATIGUE，缺省开；写 0 关）：关着时 _care_factor 恒 1.0
         _care_factor = 1.0
         # 起念不该要求"先难受"：果蝇的自发行为不需要外部刺激。
         # 强度 = 情绪（由头）+ 噪声；超过 0 就起念，没有情绪也可以被噪声推一下。
@@ -7817,6 +8093,13 @@ def _body_loop_impl(store, session_id, now=None, seed=BODY_LOOP_SEED, payload=No
                     - 0.3 * max(0.0, -_dom_i)))
                 import random as _ri
                 _gi = _ri.Random(int(stamp) % 2000003).gauss(0.0, 1.0)
+                if _w8_on("MIXED_NOISE"):
+                    # 混合刺激噪声：起念这一侧拿合量的单位方差版本（替掉 N(0,1)）
+                    _gi, _mix_gain, _mix_ev = _mixed_noise_parts(
+                        stamp, _lvl, load0,
+                        (float(_needs4.get("debt_norm") or 0.0)
+                         if _needs4_on else 0.0),
+                        tension, seed=int(seed))
                 _drive = float(_lvl) - 0.30 + _amp_i * 0.30 * _gi
                 # 过线（不适度压过阈值）时一定会起念：那说明"有事憋着"，
                 # 不该被一次噪声抵消。平静时仍由 情绪+噪声 决定，可能不起念。
@@ -7908,6 +8191,17 @@ def _body_loop_impl(store, session_id, now=None, seed=BODY_LOOP_SEED, payload=No
             _hazard *= _closure
             # 解释风格：内-稳定归因攒够两次之后，开口按风格压低（0.5–1.0）
             _hazard *= _attrib
+            # #13 挫折曲线（Amsel 1958）：连着几拍"想开口却没等到回应"，先急
+            # （n≤3 上升）再平（4–8）再放弃（>8 下降）。默认关，关着时这一行不存在。
+            _frust_n = 0
+            _frust = 1.0
+            if _w8_on("FRUSTRATION") and _frustration is not None:
+                try:
+                    _frust_n = max(0, int(float(state.get("frustration_n") or 0.0)))
+                    _frust = float(_frustration.frustration_mult(_frust_n))
+                    _hazard *= _frust
+                except Exception:
+                    _frust = 1.0
             # 自发通路（默认网络那一路）：与由头无关，只随空闲和好奇上升。
             # 没有它，CARE/PLAY 的底会一直充当由头，长尾永远出不来。
             try:
@@ -7924,7 +8218,16 @@ def _body_loop_impl(store, session_id, now=None, seed=BODY_LOOP_SEED, payload=No
                 pass
             _p_speak = 1.0 - _m.exp(-_hazard)
             _g = _r.Random(int(stamp) % 1000003).gauss(0.0, 1.0)
-            _p_final = max(0.0, min(0.95, _p_speak * (1.0 + _amp * 0.25 * _g)))
+            _noise_ev = None
+            if _w8_on("MIXED_NOISE"):
+                # 混合刺激噪声：均值 1 的增益 —— 平均开口次数不变，间隔被拉出长尾
+                _, _gain_mix, _noise_ev = _mixed_noise_parts(
+                    stamp, _lvl, load0,
+                    (float(_needs4.get("debt_norm") or 0.0) if _needs4_on else 0.0),
+                    tension, seed=int(seed))
+                _p_final = max(0.0, min(0.95, _p_speak * _gain_mix))
+            else:
+                _p_final = max(0.0, min(0.95, _p_speak * (1.0 + _amp * 0.25 * _g)))
             if _withdraw:
                 # 恐惧/愤怒把开口这一侧压低（缩着的时候不会突然开口）
                 _p_final = max(0.0, min(0.95, _p_final * (1.0 - 0.45 * _withdraw)))
@@ -7956,8 +8259,20 @@ def _body_loop_impl(store, session_id, now=None, seed=BODY_LOOP_SEED, payload=No
                 state["silent_beats"] = float(_silent + 1)
                 state["beats_since_spoke"] = float(
                     state.get("beats_since_spoke") or 0.0) + 1.0
+            # #13 记一笔：这一拍她想开口（speak）就是一次"想要却没落地"，攒着等对方开口；
+            # 对方一说话（turn_start）清零。只在开的时候写盘，关着时状态文件一字不变。
+            if _w8_on("FRUSTRATION") and _frustration is not None:
+                try:
+                    if over or speak_action == "speak":
+                        state["frustration_n"] = float(min(64, _frust_n + 1))
+                    _mb.save_body_state(store, sid, state)
+                except Exception:
+                    pass
             speak_reason = {"silent_beats": _silent, "reason": round(_reason, 3),
                             "amp": round(_amp, 3), "p_speak": round(_p_final, 4)}
+            if _noise_ev is not None:
+                # 证据面：三路噪声的读数（开关关着时不多这个键）
+                speak_reason["noise"] = _noise_ev
             if _closure < 1.0:
                 # 证据面：这一拍的开口被"话题已提过"压过（开关关着时不多这个键）
                 speak_reason["topic_closed"] = round(_closure, 3)
@@ -7965,6 +8280,9 @@ def _body_loop_impl(store, session_id, now=None, seed=BODY_LOOP_SEED, payload=No
                 speak_reason["attrib_style"] = round(_attrib, 3)
             if _care_factor < 1.0:
                 speak_reason["care_fatigue"] = round(_care_factor, 3)
+            if _frust != 1.0:
+                speak_reason["frustration"] = round(_frust, 3)
+                speak_reason["frustration_n"] = _frust_n
             if isinstance(_systems, dict) and _systems:
                 speak_reason["systems"] = {k: round(float(_systems.get(k) or 0.0), 3)
                                            for k in _mb.SYSTEMS}
@@ -8643,9 +8961,10 @@ def _state_block(state, budget, phase="turn", payload=None):
                 _thr = 0.01 if _k in ("mood", "load", "heart") else 0.02
                 if _d >= _thr:
                     _diffs.append("%s%+.2f→%+.2f" % (_label, float(_old_v), _now_v))
-        # 默认全量：这份契约有测试钉着，改动要显式开启（BIOCORE_STATE_DELTA=1）。
-        # 开了之后：首轮全量，之后只报变动；变动项多于 4 个也退回全量。
-        _delta_on = str(os.environ.get("BIOCORE_STATE_DELTA") or "").strip() in ("1", "true", "on")
+        # 缺省只报变动（2026-11-16 翻默认）：首轮全量，之后只报变动；
+        # 变动项多于 4 个也退回全量。写 BIOCORE_STATE_DELTA=0 退回"永远全量"。
+        _delta_on = str(os.environ.get("BIOCORE_STATE_DELTA") or "1").strip() in (
+            "1", "true", "on", "yes")
         _boot_like = (phase == "boot") or not _prev or not _delta_on
         if _boot_like or len(_diffs) > 4:
             _text_state = "此刻：" + numbers   # 全量
@@ -8822,10 +9141,18 @@ def _injection_trace(store, session_id, text, state, payload=None):
     import os as _os
     try:
         sid = sanitize_session_id(session_id)
+        # [mirror patch] A caller that forgets payload['store'] used to write
+        # nothing at all ("worker is up but injection.log is missing"). Fall back
+        # to the same default store dispatch() uses.
+        store = store or _default_store()
         path = _os.path.join(str(store), "sessions", sid, "injection.log")
         # 一轮里 prompt_block 会被调两次（inject 取文本 + turn_start 内部），
         # 内容相同就只记一次，否则日志里每轮出现两行一样的。
-        _sig = "%d|%s" % (len(str(text or "")), str(text or "")[:80])
+        # [mirror patch] len+前80字 会把「长度相同、只在 80 字之后变了」的两轮
+        # 当成同一段吞掉（状态行/约束常排在尾部）。整段取哈希，5 秒窗口仍只用于
+        # 「同一次 turn_start 里 prompt_block 被调两次」这一种重复。
+        _sig = "%d|%s" % (len(str(text or "")), hashlib.sha1(
+            str(text or "").encode("utf-8", "replace")).hexdigest()[:16])
         _prev = _INJECTION_LAST.get(sid)
         _now_ms = time.time()
         if _prev and _prev[0] == _sig and (_now_ms - _prev[1]) < 5.0:
@@ -8868,10 +9195,15 @@ def prompt_block(payload):
         text = (constraints + "\n" + state_text).strip()
     else:
         text = (state_text + "\n" + constraints).strip()
-    try:
-        _note_prefix(session_id, text)
-    except Exception:
-        pass
+    # 前缀命中率只是度量：拿不到会话就跳过，绝不能因此把注入块整块搞掉。
+    # 以前这里写的是裸 session_id —— prompt_block 里根本没有这个变量，NameError
+    # 被 except 吞掉，于是 PREFIX_STATS 永远是空的（pyflakes: undefined name）。
+    _prefix_sid = str(data.get("session_id") or "").strip()
+    if _prefix_sid:
+        try:
+            _note_prefix(_prefix_sid, text)
+        except Exception:
+            pass
     if _lifecycle is not None:
         try:
             repair = _lifecycle.repair_lines(data.get("store"))
@@ -8913,7 +9245,11 @@ def prompt_block(payload):
     # 人设一开场就在最前面给过了（boot 那条）；每轮再塞一遍等于把两千字常量
     # 重复注入，还把会变的状态挤到后面，缓存也命不中。
     persona_line = persona_prompt_line(data)
+    persona_dropped = False
     if PERSONA_BOOT_ONLY and phase == "turn":
+        # turn 路径不留任何人设残留：文本、sections、前缀分支三处一起清，
+        # 免得某条分支（STABLE_PREFIX）把两千字常量又塞回缓存前缀里。
+        persona_dropped = bool(persona_line)
         persona_line = ""
     if STABLE_PREFIX:
         # 常量在前、会变的状态在最后：前缀命中缓存，每轮只有尾巴是新的。
@@ -8932,6 +9268,9 @@ def prompt_block(payload):
         sections["expression"] = expression
     if persona_line:
         sections["persona"] = persona_line
+    elif persona_dropped:
+        # 明确记一笔"这一轮按 boot_only 摘掉了人设"，面板/自检可查，不静默
+        sections["persona_dropped"] = "boot_only"
     if policy.get("enabled"):
         sections["expression_policy"] = policy
     # 留痕放在这里：无论宿主走 turn_start 还是 inject，最终都从这里出文本。
@@ -10118,8 +10457,26 @@ def proactive_tick(session_id, last_human_ts=None, switches=None, store=None,
                           PROACTIVE_DEFAULT_MIN_GAP, 10, 48 * 60)
     min_gap = int(round(base_gap * (1.0 + reluctance + strain)))
     min_gap = max(10, min(48 * 60, min_gap))
-    result["thresholds"] = {"min_gap": min_gap, "reluctance": round(reluctance, 3),
-                            "strain": round(strain, 3)}
+    thresholds = {"reluctance": round(reluctance, 3), "strain": round(strain, 3)}
+    # #18 被忽略的账：发出去几次都没回音 → 间隔拉长（最多 1.5 倍）。
+    # 这是唯一的闭环：发→有没有回→改下一次的间隔。默认关。
+    _loop_acc, _loop_learn = {}, {}
+    if _w8_on("AUTONOMY_LOOP") and _autonomy_loop is not None:
+        try:
+            _loop_acc, _loop_learn = _loop_load(store, sid)
+            _loop_acc = _autonomy_loop.settle(_loop_acc, now_ms / 1000.0)
+            _rate = _autonomy_loop.response_rate(_loop_acc)
+            _seen = int(_loop_acc.get("responded_count", 0) or 0) + int(
+                _loop_acc.get("ignored_count", 0) or 0)
+            if _seen >= 4:
+                min_gap = int(round(min_gap * (1.0 + 0.5 * (1.0 - _rate))))
+                min_gap = max(10, min(48 * 60, min_gap))
+                thresholds["reply_rate"] = round(_rate, 3)
+                thresholds["attempts"] = _seen
+        except Exception:
+            _loop_acc, _loop_learn = {}, {}
+    thresholds["min_gap"] = min_gap
+    result["thresholds"] = thresholds
     if last_ms <= 0 or gap_minutes < min_gap:
         return _stop("too_soon")
 
@@ -10160,6 +10517,64 @@ def proactive_tick(session_id, last_human_ts=None, switches=None, store=None,
         result["trust"] = round(trust, 4)
         return _stop("not_close")
 
+    # #15 等待感：间隔 + 亲近 + 时段 + 心情 揉成一个感受标签。等久了会"赌气"，
+    # 赌气的时候不主动开口（这一条以前不存在：间隔只改门槛，不改要不要开口）。
+    if _w8_on("WAITING") and _waiting is not None:
+        try:
+            _wv = _num(session_state.get("valence",
+                                         core_now.get("valence", 0.0)), 0.0)
+            _wa = _num(session_state.get("arousal",
+                                         core_now.get("arousal", 0.5)), 0.5)
+            _rel_sig = {"stage": str(rel.get("stage") or ""),
+                        "closeness": _num(rel.get("closeness",
+                                                 core_now.get("closeness", 0.5)),
+                                          0.5)}
+            _wsense = _waiting.waiting_sense(
+                gap_seconds=(max(0.0, now_ms - last_ms) / 1000.0) if last_ms else 0.0,
+                last_emotion={"valence": _wv, "arousal": _wa},
+                relationship=_rel_sig, awaiting_reply=True,
+                hour=time.localtime(now_ms / 1000.0).tm_hour)
+            result["waiting"] = {"waiting": _wsense.get("waiting"),
+                                 "feeling": _wsense.get("feeling"),
+                                 "threshold_hit": bool(_wsense.get("threshold_hit"))}
+            if str(_wsense.get("feeling") or "") == "赌气":
+                return _stop("sulking")
+        except Exception:
+            pass
+
+    # #17 心智理论：他最近几条的字数与间隔 → “有点忙” → 这一拍不打扰。
+    # 只用条数与时间差（数值），不读字面；模块的 daily_self_life/share_line/pick_question
+    # 会写句子，那部分按层边界不接（生物层不写 prompt）。
+    if _w8_on("SOCIAL_THEORY") and _social_theory is not None:
+        try:
+            _doc = load_memory(store, sid)
+            _rows = [row for row in (_doc.get("entries") or [])
+                     if isinstance(row, dict) and str(row.get("role") or "") == "user"
+                     and not row.get("deleted")]
+            _rows.sort(key=lambda row: _num(row.get("ts"), 0.0))
+            _msgs = []
+            _prev_ts = None
+            for _row in _rows[-5:]:
+                _ts = _num(_row.get("ts"), 0.0)
+                _delay = (_ts - _prev_ts) if _prev_ts is not None else 0.0
+                _msgs.append({"text": str(_row.get("text") or ""),
+                              "delay_s": max(0.0, _delay)})
+                _prev_ts = _ts
+            if _msgs:
+                _um = _social_theory.infer_user_model(
+                    _msgs, now=now_ms / 1000.0,
+                    dims=_body_dims_from_payload(
+                        {"state": session_state}),
+                    valence=_num(session_state.get("valence"), 0.0))
+                result["user_model"] = {
+                    "busy": str(_um.get("busy_hint") or ""),
+                    "mood": str(_um.get("mood_hint") or ""),
+                    "engagement": _um.get("engagement")}
+                if str(_um.get("busy_hint") or "") == "busy":
+                    return _stop("user_busy")
+        except Exception:
+            pass
+
     loops = _proactive_commitments(store, sid)
     loop = _proactive_pick(loops)
     if require_loop and loop is None:
@@ -10195,11 +10610,198 @@ def proactive_tick(session_id, last_human_ts=None, switches=None, store=None,
                        data.get("proactiveIntervalMinutes",
                                 data.get("proactive_interval_minutes")),
                        30, PROACTIVE_MIN_INTERVAL, PROACTIVE_MAX_INTERVAL)})
+    # #18 记下这次尝试（谁发的、多重、多长），等对方开口时结算。默认关。
+    if _w8_on("AUTONOMY_LOOP") and _autonomy_loop is not None:
+        try:
+            _loop_acc = _autonomy_loop.record_attempt(
+                _loop_acc, now_ms / 1000.0,
+                code=str((loop or {}).get("key") or "loop")[:24],
+                weight=float(trust or 0.0), text_len=len(text))
+            _loop_save(store, sid, _loop_acc, _loop_learn)
+        except Exception:
+            pass
     if state_path is not None:
         _atomic_write(state_path, {"lastSentAt": now_ms,
                                    "sent": (sent + [now_ms])[-24:],
                                    "lastText": text[:80], "ts": now_ms})
     return result
+
+
+# ---------------------------------------------------------------- wire8 state
+# 八个小模块的接线层：一个开关一项（BIOCORE_<名>），一项一份小 JSON，
+# 关掉时这条路径一行都不跑（与改动前逐字一致）。只增不改：这里只读已有状态、
+# 写自己的旁车文件，不改任何既有字段的语义。
+# 2026-11-16 翻默认：这六项属于核心行为，缺省开；写 BIOCORE_<名>=0 关。
+# 逐个翻的（每加一个名字，跑一次那一项的测试，再进下一个）；不在表里的名字仍缺省关。
+_W8_DEFAULT_ON = ("SELF_ESTEEM", "FRUSTRATION", "DEFENSE", "WAITING",
+                  "SOCIAL_THEORY", "AUTONOMY_LOOP")
+
+
+def _w8_on(name, default=None):
+    """BIOCORE_<名>：本表里的缺省开（写 0 关），其余缺省关（写 1 开）。"""
+    key = str(name)
+    if default is None:
+        default = "1" if key in _W8_DEFAULT_ON else "0"
+    raw = os.environ.get("BIOCORE_" + key) or default
+    return str(raw).strip().lower() in ("1", "true", "on", "yes")
+
+
+def _w8_path(store, session_id, key):
+    directory = session_dir(store, session_id)
+    return (directory / ("wire8_%s.json" % key)) if directory is not None else None
+
+
+def _w8_load(store, session_id, key):
+    path = _w8_path(store, session_id, key)
+    doc = _load_json(path, {}) if path is not None else {}
+    return doc if isinstance(doc, dict) else {}
+
+
+def _w8_save(store, session_id, key, doc):
+    path = _w8_path(store, session_id, key)
+    if path is None:
+        return False
+    try:
+        _atomic_write(path, doc)
+        return True
+    except Exception:
+        return False
+
+
+# --- #18 the proactive loop: one attempt per send, credit only if he answers
+def _loop_load(store, session_id):
+    doc = _w8_load(store, session_id, "autonomy")
+    acc = doc.get("acc") if isinstance(doc.get("acc"), dict) else {}
+    learning = doc.get("learning") if isinstance(doc.get("learning"), dict) else {}
+    return dict(acc), dict(learning)
+
+
+def _loop_save(store, session_id, acc, learning):
+    _w8_save(store, session_id, "autonomy", {"acc": acc, "learning": learning,
+                                             "ts": round(time.time(), 3)})
+
+
+# --- #12 state self-esteem: one event per turn + regression to baseline
+def _self_esteem_event(data):
+    """Classify this turn from the seven appraisal dims; numbers only, no word list.
+
+    hit/blame 高 = 这一下是冲她来的（自尊被削）；goal 高且没被伤 = 这一下成了
+    （自尊被抬）。判据只用数值，所以换语言/换说法不影响。
+    """
+    dims = _body_dims_from_payload(data)
+    if not dims:
+        return ""
+    goal = _num(dims.get("goal"), 0.0)
+    blame = _num(dims.get("blame"), 0.0)
+    hit = _num(dims.get("hit"), 0.0)
+    if blame >= 0.6 or hit >= 0.7:
+        return "insulted"
+    if goal >= 0.5 and hit <= 0.3:
+        return "praised"
+    return ""
+
+
+def _self_esteem_tick(store, session_id, now, event=""):
+    """One step of the state self-esteem: decay toward baseline, then this turn's event."""
+    if _self_esteem is None or store is None:
+        return {}
+    doc = _w8_load(store, session_id, "esteem")
+    state = dict(doc) if doc else _self_esteem.initial(now)
+    state = _self_esteem.decay(state, now)
+    if event:
+        state = _self_esteem.update(state, event, now)
+    _w8_save(store, session_id, "esteem", state)
+    view = _self_esteem.view(state)
+    view["event"] = str(event or "")
+    return view
+
+
+# --- #14 defense mechanisms: one read per turn, its cost lands on the load
+def _defense_event(state, dims):
+    """Build the event the ladder needs from numbers we already have.
+
+    perception.py 只喂了 {"kind": "message"}，于是 self_caused / other_present /
+    power_gap 三个闸门恒为 0，四种机制里只有「否认」可能触发。这里用七维把三个
+    闸门填上：blame 低 = 这是我的错；hit 高 = 对方在场且伤到了；支配低 = 权力差。
+    """
+    goal = _num(dims.get("goal"), 0.0)
+    blame = _num(dims.get("blame"), 0.5)
+    hit = _num(dims.get("hit"), 0.0)
+    valence = _num(state.get("v"), 0.0)
+    dominance = _num(state.get("dominance"), 0.5) * 2.0 - 1.0
+    if hit >= 0.3:
+        kind = "criticism"
+    elif goal >= 0.4:
+        kind = "success"
+    elif goal <= -0.2:
+        kind = "failure"
+    else:
+        kind = "message"
+    return {"kind": kind, "valence": valence,
+            "intensity": min(1.0, max(0.0, abs(valence) * 1.2)),
+            "self_caused": blame < 0.4,
+            "other_present": hit >= 0.3,
+            "power_gap": max(0.0, -dominance) if hit >= 0.3 else 0.0}
+
+
+def _defense_tick(store, session_id, data, core, now):
+    """Assess one defensive read and put its cost on the allostatic load."""
+    if _defense is None or store is None:
+        return {}
+    dims = _body_dims_from_payload(data)
+    if not dims:
+        return {}
+    # 模块的 dominance 是 0..1（0.5 中性），本仓的 d 是 -1..+1：必须映射，
+    # 否则负支配会被钳成 0、愤怒项恒小，四种机制全部够不到阈值（实测只 0.008）。
+    _dom01 = 0.5 + 0.5 * _num(core.get("dominance", core.get("d")), 0.0)
+    state = {"v": _num(core.get("v"), 0.0),
+             "a": _num(core.get("a"), 0.5),
+             "dominance": max(0.0, min(1.0, _dom01)),
+             "trust": _num(core.get("trust"), 0.5),
+             "stress": _num(core.get("stress"), 0.0)}
+    try:
+        from biocore_runtime import mindbase_bridge as _mbd
+        body = _mbd.load_state(store, session_id) or {}
+    except Exception:
+        body = {}
+    if body:
+        state["v"] = _num(body.get("valence"), state["v"])
+        state["a"] = _num(body.get("arousal"), state["a"])
+        state["stress"] = _num(body.get("stress"), state["stress"])
+    concept = {"clarity": max(0.0, min(1.0, 1.0 - state["stress"])),
+               "competence": max(0.0, min(1.0, 0.5 + 0.5 * state["v"])),
+               "honesty": 0.5}
+    if state["v"] >= 0.0:
+        # 模块的 rationalization 分支没有“这件事是不是负性”的闸门（只看 self_caused），
+        # 于是被夸也会判成“合理化”。本项只在这一轮确实是负性时才问它 ——
+        # 这一条是我们的选择，不是模块自带行为。
+        return {"enabled": True, "mechanism": "", "label": "", "strength": 0.0,
+                "cost": 0.0, "reason": "positive-event", "self_talk": "",
+                "cost_added": 0.0}
+    result = _defense.assess(_defense_event(state, dims), state=state,
+                             self_concept=concept) or {}
+    cost = _num(result.get("cost"), 0.0)
+    # 单轮上限：本仓 appraisal 每条通道本来就有 caps（v/a 0.15、stress 0.10），
+    # 防御的代价按同一量级进欠账；0.10 是我们的选择（BIOCORE_DEFENSE_LOAD_CAP 可调）。
+    cap = 0.10
+    try:
+        cap = max(0.0, float(os.environ.get("BIOCORE_DEFENSE_LOAD_CAP") or 0.10))
+    except Exception:
+        cap = 0.10
+    added = round(min(cap, cost), 4) if cost > 0.0 else 0.0
+    if added > 0.0 and body:
+        # 防御是有代价的：代价不是“这件事多疼”，是“维持这个说法要花掉多少”
+        body = dict(body)
+        body["allostatic_load"] = round(min(1.0, _num(
+            body.get("allostatic_load"), 0.0) + added), 4)
+        try:
+            from biocore_runtime import mindbase_bridge as _mbd2
+            _mbd2.save_body_state(store, session_id, body)
+        except Exception:
+            pass
+    view = _defense.view(result)
+    view["cost_added"] = round(added, 4)
+    return view
 
 
 # ---------------------------------------------------------------- self layer
@@ -11402,6 +12004,11 @@ CORE_CONFIG_FILE = "core_config.json"
 CORE_DEFAULTS = {
     # contract: everything core-side is on; only external/irreversible off.
     "core_enabled": True,
+    # 身体层显式写进缺省（P0-2）：以前 body 不在缺省表里，于是"生效值"只能靠
+    # _body_enabled 末尾那个兜底函数推出来 —— 面板看不到、日志说不清、写配置
+    # 时又容易被整块覆盖。写在这里之后：缺省就是 True，显式 false 仍然优先
+    # （_effective_switches 里 core_config.switches 后合并，会覆盖它）。
+    "body": True,
     "mood_recall": True, "affect_encoding": True,
     "memory_feedback": True, "preference_drift": True,
     "governance": True, "index": True, "consolidate": True,
@@ -11683,7 +12290,8 @@ def day_rollover(store, session_id, payload=None, now=None):
     from biocore_memory.event import day_summary as _ds
     db = _db_path(root, sid)
     today = _day.day_key_of(stamp)
-    report = {"ok": True, "settled": 0, "days": 0, "written": 0, "day_keys": []}
+    report = {"ok": True, "settled": 0, "days": 0, "written": 0, "day_keys": [],
+              "gaps": 0, "gap_keys": []}
     try:
         settle = _run_turn_end_consolidate(store, sid, dict(data, force=True))
         report["settled"] = int(settle.get("settled") or 0)
@@ -11709,6 +12317,16 @@ def day_rollover(store, session_id, payload=None, now=None):
                 report["day_keys"].append(key)
     except Exception as exc:
         logger.warning("[day] 日总结跳过：%s: %s", type(exc).__name__, str(exc)[:120])
+    # 空日策略：最近 7 个自然日里既没事件也没总结的那几天，写一条「这天没有记录」。
+    # 不调模型、不碰有事件的天、已有总结的天一个字节不动（INSERT OR IGNORE）。
+    # 开关在 day_summary.gap_enabled（BIOCORE_DAY_GAP=0 关），不在这里复制一份。
+    try:
+        if _ds.gap_enabled():
+            gaps = _ds.fill_gaps(db, _ds.recent_days(_ds.GAP_DAYS, now=stamp), now=stamp)
+            report["gaps"] = int(gaps.get("filled") or 0)
+            report["gap_keys"] = list(gaps.get("day_keys") or [])
+    except Exception as exc:
+        logger.warning("[day] 空日补齐跳过：%s: %s", type(exc).__name__, str(exc)[:120])
     return report
 
 
@@ -12503,6 +13121,19 @@ def dispatch(action, payload=None):
                 q_reward_last(store, session_id, True, _gap_min * 60.0, data)
             except Exception:
                 pass
+            # #18 闭环的“反馈”那一端：他开口了 → 上一次尝试算被回应。
+            if _w8_on("AUTONOMY_LOOP") and _autonomy_loop is not None:
+                try:
+                    _la, _ll = _loop_load(store, session_id)
+                    _before = int(_la.get("responded_count", 0) or 0)
+                    _la = _autonomy_loop.on_user_reply(_la, time.time())
+                    _got = int(_la.get("responded_count", 0) or 0) > _before
+                    _code = str((_la.get("last_attempt") or {}).get("code") or "")
+                    if _got and _code:
+                        _ll = _autonomy_loop.per_code_stats(_ll, _code, True)
+                    _loop_save(store, session_id, _la, _ll)
+                except Exception:
+                    pass
             try:
                 from biocore_runtime import state_health as _sh
                 _issues = _sh.contradictions(store, session_id)
@@ -12551,6 +13182,34 @@ def dispatch(action, payload=None):
                         from biocore_runtime import mindbase_bridge as _mbx
                         session_state["needs"] = _mbx.micro_evolve(
                             store, session_id, _b)
+                except Exception:
+                    pass
+            # #12 状态自尊：模块里的那份状态（含回归基线）落进这一轮的 needs，
+            # 让 perception 的四需要倾向与身体的 need_self_esteem 都读到它。
+            # 默认关；关着时 needs 与改动前逐字一致。
+            # #13 对方开口 = 攒着的「想开口」结算完了：挫折计数清零（只增一个键）。
+            if _w8_on("FRUSTRATION") and _frustration is not None:
+                try:
+                    from biocore_runtime import mindbase_bridge as _mbf
+                    _fbs = _mbf.load_state(store, session_id)
+                    if _fbs and float(_fbs.get("frustration_n") or 0.0) > 0.0:
+                        _fbs = dict(_fbs)
+                        _fbs["frustration_n"] = 0.0
+                        _mbf.save_body_state(store, session_id, _fbs)
+                except Exception:
+                    pass
+            if _w8_on("SELF_ESTEEM") and _self_esteem is not None:
+                try:
+                    _se = _self_esteem_tick(store, session_id, time.time())
+                    if _se:
+                        _se_v = round(float(_se.get("value") or 0.0), 4)
+                        session_state["self_esteem"] = _se_v
+                        _needs_cur = (session_state.get("needs")
+                                      if isinstance(session_state.get("needs"), dict)
+                                      else {})
+                        _needs_cur = dict(_needs_cur)
+                        _needs_cur["self_esteem"] = _se_v
+                        session_state["needs"] = _needs_cur
                 except Exception:
                     pass
             if state_store is not None:
@@ -12851,6 +13510,29 @@ def dispatch(action, payload=None):
                     if store is not None:
                         _save_session_state(store, session_id, session_doc)
                     core_snapshot = _core_state.snapshot(core_path)
+            # #14 防御机制：一次读数，代价（cost）落到欠账上。默认关。
+            if _w8_on("DEFENSE") and _defense is not None:
+                try:
+                    _def = _defense_tick(store, session_id, data,
+                                         session_doc.get("core") or {},
+                                         time.time())
+                    if _def and _def.get("mechanism"):
+                        data["defense"] = _def
+                except Exception:
+                    pass
+            # #12 状态自尊：这一轮是夸/是伤→事件，其余轮只回归基线。默认关。
+            if _w8_on("SELF_ESTEEM") and _self_esteem is not None:
+                try:
+                    _se_end = _self_esteem_tick(store, session_id, time.time(),
+                                                event=_self_esteem_event(data))
+                    if _se_end:
+                        data["self_esteem"] = {
+                            "value": round(float(_se_end.get("value") or 0.0), 4),
+                            "event": str(_se_end.get("event") or ""),
+                            "confidence_delta": round(
+                                float(_se_end.get("confidence_delta") or 0.0), 4)}
+                except Exception:
+                    pass
             # the turn's affect is the state this handler just settled on,
             # captured here so the entry carries the value that was current
             # at the end of the turn (no extra read: session_doc is in hand)
@@ -13031,6 +13713,10 @@ def dispatch(action, payload=None):
                 "identity": identity_info,
                 "consolidate": consolidate_info,
                 "units_written": int(units_written or 0),
+                **({"self_esteem": data.get("self_esteem")}
+                   if data.get("self_esteem") else {}),
+                **({"defense": data.get("defense")}
+                   if data.get("defense") else {}),
             }
         if action == "usage_event":
             if _cache_stats is None:
@@ -13788,10 +14474,27 @@ def _session_overview(store, session_id, payload=None):
             except Exception:
                 continue
         return ''
-    timeline = [{'code': 'AM%04d' % index,
-                 'date': _ev_date(ev),
-                 'overview': str(ev.get('overview') or '')[:30]}
-                for index, ev in enumerate(events, 1)]
+    timeline = []
+    for index, ev in enumerate(events, 1):
+        row = {'code': 'AM%04d' % index,
+               'date': _ev_date(ev),
+               'overview': str(ev.get('overview') or '')[:30]}
+        # 这段最重的一刻：峰值唤醒 / 那时的效价 / 那句原文。
+        # 事件在 _save_event_state 里钉过一次峰值；老数据没有就按条目的 affect
+        # 现算一遍。两者都拿不到（条目不带 affect）就不给键 —— 面板显示破折号，
+        # 不猜 0。键名与 _event_peaks 一致，前端三种写法都认。
+        _peak = {key: ev.get(key) for key in
+                 ('peak_arousal', 'peak_valence', 'peak_text')
+                 if ev.get(key) is not None}
+        if not _peak:
+            _peak = _event_peaks(ev.get('entries')) or {}
+        if _peak.get('peak_arousal') is not None:
+            row['peak_arousal'] = round(_num(_peak.get('peak_arousal'), 0.0), 3)
+        if _peak.get('peak_valence') is not None:
+            row['peak_valence'] = round(_num(_peak.get('peak_valence'), 0.0), 3)
+        if str(_peak.get('peak_text') or '').strip():
+            row['peak_text'] = str(_peak.get('peak_text'))[:80]
+        timeline.append(row)
     mode = str((payload or {}).get('mode') or 'both').strip().lower()
     if mode == 'timeline':
         return {'ok': True, 'timeline': timeline, 'count': len(timeline), 'cached': True}

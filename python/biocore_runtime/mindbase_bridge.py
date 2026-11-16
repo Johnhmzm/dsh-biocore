@@ -842,12 +842,21 @@ ANCHOR_LEARN = float(_os.environ.get("BIOCORE_ANCHOR_LEARN") or 0.25)
 PUSH_KEEP = float(_os.environ.get("BIOCORE_PUSH_KEEP") or 0.7)
 # 慢层参数：mood 每轮只跟 feeling 走一小步；load 是偏离的累计，回得极慢。
 MOOD_ALPHA = float(_os.environ.get("BIOCORE_MOOD_ALPHA") or 0.05)
-LOAD_GAIN = float(_os.environ.get("BIOCORE_LOAD_GAIN") or 0.15)
+# 欠账（allostatic load）：统一到"按时间"那套（与 pipeline 的 LOAD_TAU_S 同源）。
+# 旧的按拍常数 0.15/0.002 会让负载顶到 1.0 饱和、峰后 3537 拍才回零（实测），
+# 没有梯度；按时间那套均值 0.314、极大 0.675、峰后 60 拍回零。
+# 想回到旧行为：BIOCORE_LOAD_GAIN=0.15 BIOCORE_LOAD_DECAY=0.002
+LOAD_GAIN = float(_os.environ.get("BIOCORE_LOAD_GAIN") or 0.05)
 # 心的追赶时间常数（秒）：越大越迟钝。600s ≈ 十来分钟追上大半。
 HEART_TAU_S = float(_os.environ.get("BIOCORE_HEART_TAU_S") or 600.0)
 # mood 的时间常数（秒）：文献给的是"小时到天"，取 4 小时。
 MOOD_TAU_S = float(_os.environ.get("BIOCORE_MOOD_TAU_S") or 14400.0)
-LOAD_DECAY = float(_os.environ.get("BIOCORE_LOAD_DECAY") or 0.002)
+# 与 pipeline 的 LOAD_TAU_S 同源：每拍按 dt/tau 衰减（dt 默认 60s，tau 2000s → 0.03/拍）。
+# 显式设 BIOCORE_LOAD_DECAY 时以它为准（旧的按拍 0.002 就等于 0.002/拍）。
+LOAD_TAU_S = float(_os.environ.get("BIOCORE_LOAD_TAU_S") or 2000.0)
+LOAD_DT_S = float(_os.environ.get("BIOCORE_LOAD_DT_S") or 60.0)
+LOAD_DECAY = float(_os.environ.get("BIOCORE_LOAD_DECAY")
+                   or min(0.5, LOAD_DT_S / max(1.0, LOAD_TAU_S)))
 # 习惯化：同一刺激重复推的衰减系数，以及恢复的时间常数（小时）
 HAB_GAIN = float(_os.environ.get("BIOCORE_HAB_GAIN") or 0.6)
 HAB_TAU_H = float(_os.environ.get("BIOCORE_HAB_TAU_H") or 6.0)

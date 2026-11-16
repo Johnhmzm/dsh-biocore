@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import time
 from pathlib import Path
 
@@ -56,11 +57,24 @@ def write(cache_dir, content, model, text, version=PROMPT_VERSION, ms=0.0):
                'fingerprint': fingerprint(content)[:32],
                'text': str(text or ''), 'ms': round(float(ms), 1),
                'created_at': round(time.time(), 3)}
+    # 只增不改 + 原子：先写临时文件再换名。旧写法用 'x' 直接写目标，进程在 dump
+    # 中途死掉会留下残缺 JSON，之后 read() 永远未命中、'x' 又永远不再覆盖它。
+    tmp = path.with_name('%s.%d.tmp' % (path.name, os.getpid()))
     try:
-        with open(path, 'x', encoding='utf-8') as handle:   # 独占创建：只增不改
+        with open(tmp, 'w', encoding='utf-8') as handle:
             json.dump(payload, handle, ensure_ascii=False)
-    except FileExistsError:
-        pass
+            handle.flush()
+            os.fsync(handle.fileno())
+        if path.exists():
+            tmp.unlink()
+        else:
+            os.replace(str(tmp), str(path))
+    except Exception:
+        try:
+            if tmp.exists():
+                tmp.unlink()
+        except OSError:
+            pass
     return path
 
 

@@ -513,7 +513,12 @@ def render_events(ranked, grouped, scored, events, picked_events, budget, rank_m
         body = header + CHR + CHR.join(_trailer(lines))
         body = body[:budget]
 
-    body = header + CHR + CHR.join(lines)
+    # ship the trailer only when the whole body still fits: the loops above sized
+    # body WITH the trailer, but this line used to rebuild it WITHOUT the trailer,
+    # dropping both the budget clamp and the "另有 N 条 / 已折叠 M 条" notice.
+    final_body = header + CHR + CHR.join(lines + _trailer(lines))
+    body = final_body if len(final_body) <= budget else (
+        header + CHR + CHR.join(lines))
     shown_ids = []
     for key in picked_events[:shown_events]:
         for _s, row in grouped[key]['rows']:

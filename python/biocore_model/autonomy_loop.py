@@ -2,9 +2,21 @@
 """Perception -> decision -> action -> feedback -> learning loop."""
 from __future__ import annotations
 
+import math
+import os
+import random
+
 RESPONSE_WINDOW_S = 6 * 3600.0
 TUNE_EVERY_SEND = 10
 TUNE_INTERVAL_S = 86400.0
+
+# B13: 闭环系数与样本门槛（we chose them; docs/DECISIONS-LIT.md B13 says
+# "先跑阶梯，不猜"）。Constants keep the old defaults: 0.5 / 4.
+LOOP_GAIN = float(os.environ.get("BIOCORE_LOOP_GAIN") or 0.5)
+LOOP_MIN_SEEN = int(os.environ.get("BIOCORE_LOOP_MIN_SEEN") or 4)
+# B3 fallback: when no breakpoint signal exists, use the simple hazard.
+BP_TAU_MIN = float(os.environ.get("BIOCORE_BP_TAU_MIN") or 240.0)
+BP_CAP = float(os.environ.get("BIOCORE_BP_CAP") or 0.5)
 
 
 def _num(value, default=0.0):
@@ -55,6 +67,39 @@ def response_rate(acc):
     responded = int((acc or {}).get("responded_count", 0) or 0)
     ignored = int((acc or {}).get("ignored_count", 0) or 0)
     return round(responded / max(1, responded + ignored), 4)
+
+
+def gap_multiplier(seen, rate, gain=None, min_seen=None):
+    """B13: 没被回应的比例 → 下一次间隔拉长多少（1.0 = 不动）。
+
+    seen = responded + ignored；样本不足 min_seen 时不放大（旧门槛 4）。
+    gain = 0.5 时上限 1.5 倍，与改动前逐字相同；gain 由调用方给，
+    这样 0.2/0.5/1.0 的阶梯可以在同一个公式上跑，不用改代码。
+    """
+    g = LOOP_GAIN if gain is None else float(gain)
+    floor = LOOP_MIN_SEEN if min_seen is None else int(min_seen)
+    if int(seen) < max(0, int(floor)):
+        return 1.0
+    return 1.0 + max(0.0, g) * (1.0 - _clamp(_num(rate, 0.0), 0.0, 1.0))
+
+
+def breakpoint_send(gap_minutes=0.0, now_ms=0.0, tau_min=None, cap=None,
+                    seed_salt=""):
+    """B3 fallback（Attelia/Okoshi 的"断点"）：没有可用信号时的简式。
+
+    断点本来指"他刚好停下手上的事"；拿不到这个信号时，退回
+    p = 1 - exp(-gap/τ)（缺省 τ=4 小时），并压一个上限 —— 它只给
+    "沉默越久，这一拍开口的把握越大"，不做定时器。同一分钟可复现。
+    """
+    gap = max(0.0, _num(gap_minutes, 0.0))
+    tau = max(30.0, float(BP_TAU_MIN if tau_min is None else tau_min))
+    top = _clamp(float(BP_CAP if cap is None else cap), 0.0, 1.0)
+    p = _clamp(1.0 - math.exp(-gap / tau), 0.0, 1.0)
+    p = min(top, p)
+    rng = random.Random("%s|%d" % (str(seed_salt or ""), int(float(now_ms) // 60000)))
+    return {"send": rng.random() < p, "p": round(p, 4),
+            "gap_minutes": round(gap, 1), "tau_min": round(tau, 1),
+            "cap": round(top, 3)}
 
 
 def per_code_stats(learning, code, responded):

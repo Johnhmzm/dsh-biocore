@@ -6,7 +6,7 @@ the file is rewritten when 2 s have passed since the last save, or after 20
 accumulated changes, or on an explicit flush()/close()/process exit.
 """
 from __future__ import annotations
-import atexit, json, os, shutil, time, weakref
+import atexit, itertools, json, os, shutil, time, weakref
 from pathlib import Path
 
 from ..core.config import SCHEMA_VERSION
@@ -37,6 +37,7 @@ class MemoryStore:
         self.doc = {"entries": [], "tombstones": []}
         self._dirty = 0
         self._saves = 0
+        self._tmp_seq = itertools.count(1)
         self._last_save = time.monotonic()
         _LIVE.add(self)
         if isinstance(doc, dict):
@@ -70,9 +71,15 @@ class MemoryStore:
             store.import_doc(json.loads(p.read_text(encoding="utf-8")))
         except Exception:
             try:
-                bak = p.with_suffix(p.suffix + ".corrupt.bak")
+                # one backup per corruption event: a second corrupt copy used to
+                # be dropped because the first .corrupt.bak already existed.
+                stamp = time.strftime("%Y%m%d-%H%M%S")
+                bak = p.with_name("%s.corrupt-%s.bak" % (p.name, stamp))
                 if not bak.exists():
                     shutil.copy2(p, bak)
+                legacy = p.with_suffix(p.suffix + ".corrupt.bak")
+                if not legacy.exists():
+                    shutil.copy2(p, legacy)
             except Exception:
                 pass
         return store
@@ -86,10 +93,25 @@ class MemoryStore:
             self._dirty = 0
             return None
         target.parent.mkdir(parents=True, exist_ok=True)
-        tmp = target.with_suffix(target.suffix + ".tmp")
-        tmp.write_text(json.dumps(self.doc, ensure_ascii=False, indent=1),
-                       encoding="utf-8")
-        os.replace(str(tmp), str(target))
+        # A fixed "<file>.tmp" let two writers (host + dsh_cli) truncate each
+        # other's temp file and then replace with half a document. The temp
+        # name now carries pid + a per-store counter, and the bytes are flushed
+        # to the OS before the rename, so a reader never sees a partial file.
+        tmp = target.with_name("%s.%d.%d.tmp" % (target.name, os.getpid(),
+                                                 next(self._tmp_seq)))
+        try:
+            with open(tmp, "w", encoding="utf-8") as handle:
+                handle.write(json.dumps(self.doc, ensure_ascii=False, indent=1))
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(str(tmp), str(target))
+        except Exception:
+            try:
+                if tmp.exists():
+                    tmp.unlink()
+            except OSError:
+                pass
+            raise
         self._dirty = 0
         self._last_save = time.monotonic()
         self._saves += 1
@@ -98,6 +120,16 @@ class MemoryStore:
     # -- debounced persistence ---------------------------------------------
     def _touch(self):
         self._dirty += 1
+        return self._maybe_save()
+
+    def maybe_save(self):
+        """Debounced persistence: write only when due (public wrapper).
+
+        The engine used to call save() unconditionally after every recall, which
+        defeated the 2 s / 20-change debounce documented at the top of this
+        module (one full rewrite of the store per read). Callers that must be
+        durable (explicit save(), CLI exit) still call save()/flush().
+        """
         return self._maybe_save()
 
     def _maybe_save(self):

@@ -12,6 +12,12 @@ import tempfile
 import unittest
 from pathlib import Path
 
+# 2026-11-16：人设翻了默认（PERSONA_BOOT_ONLY 现在缺省开，只在 boot 那一轮渲染）。
+# 本模块钉的是"turn 也渲染人设"的旧契约（persona 渲染顺序、截断、路径优先级），
+# 所以**必须在 import pipeline 之前**把它显式关掉：断言逐字保留，关掉=旧行为。
+os.environ["BIOCORE_PERSONA_BOOT_ONLY"] = "0"
+
+
 import shutil
 
 from biocore_model import boundary_gate
@@ -26,12 +32,17 @@ from biocore_runtime import pipeline as pl
 
 _MODULE_HOME = tempfile.mkdtemp(prefix="biocore-runtime-home-")
 _MODULE_OLD_HOME = os.environ.get("BIOCORE_HOME")
+# 2026-11-16：BIOCORE_BODY 翻了默认（现在缺省开）。本模块钉的是"没有身体层"时的
+# runtime 契约（persona→core 的精确取值、长度提示、persona 路径优先级），身体一旦
+# 参与就把 core 的取值重算了。所以这里显式把身体关掉：断言逐字保留，关掉=旧行为。
+_MODULE_OLD_BODY = os.environ.get("BIOCORE_BODY")
 
 
 def setUpModule():
     # The real ~/.dsh/biocore/persona_profile.json is a shared install file;
     # tests must never read it unless a test explicitly opts in.
     os.environ["BIOCORE_HOME"] = _MODULE_HOME
+    os.environ["BIOCORE_BODY"] = "0"
 
 
 def tearDownModule():
@@ -39,6 +50,10 @@ def tearDownModule():
         os.environ.pop("BIOCORE_HOME", None)
     else:
         os.environ["BIOCORE_HOME"] = _MODULE_OLD_HOME
+    if _MODULE_OLD_BODY is None:
+        os.environ.pop("BIOCORE_BODY", None)
+    else:
+        os.environ["BIOCORE_BODY"] = _MODULE_OLD_BODY
     shutil.rmtree(_MODULE_HOME, ignore_errors=True)
 
 
@@ -871,6 +886,9 @@ class TraceTest(unittest.TestCase):
 
 class PersonaProfileTest(unittest.TestCase):
     def setUp(self):
+        # 契约变更（D14）：人设默认只在开场注入；这里验的是人设档案解析的机制。
+        self._old_persona_boot = pl.PERSONA_BOOT_ONLY
+        pl.PERSONA_BOOT_ONLY = False
         self.root = store_root()
 
     def _profile(self, **values):
@@ -1001,12 +1019,22 @@ class PersonaProfileTest(unittest.TestCase):
         self.assertNotEqual(with_persona["core"]["v"], without.get("core", {}).get("v", 0.0))
 
     def test_explicit_path_without_store_returns_state(self):
+        # 身体层现在默认开，它会按自己的状态重算 core.a；这里只验人设档案解析，
+        # 所以显式关掉身体（关掉时与改动前逐字一致）。
         explicit = Path(store_root()) / "p.json"
         explicit.write_text(json.dumps(self._profile(baseline_a=0.7),
                                        ensure_ascii=False), encoding="utf-8")
-        out = pl.dispatch("turn_start", {
-            "session_id": "A", "user_text": "你好",
-            "persona_profile": str(explicit)})
+        old_body = os.environ.get("BIOCORE_BODY")
+        os.environ["BIOCORE_BODY"] = "0"
+        try:
+            out = pl.dispatch("turn_start", {
+                "session_id": "A", "user_text": "你好",
+                "persona_profile": str(explicit)})
+        finally:
+            if old_body is None:
+                os.environ.pop("BIOCORE_BODY", None)
+            else:
+                os.environ["BIOCORE_BODY"] = old_body
         self.assertTrue(out["ok"])
         self.assertAlmostEqual(out["state"]["core"]["a"], 0.7)
 
@@ -1038,6 +1066,10 @@ class PersonaProfileTest(unittest.TestCase):
 
 class PersonaPromptTest(unittest.TestCase):
     def setUp(self):
+        # 契约变更（D14）：人设默认只在开场注入。这些用例验的是「人设怎么进
+        # 提示词」的机制，所以直接改模块常量回到旧行为，结束再改回来。
+        self._old_persona_boot = pl.PERSONA_BOOT_ONLY
+        pl.PERSONA_BOOT_ONLY = False
         self.root = store_root()
 
     def _write_profile(self, persona=None, **fields):
@@ -1129,6 +1161,10 @@ class PersonaPromptTest(unittest.TestCase):
 
 class ThinkingStyleTest(unittest.TestCase):
     def setUp(self):
+        # 契约变更（D14）：人设默认只在开场注入。这些用例验的是「人设怎么进
+        # 提示词」的机制，所以直接改模块常量回到旧行为，结束再改回来。
+        self._old_persona_boot = pl.PERSONA_BOOT_ONLY
+        pl.PERSONA_BOOT_ONLY = False
         self.root = store_root()
 
     def _write_profile(self, persona="你是安吉拉。"):
@@ -1261,7 +1297,11 @@ class InteroTest(unittest.TestCase):
         self.assertIn("此刻：", block)
         self.assertTrue(any(key in block for key in
                             ("效价", "唤醒", "支配", "紧张", "社交")))
-        self.assertIn("读法：", block)
+        # 契约变更（D14）：图例是常量，只在开场给一次，每轮不再重复 ——
+        # 它占的是状态行里最大的一块死字，每轮重念等于把前缀缓存冲掉。
+        self.assertNotIn("读法：", block)
+        self.assertIn("读法：", pl.dispatch(
+            "boot", {"session_id": "A", "store": self.root})["prompt_block"])
         self.assertIn("intero", out["state"]["core"])
 
     def test_state_action_ui_payload_contains_intero(self):
@@ -1285,7 +1325,22 @@ class InteroTest(unittest.TestCase):
 
 class LengthHintTest(unittest.TestCase):
     def setUp(self):
+        # 契约变更（D14）：人设默认只在开场注入。这些用例验的是「人设怎么进
+        # 提示词」的机制，所以直接改模块常量回到旧行为，结束再改回来。
+        self._old_persona_boot = pl.PERSONA_BOOT_ONLY
+        pl.PERSONA_BOOT_ONLY = False
         self.root = store_root()
+        # 2026-11-16：BIOCORE_STATE_DELTA 翻了默认（首轮全量，之后只报变动）。
+        # 这一组比的是"两次渲染除长度提示外逐字相同"，需要两边都是全量状态行，
+        # 所以显式关掉差额模式；断言一条都不改（关掉时逐字回到翻默认前）。
+        self._delta = os.environ.get("BIOCORE_STATE_DELTA")
+        os.environ["BIOCORE_STATE_DELTA"] = "0"
+
+    def tearDown(self):
+        if self._delta is None:
+            os.environ.pop("BIOCORE_STATE_DELTA", None)
+        else:
+            os.environ["BIOCORE_STATE_DELTA"] = self._delta
 
     def _write_profile(self):
         (Path(self.root) / pl.PERSONA_PROFILE_FILE).write_text(
@@ -1338,7 +1393,8 @@ class LengthHintTest(unittest.TestCase):
         self.assertIn("此刻：", block)
         self.assertTrue(any(key in block for key in
                             ("效价", "唤醒", "支配", "紧张", "社交")))
-        self.assertIn("读法：", block)
+        # 同上（D14）：图例只在开场出现。
+        self.assertNotIn("读法：", block)
         self.assertIn("人设：", block)
         self.assertNotIn("字以内", block)
 
@@ -1358,6 +1414,10 @@ class LengthHintTest(unittest.TestCase):
 
 class PersonaPathOrderTest(unittest.TestCase):
     def setUp(self):
+        # 契约变更（D14）：人设默认只在开场注入。这些用例验的是「人设怎么进
+        # 提示词」的机制，所以直接改模块常量回到旧行为，结束再改回来。
+        self._old_persona_boot = pl.PERSONA_BOOT_ONLY
+        pl.PERSONA_BOOT_ONLY = False
         self.tmp = tempfile.mkdtemp(prefix="biocore-persona-path-")
         self.home = Path(self.tmp) / "home"
         self.home.mkdir(parents=True, exist_ok=True)

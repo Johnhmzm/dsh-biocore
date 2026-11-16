@@ -71,6 +71,30 @@ def wait_blocked(state, now):
     return state
 
 
+def expectation_unmet(over_threshold=False, spoke=False, has_channel=False):
+    """B14 (Amsel 传统): 挫折来自"预期奖励未到"，不是"被拒绝"。
+
+    预期存在 = 这一拍她**想开口**（spoke）；预期兑现 = 有真实发送通道
+    （has_channel，词真的发出去了）。只是"过线"（over_threshold）是状态不好，
+    不是未兑现的预期 —— 它单独出现时不算一次。
+    """
+    if not spoke:
+        return False
+    return not bool(has_channel)
+
+
+def counts_as_attempt(over_threshold=False, spoke=False, has_channel=False,
+                      expect_mode=False):
+    """这一拍要不要给 frustration_n 加一。
+
+    expect_mode=False 是旧口径（over 或 spoke 都算），保证开关默认关时
+    数值逐字不变；expect_mode=True 换成 B14 的"有预期未兑现"。
+    """
+    if expect_mode:
+        return expectation_unmet(over_threshold, spoke, has_channel)
+    return bool(over_threshold or spoke)
+
+
 def goals_tick(goals, now, hours=1.0):
     """Progress stalls raise frustration; near-deadline unfinished raises anxiety."""
     rows = []

@@ -18,6 +18,7 @@ import json
 import logging
 import sqlite3
 import time
+from datetime import datetime, timedelta
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -48,7 +49,14 @@ RULES = """下面是一个人在同一天里的若干条事件总结（每条一
 
 
 def _connect(db_path):
-    conn = sqlite3.connect(str(db_path))
+    # busy_timeout: the main store runs WAL with its own writer; a bare connect
+    # here used to raise "database is locked" after the default 5 s and the day
+    # summary was silently dropped (M-28).
+    conn = sqlite3.connect(str(db_path), timeout=30.0)
+    try:
+        conn.execute("PRAGMA busy_timeout=30000")
+    except Exception:
+        pass
     for ddl in DDL:
         conn.execute(ddl)
     conn.commit()
@@ -242,3 +250,94 @@ def load(db_path, day_key, limit=None):
     return [{'day_key': str(row[0]), 'chunk_index': int(row[1] or 0),
              'event_ids': json.loads(row[2] or '[]'), 'text': str(row[3] or ''),
              'model': str(row[4] or ''), 'created_at': row[5]} for row in rows]
+
+# ---------------------------------------------------------------- 空日策略
+GAP_TEXT = '这天没有记录'
+GAP_MODEL = 'gap-placeholder'
+GAP_DAYS = 7
+ENV_GAP = 'BIOCORE_DAY_GAP'
+
+
+def gap_enabled(value=None):
+    """空日占位开关：默认开，BIOCORE_DAY_GAP=0/false/off/no 关。
+
+    开关放在这里而不是 pipeline 里，是因为 pipeline.py 正在被别人改；
+    这里只吃环境变量，不依赖调用点的状态。
+    """
+    import os
+    raw = os.environ.get(ENV_GAP) if value is None else value
+    return str(raw if raw is not None else '').strip().lower() not in ('0', 'false', 'off', 'no')
+
+
+def recent_days(days=GAP_DAYS, now=None, include_today=False, tz=None):
+    """最近 N 个自然日的 day_key（升序，北京时间的切天点）。
+
+    默认**不含今天**：今天还在长，不该提前写「这天没有记录」。口径与 day_rollover 一致。
+    """
+    from biocore_memory.event import day_index as _day
+    zone = tz if tz is not None else _day.DAY_TZ
+    stamp = float(now) if isinstance(now, (int, float)) else time.time()
+    try:
+        base = datetime.fromtimestamp(stamp, zone)
+    except Exception:
+        return []
+    span = max(1, int(days or GAP_DAYS))
+    step = 0 if include_today else 1
+    out = []
+    for back in range(span + step - 1, step - 1, -1):
+        try:
+            out.append((base - timedelta(days=back)).strftime('%Y-%m-%d'))
+        except Exception:
+            continue
+    return out
+
+
+def _count(conn, sql, args):
+    try:
+        return int(conn.execute(sql, args).fetchone()[0] or 0)
+    except Exception:
+        return 0
+
+
+def fill_gaps(db_path, day_keys=None, now=None):
+    """空日补一条占位日总结：「这天没有记录」（INSERT OR IGNORE，幂等）。
+
+    只碰「既没有事件、也没有日总结」的那几天：有事件的天交给 generate()，
+    已经有总结的天一个字节都不动。写入的 model 是 'gap-placeholder'，一眼能认出是占位。
+    """
+    path = Path(str(db_path))
+    out = {'filled': 0, 'skipped': 0, 'existing': 0, 'day_keys': [], 'reason': ''}
+    if not path.exists():
+        out['reason'] = 'no_db'
+        return out
+    keys = [str(k) for k in (day_keys or []) if str(k or '').strip()]
+    if not keys:
+        out['reason'] = 'no_days'
+        return out
+    stamp = float(now) if isinstance(now, (int, float)) else time.time()
+    conn = _connect(path)
+    try:
+        for key in keys:
+            events = _count(conn, 'SELECT COUNT(1) FROM day_events WHERE day_key=?', (key,))
+            rows = _count(conn, 'SELECT COUNT(1) FROM day_summaries WHERE day_key=?', (key,))
+            if rows:
+                out['existing'] += 1
+                continue
+            if events:
+                out['skipped'] += 1      # 有事件的天不写占位，等 generate() 正常出稿
+                continue
+            cur = conn.execute(
+                'INSERT OR IGNORE INTO day_summaries'
+                ' (day_key, chunk_index, event_ids, text, model, created_at)'
+                ' VALUES (?,?,?,?,?,?)',
+                (key, 0, '[]', GAP_TEXT, GAP_MODEL, stamp))
+            conn.commit()
+            if cur.rowcount > 0:
+                out['filled'] += 1
+                out['day_keys'].append(key)
+            else:
+                out['existing'] += 1
+    finally:
+        conn.close()
+    return out
+

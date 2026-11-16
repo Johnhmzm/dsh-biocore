@@ -46,6 +46,11 @@ try:
 except Exception:  # pragma: no cover
     _sanitize = None
 
+try:  # wire8 #19: the proactive message's context block (relationship / gap / motive)
+    from biocore_model import proactive_context as _pctx
+except Exception:  # pragma: no cover
+    _pctx = None
+
 # [engineering] every cadence/limit below is a product decision (see
 # PAPER-MAP.md); there is no user study behind 30min / 3 per day / 120min.
 DEFAULTS = {
@@ -206,8 +211,41 @@ def load_session_state(store, session_id):
     return _pipeline.apply_intero_to_state(state)
 
 
+def _pctx_on():
+    """拼不拼主动消息的上下文块：缺省拼（2026-11-16 翻默认）；写 0 关。"""
+    raw = os.environ.get("BIOCORE_PROACTIVE_CTX") or "1"
+    return str(raw).strip().lower() in ("1", "true", "on", "yes")
+
+
+def proactive_context_block(session_state, decision, now):
+    """#19 主动开口那一段的上下文：关系 / 间隔 / 动机（只有数，不写句子）。"""
+    if _pctx is None:
+        return ""
+    try:
+        state = session_state if isinstance(session_state, dict) else {}
+        rel = state.get("relationship") if isinstance(state.get("relationship"), dict) else {}
+        # 模块的 render_relationship 读的是 {"state": {...}, "attachment": {...}} 这层壳，
+        # 会话里的 relationship 是扁平的 → 这里套壳，不改模块。
+        rel_view = {"state": dict(rel),
+                    "attachment": rel.get("attachment") if isinstance(
+                        rel.get("attachment"), dict) else {}}
+        last_human = _num(state.get("last_human_ts"), 0.0)
+        gap_h = max(0.0, (float(now) - last_human) / 3600.0) if last_human > 0 else 0.0
+        lines = [_pctx.render_relationship(rel_view)]
+        lines.extend(_pctx.l1_extra_lines(gap_h, []))
+        reason = (decision or {}).get("reason") or ""
+        intent = str((decision or {}).get("loop") or "")
+        if reason or intent:
+            lines.append("【动机】%s%s" % (
+                ("由头：" + intent + " · ") if intent else "",
+                ("判定：" + str(reason)) if reason else ""))
+        return "\n".join(line for line in lines if str(line).strip())
+    except Exception:
+        return ""
+
+
 def build_prompt(state, memories, persona_text="", channel="outbox",
-                 digest=""):
+                 digest="", context=""):
     """Full persona (never truncated) + thinking rule + state + memories + digest."""
     parts = []
     if persona_text:
@@ -218,6 +256,8 @@ def build_prompt(state, memories, persona_text="", channel="outbox",
     except Exception:
         state_line = "此刻：心情平稳。"
     parts.append(state_line)
+    if context:
+        parts.append(str(context))
     recent = [str(item).strip() for item in (memories or []) if str(item).strip()]
     if recent:
         parts.append("最近记得：" + "；".join(recent[:3]))
@@ -454,9 +494,14 @@ def tick(now=None, config=None, transport=None, proactive=None):
         return result
     memories = _recent_memories(store, session_id)
     persona = _persona_text(store)
+    context = ""
+    if _pctx_on():
+        context = proactive_context_block(session_state, decision_result,
+                                          now_value)
     prompt = build_prompt(session_state, memories, persona,
                           cfg["standby_channel"],
-                          digest=_last_digest(session_state))
+                          digest=_last_digest(session_state),
+                          context=context)
     text, reason = generate(prompt, cfg, transport=transport)
     fallback = False
     if reason != "ok" or not text:

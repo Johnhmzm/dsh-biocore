@@ -1,6 +1,8 @@
 """Write-back bridge for consolidation suggestions (default OFF, idempotent).
 Pure/local: operates on an in-memory MemoryStore-like object (entries/add/update).
-It never saves to disk by itself; the caller decides when to call store.save().
+It never calls store.save() by itself; the caller decides when to save. Note
+(M-30): the helpers below go through store.add()/update(), which mark the store
+dirty, so the store's own debounce may still flush to disk a moment later.
 All failures degrade to skipped entries instead of raising.
 """
 from __future__ import annotations

@@ -9,7 +9,8 @@
     它的 `silent` 与身体自己那一拍的决定（`decision.action == "silence"`）是同一件事。
 
 本模块只出数、不写句子：{closed, until, repeat, factor}。
-开关：`BIOCORE_TOPIC_CLOSURE`（缺省 0）。关着时 factor 恒 1.0、不落盘。
+开关：`BIOCORE_TOPIC_CLOSURE`（缺省开，2026-11-16 翻默认；写 0 关）。
+关着时 factor 恒 1.0、不落盘，L5 逐字回到翻默认前。
 参数（**无文献值，我们的选择 + 回退开关**）：
   HOLD_S = 1800   同一话题提过之后 30 分钟内不再主动提起（`BIOCORE_TOPIC_HOLD_S`）
   FACTOR = 0.25   封闭期内 hazard 乘子（不是 0：憋着的事仍可能漏出来；`BIOCORE_TOPIC_CLOSED_FACTOR`）
@@ -31,7 +32,7 @@ MAX_TOPICS = 32
 
 def enabled(value=None) -> bool:
     raw = value if value is not None else os.environ.get("BIOCORE_TOPIC_CLOSURE")
-    return str(raw or "0").strip().lower() in ("1", "true", "on", "yes")
+    return str(raw or "1").strip().lower() in ("1", "true", "on", "yes")
 
 
 def _path(store, session_id) -> str:

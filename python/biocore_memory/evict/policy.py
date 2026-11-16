@@ -164,8 +164,11 @@ def _age_seconds(entry, now):
         except Exception:
             continue
     if last <= 0:
-        # No access timestamp at all: unknown age counts as long-unused.
-        return float(now)
+        # No access timestamp at all: unknown age counts as long-unused. Return
+        # a true "infinite age" instead of the epoch value of now -- feeding an
+        # absolute timestamp into an age comparison made any other consumer of
+        # this helper compute nonsense (and it read as ~55 years of disuse).
+        return float("inf")
     try:
         return max(0.0, float(now) - last)
     except Exception:

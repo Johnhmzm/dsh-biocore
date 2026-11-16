@@ -184,7 +184,10 @@ def precision_of(root):
     base = Path(str(root))
     for path in (base / 'core_config.json', base.parent / 'core_config.json'):
         try:
-            stamp = path.stat().st_mtime
+            info = path.stat()
+            # st_mtime is float seconds: two edits inside one second (and a
+            # restored backup that keeps its mtime) looked identical. ns + size.
+            stamp = (int(info.st_mtime_ns), int(info.st_size))
         except OSError:
             continue
         hit = _PRECISION_CACHE.get(str(path))
@@ -444,7 +447,14 @@ def export_session(conn, root, session_id):
             continue
     path = root / 'sessions' / session_id / 'memory.json'
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps({'entries': entries}, ensure_ascii=False), encoding='utf-8')
+    # atomic export: the JSON is what old readers load; a crash mid-write used
+    # to leave a truncated file that json_store then treats as a corrupt store.
+    tmp = path.with_name('%s.%d.tmp' % (path.name, os.getpid()))
+    with open(tmp, 'w', encoding='utf-8') as handle:
+        handle.write(json.dumps({'entries': entries}, ensure_ascii=False))
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.replace(str(tmp), str(path))
     return len(entries)
 
 

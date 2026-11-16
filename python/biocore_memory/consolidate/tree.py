@@ -19,10 +19,16 @@ def _ts(entry):
 
 
 def _day(entry):
+    # M-29: day_events / day_summaries cut the day at UTC+8; gmtime() here put the
+    # same memory on a different day for 8 hours of every day. One definition now.
     try:
-        return time.strftime("%Y-%m-%d", time.gmtime(_ts(entry)))
+        from ..event.day_index import day_key_of
+        return day_key_of(_ts(entry))
     except Exception:
-        return ""
+        try:
+            return time.strftime("%Y-%m-%d", time.gmtime(_ts(entry)))
+        except Exception:
+            return ""
 
 
 def _key(entry):

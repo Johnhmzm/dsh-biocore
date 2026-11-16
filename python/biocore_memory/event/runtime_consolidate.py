@@ -382,6 +382,44 @@ def _commit_event(conn, session_id, key, rows, events, overview, claims, day, st
                  ' fingerprint=excluded.fingerprint, updated_at=excluded.updated_at',
                  (event['event_id'], mapping['day'], mapping['ordinal'],
                   mapping['thread'], _mig.fingerprint(mapping), stamp))
+    # M-01: claims used to stop at events.payload / event_consolidation.claims;
+    # nothing ever wrote the claims table, so it stayed at 0 rows and the entity
+    # channel had no "who said what" to work from. Write them here, in the same
+    # transaction as the event body, deduplicated by (key, value, turn).
+    try:
+        _rows = []
+        for _item in (event.get('claims') or []):
+            if not isinstance(_item, dict):
+                continue
+            _subject = str(_item.get('subject') or '')
+            _attr = str(_item.get('attr') or _item.get('attribute') or '')
+            _value = str(_item.get('value') or '')
+            if not (_attr and _value):
+                continue
+            # 注意：不要用 _turn 当局部变量名——它是本模块的函数，_commit_event 里
+            # 上面那行 turns = [_turn(row, index) ...] 会因此变成 UnboundLocalError。
+            _claim_turn = int(_item.get('turn') or 0)
+            _exists = conn.execute(
+                'SELECT 1 FROM claims WHERE key=? AND value=? AND turn=? LIMIT 1',
+                ('%s·%s' % (_subject, _attr), _value, _claim_turn)).fetchone()
+            if _exists:
+                continue
+            _rows.append(('%s·%s' % (_subject, _attr), _subject, _attr, _value,
+                          str(_item.get('canon') or _value),
+                          str(_item.get('status') or 'current'),
+                          str(_item.get('source') or 'consolidate'),
+                          float(_item.get('confidence') or 0.0),
+                          str(_item.get('entity') or ''),
+                          str(_item.get('thread') or ''), _claim_turn,
+                          event['event_id']))
+        if _rows:
+            conn.executemany(
+                'INSERT INTO claims (key,subject,attr,value,canon,status,source,'
+                'confidence,entity,thread,turn,event_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)',
+                _rows)
+    except Exception as _ce:
+        logger.warning('[claims] 断言入表跳过（%s）：%s',
+                       type(_ce).__name__, str(_ce)[:120])
     conn.execute('DELETE FROM event_sentences WHERE event_id=?', (event['event_id'],))
     conn.executemany('INSERT INTO event_sentences'
                      ' (event_id, sentence_index, turn, ts, speaker, text)'
@@ -589,6 +627,19 @@ def run(db_path, session_id, entries, events, summarizer=True, now=None, model='
                          claims_json=json.dumps(claims, ensure_ascii=False),
                          event_id=written['event_id'])
             conn.commit()
+            # M-03: the thread tables had a writer only in tools/backfill_event_threads.py,
+            # so the running system never produced threads and load() had no caller.
+            # Link after the commit (separate connection, never inside our tx) and keep
+            # the result in the report so the read side has something to consume.
+            thread_info = {}
+            try:
+                from biocore_memory.event import thread_link as _tl
+                _doc = _tl.plan(str(db_path))
+                thread_info = dict(_tl.write(str(db_path), _doc),
+                                   connected=int(_doc.get('connected') or 0))
+            except Exception as _te:
+                logger.warning('[thread] 线程连边跳过（%s）：%s',
+                               type(_te).__name__, str(_te)[:120])
             portrait_info = _maybe_portrait(db_path, session_id, written['event_id'],
                                             overview, summarizer, cache_dir, model)
             logger.info('[consolidate] 块 %s 结算完成：事件 %s，%d 条 claims（cached=%s）',
@@ -601,6 +652,7 @@ def run(db_path, session_id, entries, events, summarizer=True, now=None, model='
                     'overview_chars': len(overview or ''),
                     'claims': len(claims),
                     'claim_edges': edge_info,
+                    'threads': thread_info,
                     'first_turn': min(turns), 'last_turn': max(turns),
                     'portrait': portrait_info}
         except Exception as exc:

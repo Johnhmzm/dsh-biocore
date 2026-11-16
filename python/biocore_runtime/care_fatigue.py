@@ -14,7 +14,8 @@
   - factor(store, sid, now)：用模块自带的 fatigue(consecutive, density, idle_hours)
     算出 empathy（floor 0.35），只乘在 L5 由头的 CARE 分量上。
 
-开关：BIOCORE_CARE_FATIGUE（缺省 0）。关着时不落盘、factor 恒 1.0。
+开关：BIOCORE_CARE_FATIGUE（缺省开，2026-11-16 翻默认；写 0 关）。
+关着时不落盘、factor 恒 1.0，L5 的 CARE 分量逐字回到翻默认前。
 参数（模块自带，本轮不改）：CONSECUTIVE_WEIGHT=0.22、DENSITY_WEIGHT=2.2、
 RECOVERY_TAU_HOURS=6、EMPATHY_FLOOR=0.35。CARE_ON=0.3 是我们的选择（BIOCORE_CARE_ON，本仓 CARE 的常态约 0.30）。
 
@@ -34,7 +35,7 @@ DENSITY_ALPHA = 0.25
 
 def enabled(value=None) -> bool:
     raw = value if value is not None else os.environ.get("BIOCORE_CARE_FATIGUE")
-    return str(raw or "0").strip().lower() in ("1", "true", "on", "yes")
+    return str(raw or "1").strip().lower() in ("1", "true", "on", "yes")
 
 
 def _path(store, session_id) -> str:

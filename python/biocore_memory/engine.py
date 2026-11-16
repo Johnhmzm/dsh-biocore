@@ -422,9 +422,19 @@ class MemoryEngine:
         return self.store.export()
 
     def _flush_stats(self):
+        """Persist the counters through the store's own debounce (see M-05).
+
+        This used to call save() unconditionally, so every recall() rewrote the
+        whole JSON document and defeated json_store's 2 s / 20-change debounce.
+        Write paths that must be durable call save()/flush() explicitly; reads
+        only get here for counters, which can wait for the next due write.
+        """
         if self.store.path is not None:
             try:
-                self.store.save()
+                if hasattr(self.store, "maybe_save"):
+                    self.store.maybe_save()
+                else:
+                    self.store.flush()
             except Exception:
                 pass
 
@@ -2123,14 +2133,26 @@ class MemoryEngine:
         removed = self.store.remove(entry_id, now=stamp, reason=reason, hard=hard)
         if removed:
             if not hard and self._flag("provenance"):
+                # build the hash-chained tombstone FIRST, then swap it in: the old
+                # del+append pair could leave the entry with no tombstone at all
+                # when the append raised (the exception was swallowed).
                 try:
-                    from .store.provenance import append_tombstone
-                    del self.store.tombstones[before:]
-                    append_tombstone(self.store.tombstones, entry, now=stamp,
-                                     reason=reason)
-                except Exception:
-                    pass
+                    from .store import provenance as _prov
+                    previous = (self.store.tombstones[before - 1]
+                                if before and isinstance(self.store.tombstones[before - 1], dict)
+                                else {})
+                    prev_hash = str(previous.get("hash") or "")
+                    tomb = _prov.make_tombstone(entry, prev_hash=prev_hash,
+                                                now=stamp, reason=reason)
+                    self.store.tombstones[before:] = [tomb]
+                except Exception as exc:
+                    self._audit_write("tombstone_failed", entry_id, "forget",
+                                      str(exc)[:80])
             self._propagate_delete(entry, now=stamp)
+            try:
+                self._last_purge = self._purge_derived_sqlite(entry_id)
+            except Exception:
+                self._last_purge = None
             self._tombstone_chain = None
             if self._flag("deletion_audit"):
                 try:
@@ -2211,6 +2233,48 @@ class MemoryEngine:
         if count:
             self._bump("delete_propagation", count)
         return count
+
+    def _purge_derived_sqlite(self, target_id):
+        """删掉一个条目在 sqlite 侧的派生行（M-06）。
+
+        forget 以前只清 JSON：units / access_log 里还留着原文与使用痕迹，
+        "忘掉"并没有真的忘掉。这里只删派生数据（units 由 entries 生成、
+        使用日志是痕迹）；事件层的 event_sentences / events.payload 属于事件
+        本体，不在这里动（见报告 M-06 的边界说明）。
+        """
+        path = getattr(self, "session_db_path", None)
+        if not path:
+            return {"ok": False, "reason": "no_db_path"}
+        removed = {"units": 0, "access_log": 0}
+        try:
+            import sqlite3
+            conn = sqlite3.connect(str(path), timeout=30.0)
+        except Exception:
+            return {"ok": False, "reason": "connect"}
+        try:
+            try:
+                conn.execute("PRAGMA busy_timeout=30000")
+            except Exception:
+                pass
+            for table in ("units", "access_log"):
+                try:
+                    cur = conn.execute(
+                        "DELETE FROM %s WHERE entry_id=?" % table, (str(target_id),))
+                    removed[table] = int(cur.rowcount or 0)
+                except Exception:
+                    continue
+            conn.commit()
+        except Exception:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+        finally:
+            try:
+                conn.close()
+            except Exception:
+                pass
+        return dict(removed, ok=True)
 
     def _clean_derived_refs(self, target_id, text=None):
         """Drop a deleted id from derived summary entries' source_ids."""
@@ -2369,6 +2433,59 @@ class MemoryEngine:
             return None
 
     # -- tick / eviction --------------------------------------------------
+    def day_rollover(self, now=None, db_path=None):
+        """跨天收尾：给"今天以前"的每一天补日总结（M-02，幂等）。
+
+        以前唯一的写入点是 event.day_summary.generate，而它只被
+        biocore_runtime.pipeline.day_rollover 调用，后者又只能由宿主显式
+        action 触发——仓内没有任何调度，所以 day_summaries 停在 3 天不再增长。
+
+        这里把调度放进记忆层自己：tick() 发现本地日期变了就调用本方法。
+        没有注入 summarizer 时只报 no_summarizer、不写库（记忆层不调模型），
+        因此默认行为不变；宿主把 summarizer 挂到 engine.summarizer 上即生效。
+        """
+        stamp = now_ts(now or self.now())
+        path = db_path or getattr(self, "session_db_path", None)
+        report = {"ok": True, "day_key": "", "days": 0, "written": 0,
+                  "day_keys": [], "reason": ""}
+        if not path:
+            report.update({"ok": False, "reason": "no_db_path"})
+            return report
+        try:
+            from .event import day_index as _day
+            from .event import day_summary as _ds
+        except Exception as exc:
+            report.update({"ok": False, "reason": "import:%s" % type(exc).__name__})
+            return report
+        today = _day.day_key_of(stamp)
+        report["day_key"] = today
+        summarizer = getattr(self, "summarizer", None)
+        if summarizer is None:
+            report["reason"] = "no_summarizer"
+        cache_dir = None
+        try:
+            if self._data_dir:
+                cache_dir = Path(str(self._data_dir)) / "cache" / "summary"
+        except Exception:
+            cache_dir = None
+        for item in _ds.days(str(path)):
+            key = str(item.get("day_key") or "")
+            if not key or key >= today:
+                continue          # 当天还在长，不提前总结
+            try:
+                out = _ds.generate(str(path), key, summarizer, now=stamp,
+                                   cache_dir=cache_dir)
+            except Exception as exc:
+                report.setdefault("errors", []).append(
+                    {"day_key": key, "error": type(exc).__name__})
+                continue
+            if out.get("written"):
+                report["days"] += 1
+                report["written"] += int(out.get("written") or 0)
+                report["day_keys"].append(key)
+        self._last_day_rollover = report
+        return report
+
     def tick(self, now=None, apply_evictions=None):
         stamp = now_ts(now or self.now())
         entries = [x for x in self.store.entries if isinstance(x, dict)]
@@ -2450,6 +2567,19 @@ class MemoryEngine:
         if ((tiering_exec_report or {}).get("archived") or compressed
                 or (eviction_report or {}).get("deleted")):
             self._flush_stats()
+        # M-02: the only day-summary writer had no scheduler at all. A date change
+        # observed by tick() is the natural trigger; without a summarizer it only
+        # reports no_summarizer (see day_rollover), so defaults are unchanged.
+        path = getattr(self, "session_db_path", None)
+        if path:
+            try:
+                from .event import day_index as _day
+                _today = _day.day_key_of(stamp)
+                if getattr(self, "_last_day_key", None) != _today:
+                    self._last_day_key = _today
+                    result["day_rollover"] = self.day_rollover(now=stamp, db_path=path)
+            except Exception:
+                pass
         self._write_snapshot_safe()
         return result
 
@@ -2710,8 +2840,13 @@ class MemoryEngine:
                 result["noop"] = True
             if real_summary and written:
                 for entry_id in summary_ids:
-                    if self.store.find(entry_id) is not None:
-                        self.store.update(entry_id, summarized=True)
+                    entry = self.store.find(entry_id)
+                    if entry is not None:
+                        # a marker, not a content revision: store.update() would
+                        # append a version snapshot to every source entry and
+                        # eventually make it look "old" to eviction (M-27).
+                        entry["summarized"] = True
+                        self.store._touch()
                         result["marked"] += 1
             narrative_report = self._apply_narrative(stamp)
             if narrative_report is not None:
@@ -2749,7 +2884,10 @@ class MemoryEngine:
             return None
         try:
             summary = self.store.add({
-                "id": sha12("consolidate" + text + str(stamp)),
+                # M-27: the id used to include the stamp, so the same batch of
+                # sources produced a NEW summary entry every pass. Key it on the
+                # member set instead (same inputs -> same id -> idempotent).
+                "id": sha12("consolidate|" + "|".join(sorted(str(x) for x in source_ids))),
                 "text": text, "role": "system", "ts": stamp,
                 "valid_at": stamp, "importance": 0.6,
                 "memory_confidence": 0.8, "memory_source": "consolidate",

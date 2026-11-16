@@ -16,6 +16,7 @@ import logging
 import math
 import os
 import re
+import threading
 import time
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
@@ -277,6 +278,7 @@ def sqlite_cache_path(path=None):
 
 _SQL_READY = {"path": None, "ready": False}
 _SQL_CONN = {"path": None, "conn": None}
+_SQL_WRITE_LOCK = threading.Lock()
 
 
 def _close_conn():
@@ -348,7 +350,10 @@ def _sql_connect(db, create=True):
     folder = os.path.dirname(os.path.abspath(db))
     if folder:
         os.makedirs(folder, exist_ok=True)
-    conn = sqlite3.connect(db, timeout=30)
+    # check_same_thread=False + the module lock in cache_put(): the pooled writer
+    # is process-wide, so a worker thread used to raise ProgrammingError and the
+    # write was silently dropped (every embedding recomputed forever).
+    conn = sqlite3.connect(db, timeout=30, check_same_thread=False)
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA synchronous=NORMAL")
     if create:
@@ -387,7 +392,11 @@ def cache_init(path=None):
                 if total >= len(rows):
                     os.replace(legacy, legacy + ".migrated")
                 else:
-                    return db          # keep the json: the import lost rows
+                    # keep the json (rows were lost) but stop retrying: without
+                    # this flag every embed() re-read and re-inserted the whole
+                    # legacy file (O(n) per vector).
+                    _SQL_READY.update({"path": db, "ready": True})
+                    return db
         except Exception:
             return db
     except Exception:
@@ -449,13 +458,20 @@ def cache_put(key, vector, path=None):
     if not db:
         return False
     try:
-        conn = _shared_conn(db)
-        conn.execute(
-            "INSERT OR REPLACE INTO vec (key, vector, dim, updated) VALUES (?,?,?,?)",
-            (str(key), pack_vector(vector), len(vector or []), time.time()))
-        conn.commit()
+        with _SQL_WRITE_LOCK:
+            conn = _shared_conn(db)
+            conn.execute(
+                "INSERT OR REPLACE INTO vec (key, vector, dim, updated) VALUES (?,?,?,?)",
+                (str(key), pack_vector(vector), len(vector or []), time.time()))
+            conn.commit()
         return True
     except Exception:
+        # a silent False here means "cache miss forever": keep a counter so
+        # /state can show it instead of hiding the failure (M-12).
+        try:
+            EMBED_STATS["write_error"] = int(EMBED_STATS.get("write_error", 0)) + 1
+        except Exception:
+            pass
         return False
 
 
@@ -564,6 +580,50 @@ def _warn_once(key, message):
         pass
 
 
+ENV_LOCAL_WIRE = "BIOCORE_EMBED_LOCAL"
+LOCAL_MODEL_DIRNAME = "bge-small-zh-int8"
+# 约定位置：仓库同级、仓库下、以及用户的 .dsh。只在这几个地方找，不做全盘搜索。
+LOCAL_MODEL_CANDIDATES = (
+    ("..", "models", LOCAL_MODEL_DIRNAME),
+    ("models", LOCAL_MODEL_DIRNAME),
+    ("..", "..", "models", LOCAL_MODEL_DIRNAME),
+)
+
+
+def local_model_name() -> str:
+    """本地后端的模型名（写进 meta / 缓存键用，和目录名一致）。"""
+    return LOCAL_MODEL_DIRNAME
+
+
+def embed_local_wired(value=None) -> bool:
+    """`BIOCORE_EMBED_LOCAL`：把本地 int8 ONNX 接成真正的默认后端（缺省关）。
+
+    关着时下面对配置一个字节都不改 —— 与"未接线"时完全一致。
+    """
+    if isinstance(value, bool):
+        return value
+    raw = os.environ.get(ENV_LOCAL_WIRE) if value is None else value
+    return str(raw or "").strip().lower() in ("1", "true", "on", "yes")
+
+
+def discover_local_model():
+    """按约定位置找 bge-small-zh-int8 目录；找不到返回空串（不猜、不下载）。"""
+    here = os.path.dirname(os.path.abspath(__file__))
+    roots = [os.path.abspath(os.path.join(here, *parts)) for parts in LOCAL_MODEL_CANDIDATES]
+    roots.append(os.path.join(os.path.expanduser("~"), ".dsh", "models", LOCAL_MODEL_DIRNAME))
+    repo = os.path.abspath(os.path.join(here, "..", ".."))
+    roots.append(os.path.join(os.path.dirname(repo), "models", LOCAL_MODEL_DIRNAME))
+    for path in roots:
+        try:
+            if os.path.isdir(path) and (
+                    os.path.exists(os.path.join(path, "model.onnx"))
+                    or os.path.exists(os.path.join(path, "model_int8.onnx"))):
+                return path
+        except Exception:
+            continue
+    return ""
+
+
 def local_config(config=None):
     """Parse the local-fallback knobs from a flat or nested config dict."""
     cfg = _provider_config(config)
@@ -573,6 +633,12 @@ def local_config(config=None):
         LOCAL_FALLBACK_DEFAULT_ENABLED)
     model_path = str(cfg.get("embedding_local_model_path")
                      or os.environ.get(ENV_LOCAL_MODEL) or "").strip()
+    if not model_path and embed_local_wired():
+        # 接线（A1）：开关打开、又没人显式给路径时，按约定位置找一次。
+        # 开关关着时这里根本不执行，行为与接线前逐字一致。
+        model_path = discover_local_model()
+        if model_path:
+            enabled = True
     tokenizer_path = str(cfg.get("embedding_local_tokenizer_path")
                          or os.environ.get(ENV_LOCAL_TOKENIZER) or "").strip()
     threads = int(_as_float(
@@ -828,6 +894,28 @@ class LocalOnlyEmbeddingProvider:
                 "local embedding dimension mismatch: expected %d, got %d"
                 % (self.dim, len(vector)))
         return vector
+
+    def embed(self, texts):
+        """批量接口：与远端 provider 的 `embed(list)` 同形（A1 接线用）。
+
+        远端 provider 本来就有 `embed`，这里补齐是为了让 vectors_backfill /
+        units_build 这些既有调用点不用改一行就能用本地后端。
+        """
+        items = [normalize_text(text) for text in (texts or [])]
+        if not items:
+            return []
+        vectors = self.local_embedder.encode(items) or []
+        out = []
+        for index, raw in enumerate(vectors):
+            vector = _validate_vector(raw)
+            if vector is None:
+                raise ValueError("invalid local embedding at index %d" % index)
+            if self.dim > 0 and len(vector) != self.dim:
+                raise ValueError(
+                    "local embedding dimension mismatch: expected %d, got %d"
+                    % (self.dim, len(vector)))
+            out.append(vector)
+        return out
 
 
 def _provider_config(config) -> dict:

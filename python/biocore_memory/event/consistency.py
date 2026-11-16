@@ -1,6 +1,11 @@
 # -*- coding: utf-8 -*-
 """Old/new fact conflict detection (default OFF; no word list).
 
+已停用（M-31）：detect_conflicts 恒返回"无冲突"，所以 FLAGS["consistency"] 打开
+也不会标注或过滤任何东西。真正的冲突来源是 store/versioning 的 disputed 与
+store/near_dup 的 superseded；要让这个开关有意义，应把两者接进来，而不是恢复
+一个谓词词表。
+
 The predicate lexicon was removed: telling "likes" from "weighs" from "wants"
 needs semantics the core does not have. The mechanism stays off and says so;
 a caller that knows the fact slots can compare them itself.

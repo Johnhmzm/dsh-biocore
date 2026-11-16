@@ -70,7 +70,12 @@ def day_key_of(ts, tz=DAY_TZ):
 
 
 def _connect(db_path):
-    conn = sqlite3.connect(str(db_path))
+    # see M-28: WAL + busy_timeout, or BEGIN IMMEDIATE below fails under load
+    conn = sqlite3.connect(str(db_path), timeout=30.0)
+    try:
+        conn.execute("PRAGMA busy_timeout=30000")
+    except Exception:
+        pass
     for ddl in DDL:
         conn.execute(ddl)
     _ensure_reason(conn)
@@ -82,9 +87,12 @@ def next_ordinal(conn, day_key):
     """这一天已经登记了几件 -> 下一件的序号（0 基）。"""
     try:
         row = conn.execute(
-            'SELECT COALESCE(MAX(ordinal), -1) FROM day_events WHERE day_key=?',
+            'SELECT MAX(ordinal) FROM day_events WHERE day_key=?',
             (str(day_key or ''),)).fetchone()
-        return int((row or [-1])[0] or 0) + 1 if row else 0
+        # 空日 MAX() 是 NULL，旧写法 (None or 0)+1 让序号从 1 开始（docstring 说 0 基），
+        # 而"当天已有行但 ordinal 全是 NULL"时每次调用都返回 1，序号会重复。
+        highest = row[0] if row else None
+        return (int(highest) if highest is not None else -1) + 1
     except Exception:
         return 0
 

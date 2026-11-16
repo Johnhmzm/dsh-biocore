@@ -46,6 +46,10 @@ class Case(unittest.TestCase):
         self._env = {key: os.environ.pop(key, None)
                      for key in ("BIOCORE_PERCEPTION_BATCH",
                                  "BIOCORE_FIELD_ARBITER")}
+        # 2026-11-16：BIOCORE_BODY 缺省开。这里钉的是"一轮里十二个感知模块各写什么"，
+        # 身体参与会重算 core，所以显式关掉身体，断言逐字保留。
+        self._body = os.environ.get("BIOCORE_BODY")
+        os.environ["BIOCORE_BODY"] = "0"
         self._home = os.environ.get("BIOCORE_HOME")
         os.environ["BIOCORE_HOME"] = str(Path(self.tmp.name) / "home")
 
@@ -56,6 +60,10 @@ class Case(unittest.TestCase):
                 os.environ.pop(key, None)
             else:
                 os.environ[key] = value
+        if self._body is None:
+            os.environ.pop("BIOCORE_BODY", None)
+        else:
+            os.environ["BIOCORE_BODY"] = self._body
         if self._home is None:
             os.environ.pop("BIOCORE_HOME", None)
         else:

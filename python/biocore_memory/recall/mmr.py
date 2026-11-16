@@ -14,11 +14,18 @@ def _vec(candidate):
 
 def _relevance(candidate):
     if isinstance(candidate, dict):
+        # 只认存在且是数值的键：以前的写法对缺失的 score 也会成功返回 0.0，
+        # 于是 relevance / sim 两个别名永远走不到（P1-6 补测时发现）。
+        # 现在缺键就继续看下一个，全缺才回 0.0。
         for key in ("score", "relevance", "sim"):
-            try:
-                return float(candidate.get(key) or 0.0)
-            except Exception:
+            value = candidate.get(key)
+            if isinstance(value, bool) or value is None:
                 continue
+            try:
+                return float(value)
+            except (TypeError, ValueError):
+                continue
+        return 0.0
     try:
         return float(candidate or 0.0)
     except Exception:

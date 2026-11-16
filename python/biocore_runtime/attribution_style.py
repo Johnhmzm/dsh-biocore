@@ -15,7 +15,8 @@
   - 给 hazard 一个乘子：内-稳定越一贯，开口越少（"说了也没用"的努力撤回）。
     至少 MIN_EVENTS 次之后才算"风格"（Abramson 1978：风格是倾向，不是一次）。
 
-开关：`BIOCORE_ATTRIB_STYLE`（缺省 0）。关着时不落盘、乘子恒 1.0。
+开关：`BIOCORE_ATTRIB_STYLE`（缺省开，2026-11-16 翻默认；写 0 关）。
+关着时不落盘、乘子恒 1.0，L5 逐字回到翻默认前。
 参数（**无文献值，我们的选择 + 回退开关**）：
   ALPHA = 0.25（EMA 步长，`BIOCORE_ATTRIB_ALPHA`）
   GAIN  = 0.5 （乘子最多压到 0.5，`BIOCORE_ATTRIB_GAIN`）
@@ -43,7 +44,7 @@ def enabled(value=None) -> bool:
     raw = value if isinstance(value, str) or value is None else None
     if raw is None:
         raw = os.environ.get("BIOCORE_ATTRIB_STYLE")
-    return str(raw or "0").strip().lower() in ("1", "true", "on", "yes")
+    return str(raw or "1").strip().lower() in ("1", "true", "on", "yes")
 
 
 def _path(store, session_id) -> str:

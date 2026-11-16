@@ -25,7 +25,12 @@ def lexical_score(query, text):
     if not q or not t:
         return 0.0
     if q in t:
-        return 1.0
+        # Containment is not a full score (M-07): a long entry could eat 1.0 just
+        # by containing the query, which made literal recall look better than it
+        # is next to the semantic channel. Score by how much of the document the
+        # query covers; q == t still gives exactly 1.0 (old behaviour).
+        coverage = len(q) / float(len(t) or 1)
+        return round(0.6 + 0.4 * min(1.0, coverage), 6)
     a, b = _bigrams(query), _bigrams(text)
     if not a or not b:
         return 0.0

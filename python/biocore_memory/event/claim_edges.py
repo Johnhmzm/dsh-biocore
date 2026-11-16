@@ -45,7 +45,11 @@ COLUMNS = ('id', 'session_id', 'subject', 'attr', 'from_value', 'to_value',
 
 
 def _connect(path):
-    conn = sqlite3.connect(str(path))
+    conn = sqlite3.connect(str(path), timeout=30.0)     # M-28: shared-store lock
+    try:
+        conn.execute("PRAGMA busy_timeout=30000")
+    except Exception:
+        pass
     for ddl in DDL:
         conn.execute(ddl)
     return conn

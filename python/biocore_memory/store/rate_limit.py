@@ -18,6 +18,8 @@ enabled = False
 RATE_LIMIT_ENABLED = enabled
 
 WINDOW_SECONDS = 60
+# 已知限制（M-23）：每次 check() 都读+写整个 JSON，且锁只在进程内——两个进程各
+# 持一把锁，窗口会互相覆盖。单进程使用没问题；要跨进程准确，得换锁文件或 sqlite 表。
 
 
 class FileRateLimiter:

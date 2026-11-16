@@ -326,13 +326,17 @@ def _apply_plan(store, identity_id, planner, **kwargs):
     if plan["allowed"]:
         fn = getattr(store, "update", None)
         applied = None
-        try:
-            applied = fn(result["id"], **plan["patch"]) if callable(fn) else None
-        except Exception:
-            applied = None
-        if not callable(fn):
+        # dict 形式的 store 也有 .update（那是 dict.update！），会把 patch 当 kwargs
+        # 打进去并抛 TypeError，结果永远是 update_failed（P1-6 补测发现）。
+        # 所以：mapping 类型的 store 直接改目标行；只有真正的 store 对象才调它的 update。
+        if isinstance(store, dict) or not callable(fn):
             target.update(plan["patch"])
             applied = target
+        else:
+            try:
+                applied = fn(result["id"], **plan["patch"])
+            except Exception:
+                applied = None
         if not isinstance(applied, dict):
             result.update({"updated": False, "allowed": False,
                            "reason": "update_failed"})

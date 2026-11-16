@@ -16,7 +16,8 @@
   - Leary 1995 的 sociometer 给的是“自尊跟踪被接纳程度”的**方向**。
 所以本模块**不新增任何阈值**：事件→需要全部走 needs_events 自带的映射与上限，
 时间→需要走 needs_sleep 自带的系数。唯一由我们选的是“多久算停滞”（STALL_HOURS），
-可用 BIOCORE_NEEDS4_STALLED_H 回退；整个接线可用 BIOCORE_NEEDS4=0 关掉。
+可用 BIOCORE_NEEDS4_STALLED_H 回退；整个接线可用 BIOCORE_NEEDS4=0 关掉
+（缺省开，2026-11-16 翻默认；写 0 关，关掉时逐字回到翻默认前）。
 """
 from __future__ import annotations
 
@@ -40,9 +41,13 @@ STALL_HOURS = float(os.environ.get("BIOCORE_NEEDS4_STALLED_H") or 6.0)
 
 
 def enabled(value=None) -> bool:
+    """缺省开（2026-11-16 翻默认）：四需要 + 睡眠债属于核心行为。
+
+    写 BIOCORE_NEEDS4=0 关掉，关着时 L1/L2 逐字回到翻默认前（tests/test_needs4.py 钉住）。
+    """
     raw = value
     if raw is None:
-        raw = os.environ.get("BIOCORE_NEEDS4") or "0"
+        raw = os.environ.get("BIOCORE_NEEDS4") or "1"
     return str(raw).strip().lower() in ("1", "true", "on", "yes")
 
 

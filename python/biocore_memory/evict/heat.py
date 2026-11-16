@@ -15,11 +15,15 @@ TAU_HOURS = 24.0
 
 
 def _num(entry, keys):
+    # 只用**存在且能解析**的键：缺键时以前也会成功返回 0.0，于是后面的别名
+    # （hits / N_visit / L_interaction）永远读不到（P1-6 补测发现）。
     for key in keys:
+        value = entry.get(key) if isinstance(entry, dict) else None
+        if value is None:
+            continue
         try:
-            value = float(entry.get(key) or 0.0)
-            return max(0.0, value)
-        except Exception:
+            return max(0.0, float(value))
+        except (TypeError, ValueError):
             continue
     return 0.0
 

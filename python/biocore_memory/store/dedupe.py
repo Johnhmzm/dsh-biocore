@@ -129,6 +129,11 @@ def dedupe(entry, entries, embedder=None):
 
 
         # L3 structural: same event_key, or same source within 60s.
+        # 注意（M-20）：engine 给每条 entry 写的 source 是唯一的
+        # ("biocore_memory:<id>")，所以同一来源的两条永远不会相等；而 CLI 路径的
+        # "user" 又会命中、随后被 engine_helpers 的守卫降级成 keep。也就是说这条
+        # 60 秒规则目前不会真正合并任何东西——要它生效，得把"来源类型"与"来源
+        # 实例 id"拆成两个字段。
         event_key, source, ts = _structural_key(entry)
         for old in candidates:
             old_key, old_source, old_ts = _structural_key(old)

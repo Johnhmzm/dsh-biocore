@@ -177,10 +177,14 @@ def cmd_pin(args, pinned):
 
 def cmd_consolidate(args):
     since = _parse_since(args.since)
+    # The engine does have a consolidate pass (engine.consolidate); what it does
+    # not have is a model summarizer, which is why this command only reports the
+    # gate state. Saying "engine has no consolidate pass" sent readers the wrong
+    # way -- the runnable path is the "consolidate-run" command below.
     return _emit({"ok": True, "command": "consolidate", "noop": True,
                   "since_seconds": since,
-                  "reason": "engine has no consolidate pass; CLI degraded to no-op",
-                  "hint": "use tick/forget policies or implement engine.consolidate"})
+                  "reason": "report only; run consolidate-run to execute",
+                  "hint": "python -m biocore_memory.adapters.dsh_cli consolidate-run"})
 
 
 def cmd_checkup(args):
@@ -377,8 +381,10 @@ def build_parser():
     r.set_defaults(func=cmd_consolidate_run)
     r = sp.add_parser("reembed",
                       help="rebuild vectors after changing the embedding model/dim")
-    r.add_argument("--store", required=True)
-    r.add_argument("--session", default="default")
+    # --store is already global; re-declaring it here made "dsh_cli --store X
+    # reembed" fail (the subparser demanded its own copy) and silently overrode
+    # the global value. The global parser owns it now.
+    r.add_argument("--session", default="default", help="session id (default: default)")
     r.add_argument("--batch-size", dest="batch_size", type=int, default=32)
     r.set_defaults(func=cmd_reembed)
     return p

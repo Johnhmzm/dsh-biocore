@@ -26,10 +26,15 @@ DDL = (
 
 
 def _connect(db_path):
-    conn = sqlite3.connect(str(db_path))
+    conn = sqlite3.connect(str(db_path), timeout=30.0)  # M-28
+    try:
+        conn.execute("PRAGMA busy_timeout=30000")
+    except Exception:
+        pass
     for ddl in DDL:
         conn.execute(ddl)
-    return conn
+    conn.commit()      # M-33: the DDL used to ride on append()'s commit and was
+    return conn        # never committed when the batch was empty
 
 
 def append(db_path, session_id, entry_ids, at=None, query_fp=''):

@@ -239,6 +239,10 @@ class FieldPipelineTest(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.store = Path(self.tmp.name) / "store"
         self._saved = os.environ.pop("BIOCORE_FIELD_ARBITER", None)
+        # 2026-11-16：BIOCORE_BODY 缺省开。仲裁层测的是"宿主在身体之外写 core.v
+        # 时谁说了算"，身体一参与就换了口径，所以显式关身体，断言逐字保留。
+        self._body = os.environ.get("BIOCORE_BODY")
+        os.environ["BIOCORE_BODY"] = "0"
         # hermetic persona lookup: no ~/.dsh/biocore/persona_profile.json
         self._home = os.environ.get("BIOCORE_HOME")
         os.environ["BIOCORE_HOME"] = str(Path(self.tmp.name) / "home")
@@ -249,6 +253,10 @@ class FieldPipelineTest(unittest.TestCase):
             os.environ.pop("BIOCORE_FIELD_ARBITER", None)
         else:
             os.environ["BIOCORE_FIELD_ARBITER"] = self._saved
+        if self._body is None:
+            os.environ.pop("BIOCORE_BODY", None)
+        else:
+            os.environ["BIOCORE_BODY"] = self._body
         if self._home is None:
             os.environ.pop("BIOCORE_HOME", None)
         else:

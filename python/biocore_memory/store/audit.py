@@ -38,8 +38,12 @@ class _AuditFile:
                 f.write(line + "\n")
             try:
                 if self.path.stat().st_size > MAX_BYTES:
-                    rotated = self.path.with_name(self.path.name + ".1")
-                    os.replace(self.path, rotated)
+                    # a fixed ".1" rotated over the previous generation: history
+                    # was only ever the last two files. Timestamp each rotation.
+                    rotated = self.path.with_name(
+                        "%s.%s" % (self.path.name, time.strftime("%Y%m%d-%H%M%S")))
+                    if not rotated.exists():
+                        os.replace(self.path, rotated)
             except OSError:
                 pass
             return True
