@@ -24,9 +24,17 @@
 | H5 | `expression-inject.js` / `safety-gate.js` / `expression-refresh.js` | 三个 register 从未被 index 接线，但文件头写着"已接"；将来接线会重复注入/双闸 | 保留实现，默认 no-op，改由 `BIOCORE_WIRE_LEGACY_INJECT/_GATE/_REFRESH` 或 `opts.force` 显式打开 | 单测：默认 0 次注册；`force:true` 注册 2 个 context（order -200/-190）；闸/刷新同理 |
 | H4 | `lib/py/bridge.py` | 使用 `_DSH_HOME` 但从未定义 → NameError 被吞，凭证文件兜底是死码 | `_DSH_HOME = Path(DSH_HOME or ~/.dsh)` | 探针：改前 `KEY=''`；改后 `KEY='sk-from-file'`（伪造 `.credentials.yaml`） |
 | H10 | `lib/client.js` `statusOf` | 只认 `bad_state`/`no_state_yet`（服务端从不发），其它一律"连不上宿主" | 认 `core_unavailable/core_disabled/bad_session/payload_too_large/method_not_allowed`，未知 reason 原样显示 | 单测：`core_unavailable` 与 `payload_too_large` 的 label 都不是"连不上宿主"；未知 reason 出现在 label 里 |
-| H12 | `ui/panel.js` `coreRow`/变化日志 | `'...' + label + '...' + text + '...'` 拼 innerHTML（引号坏 `data-k`，后端字符串是未转义注入面） | `createElement` + `textContent` + `fillNode()` | `node --check` + 面板冒烟（假 DOM 探针渲染核心板） |
+| H12 | `ui/panel.js` `coreRow`/变化日志 | `'...' + label + '...' + text + '...'` 拼 innerHTML（引号坏 `data-k`，后端字符串是未转义注入面） | `createElement` + `textContent` + `fillNode()` | 假 DOM 探针：`weights_source` 传 `x\"><img src=x onerror=alert(1)>`，渲染结果是 `.v` 里的**纯文本**、`data-k` 完整；探针里 innerHTML setter 直接抛错，全程未被触发 |
 | H3 | `python/{biocore_runtime,biocore_model,biocore_memory}` | 镜像落后主仓（pipeline 少 448 净行、缺 peak_recall/redact、4 个模块缺省方向相反） | 以主仓为准整树同步：runtime 8 个、model 8 个、memory 13 个，共 24 文件 | 逐文件 MD5：快照时刻 `remaining drift: 0`；py_compile 836/836 |
 | N9 | `ui/panel.html` | `panel.js:451` 找 `#bodyTruth`，HTML 里没有这个 id → 身体真值永远渲染不出来（静默 no-op） | 在 state 卡补一行 `<span id="bodyTruth">` | 新增单测：`panel.js` 里每个 `$('id')` 都必须在 `panel.html` 存在（`msEmb*/msRr*` 为显式白名单） |
+
+### 1.1 探针附录（可复跑）
+
+- `backups/audit-20261116/_pipeline_probe.py <pipeline.py>`：注入留痕三件事 + 时间线峰值；对 `_pipeline_before.py`（旧镜像）与 `python/biocore_runtime/pipeline.py`（已修）各跑一次，输出见 §1 表。
+- `backups/audit-20261116/_bridge_key_probe2.py <bridge.py>`：伪造 `$DSH_HOME/.credentials.yaml`；旧 `bridge.py` → `KEY=''`，新 → `KEY='sk-from-file'`。
+- `backups/audit-20261116/_panel_probe.mjs`：把 `ovRenderTimeline` 抠出来跑假 DOM，四种输入（有峰值+原文 / 只有数值 / 全空 / 老 `affect` 格式）分别渲染 `0.95`＋`v -0.80 · 「…」`、`0.40`＋`—`、`—`＋`—`、`0.60`＋`v 0.12`。
+- `backups/audit-20261116/_core_probe.mjs`：把 `renderCore` 抠出来跑假 DOM（innerHTML setter 抛错），后端字符串一律进 `textContent`。
+- 3081 只有只读探测（`GET /api/biocore/switch` 返回 `ok:true`）；因为不重启服务，线上未加载本轮代码，行为验证以上述探针 + 单测为准。
 
 ## 2. 未修与原因
 
