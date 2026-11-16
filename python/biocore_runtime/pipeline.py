@@ -8381,6 +8381,34 @@ def _brevity_of(state):
         return 0.0
 
 
+def _systems_gloss(state):
+    """七套系统 → 几个词（不出现数字）。只在跨档时才说，没变就不说。
+
+    生物层只出数；把数翻成话、并且只在必要时说，都是解释层的事。
+    """
+    st = state if isinstance(state, dict) else {}
+    body = st.get("body") if isinstance(st.get("body"), dict) else {}
+    src = body or st
+    bands = (("SEEKING", (0.45, 0.70), ("想找点事", "想往外走")),
+             ("CARE", (0.30, 0.60), ("想听你说", "很想照顾你")),
+             ("PLAY", (0.30, 0.60), ("玩心在", "很想闹")),
+             ("FEAR", (0.22, 0.50), ("有点绷", "绷得厉害")),
+             ("RAGE", (0.15, 0.45), ("压着火", "火压不住")),
+             ("PANIC", (0.25, 0.60), ("有点空", "空得厉害")))
+    out = []
+    for name, (lo, hi), words in bands:
+        try:
+            value = float(src.get("sys_" + name) or 0.0)
+        except Exception:
+            value = 0.0
+        if value >= hi:
+            out.append((value, words[1]))
+        elif value >= lo:
+            out.append((value, words[0]))
+    out.sort(reverse=True)
+    return "、".join(word for _v, word in out[:3])
+
+
 def _cause_line(state):
     """七维 → "这次是什么引起的"（短，给模型一个抓手，不是结论）。
 
@@ -8662,6 +8690,21 @@ def _constraints_block(state, switches, payload):
         lines.append("先不主动发新消息，等对方开口。")
     allow = _as_bool(payload.get("allow_correction"), False)
     lines.append("允许改口：" + ("是，说错了可以补一句。" if allow else "否，先确认再答。"))
+    # 心里变了才说：没变就不占字（也让前缀缓存更稳）。
+    try:
+        _st_b = state.get("body") if isinstance(state.get("body"), dict) else {}
+        _now_gloss = _systems_gloss(state)
+        _prev_gloss = str((_st_b or {}).get("sys_gloss") or "")
+        # 顺序不算变：按词集比，免得因为排位微调每轮都"变了"
+        if set(x for x in _now_gloss.split("、") if x) != set(x for x in _prev_gloss.split("、") if x):
+            if _now_gloss:
+                lines.append("心里现在：" + _now_gloss)
+            elif _prev_gloss:
+                lines.append("刚才那点心里动静下去了")
+        if isinstance(_st_b, dict):
+            _st_b["sys_gloss"] = _now_gloss
+    except Exception:
+        pass
     return "\n".join("- " + line for line in lines[:6])
 
 
