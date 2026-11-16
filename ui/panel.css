@@ -1173,4 +1173,12 @@ body[data-tab='settings'] .card.open .field-wide { grid-column: auto; }
 }
 .ov-peak-label { white-space: nowrap; }
 .ov-peak-value { font-variant-numeric: tabular-nums; }
+.ov-peak-text {
+  font-size: 11px;
+  opacity: 0.62;
+  line-height: 1.4;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 .ov-peak-empty { opacity: 0.5; }

@@ -476,9 +476,28 @@
     return 'low'
   }
 
+  /* One core cell, built as DOM. It used to be concatenated into innerHTML:
+     any quote in a label broke data-k and every backend string was an
+     unescaped HTML sink. textContent only — no HTML ever leaves this function. */
   function coreRow(label, value, text) {
-    return '<div class="core-cell" data-k="' + label + '"><span class="k">'
-      + label + '</span><span class="v">' + text + '</span></div>'
+    var cell = document.createElement('div')
+    cell.className = 'core-cell'
+    cell.setAttribute('data-k', String(label))
+    var key = document.createElement('span')
+    key.className = 'k'
+    key.textContent = String(label)
+    var val = document.createElement('span')
+    val.className = 'v'
+    val.textContent = String(text)
+    cell.appendChild(key)
+    cell.appendChild(val)
+    return cell
+  }
+
+  /* Replace everything under node with the given children (no innerHTML). */
+  function fillNode(node, children) {
+    while (node.firstChild) node.removeChild(node.firstChild)
+    for (var i = 0; i < children.length; i += 1) node.appendChild(children[i])
   }
 
   function renderCore(data) {
@@ -488,7 +507,7 @@
     var steady = $('coreSteady')
     if (!board || !log) return
     if (!core || !core.systems) {
-      board.innerHTML = '<div class="core-cell"><span class="k">CORE</span><span class="v">—</span></div>'
+      fillNode(board, [coreRow('CORE', 0, '—')])
       return
     }
     var systems = core.systems || {}
@@ -511,7 +530,7 @@
     cells.push(coreRow('HEART', core.heart, fmt(core.heart)))
     cells.push(coreRow('BREVITY', core.brevity, fmt(core.brevity)))
     if (core.weights_source) cells.push(coreRow('W', core.weights_source, String(core.weights_source)))
-    board.innerHTML = cells.join('')
+    fillNode(board, cells)
     // 慢层：变化超过一个阈值才记
     if (CORE_LAST) {
       if (CORE_LAST.__mood !== undefined && Math.abs(Number(core.mood) - CORE_LAST.__mood) >= 0.01) {
@@ -535,8 +554,12 @@
       var hh = String(t.getHours()).padStart(2, '0')
       var mm = String(t.getMinutes()).padStart(2, '0')
       var li = document.createElement('li')
-      li.innerHTML = '<time>' + hh + ':' + mm + '</time><span>'
-        + changes.slice(0, 6).join('，') + '</span>'
+      var stamp = document.createElement('time')
+      stamp.textContent = hh + ':' + mm
+      var note = document.createElement('span')
+      note.textContent = changes.slice(0, 6).join('，')
+      li.appendChild(stamp)
+      li.appendChild(note)
       log.insertBefore(li, log.firstChild)
       while (log.children.length > 40) log.removeChild(log.lastChild)
       steady.textContent = '刚变化'
@@ -2003,6 +2026,30 @@
     return got === null ? '—' : got.toFixed(2)
   }
 
+  /* 那一刻的原话（peak_text）：后端有就显示，没有就破折号。只做空白折叠与
+     截断，不改字；面板永远不编造一句原文。 */
+  function ovPeakQuote(row) {
+    if (!row) return ''
+    var raw = row.peak_text === undefined || row.peak_text === null ? '' : row.peak_text
+    return String(raw).replace(/\s+/g, ' ').trim().slice(0, 80)
+  }
+
+  /* 那一刻的效价（peak_valence）：数值就给两位小数，缺就 null（不显示，也不补 0）。 */
+  function ovPeakValence(row) {
+    if (!row) return null
+    var candidates = [row.peak_valence]
+    if (row.affect && typeof row.affect === 'object') {
+      candidates.push(row.affect.v, row.affect.valence)
+    }
+    for (var i = 0; i < candidates.length; i += 1) {
+      var raw = candidates[i]
+      if (raw === null || raw === undefined || raw === '') continue
+      var num = Number(raw)
+      if (isFinite(num)) return num
+    }
+    return null
+  }
+
   function ovRenderTimeline(rows) {
     var box = $('ovList')
     if (!box) return
@@ -2028,6 +2075,16 @@
       peak.appendChild(label)
       peak.appendChild(value)
       card.appendChild(peak)
+      var quote = ovPeakQuote(row)
+      var valence = ovPeakValence(row)
+      var bits = []
+      if (valence !== null) bits.push('v ' + valence.toFixed(2))
+      if (quote) bits.push('「' + quote + '」')
+      var quoteEl = document.createElement('div')
+      quoteEl.className = 'ov-peak-text'
+      quoteEl.textContent = bits.length ? bits.join(' · ') : '—'
+      if (!bits.length) quoteEl.classList.add('ov-peak-empty')
+      card.appendChild(quoteEl)
       box.appendChild(card)
     }
     if (!list.length) box.textContent = '还没有事件'
