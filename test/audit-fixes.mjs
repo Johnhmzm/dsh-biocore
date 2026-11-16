@@ -180,6 +180,22 @@ test('client: panel status speaks the server reasons, not adapter-era ones', asy
   assert.equal(ok.ok, true)
 })
 
+// ------------------------------------------------------------------ panel markup
+test('panel: every element panel.js looks up exists in panel.html', async () => {
+  const { readFileSync } = await import('node:fs')
+  const js = readFileSync(join(root, 'ui', 'panel.js'), 'utf8')
+  const html = readFileSync(join(root, 'ui', 'panel.html'), 'utf8')
+  const ids = new Set([...html.matchAll(/id="([^"]+)"/g)].map((m) => m[1]))
+  const used = new Set([...js.matchAll(/\$\('([^']+)'\)/g)].map((m) => m[1]))
+  // Declared-but-not-rendered slots the code guards with `if (el)`: the panel has
+  // no embedding/rerank form yet (only the summarizer one). Adding those inputs
+  // means deleting them from here, on purpose — they are not silently optional.
+  const optional = new Set(['msEmbBase', 'msEmbModel', 'msEmbKey', 'msEmbResult',
+    'msRrBase', 'msRrModel', 'msRrKey', 'msRrResult'])
+  const missing = [...used].filter((id) => !ids.has(id) && !optional.has(id))
+  assert.deepEqual(missing, [], 'panel.js renders into ids panel.html never defines: ' + missing.join(', '))
+})
+
 // ------------------------------------------------------------------ python side
 test('python: bridge defines _DSH_HOME and the pipeline compiles', async () => {
   const { readFileSync } = await import('node:fs')
