@@ -33,7 +33,28 @@ test('body switch comes from core_config.json', () => {
   assert.equal(bodyEnabled({}, cfgDir(false)), false)
   assert.equal(bodyEnabled({}, cfgDir(true)), true)
   assert.equal(bodyEnabled({ bodyEnabled: true }, cfgDir(false)), true)
-  assert.equal(bodyEnabled({}, join(tmpdir(), 'missing-dir-xyz')), false)
+  // 2026-11-16 核心把 body 缺省翻成"开"（pipeline._body_default_on），这道门跟着翻：
+  // 以前"没有配置文件"= 关，于是没人写过 body:true 的实例永远不会跳（3081 零心跳行）。
+  assert.equal(bodyEnabled({}, join(tmpdir(), 'missing-dir-xyz')), true)
+  // 显式关掉仍然算数：config / switches 两个入口都要留，别把"关"做没了。
+  assert.equal(bodyEnabled({ bodyEnabled: false }, cfgDir(true)), false)
+  assert.equal(bodyEnabled({ switches: { body: false } }, cfgDir(true)), false)
+})
+
+test('BIOCORE_BODY overrides both ways', () => {
+  const saved = process.env.BIOCORE_BODY
+  try {
+    process.env.BIOCORE_BODY = '0'
+    assert.equal(bodyEnabled({}, cfgDir(true)), false)
+    assert.equal(bodyEnabled({ bodyEnabled: true }, cfgDir(true)), false)
+    process.env.BIOCORE_BODY = '1'
+    assert.equal(bodyEnabled({}, cfgDir(false)), true)
+    process.env.BIOCORE_BODY = ''
+    assert.equal(bodyEnabled({}, cfgDir(false)), false)
+  } finally {
+    if (saved === undefined) delete process.env.BIOCORE_BODY
+    else process.env.BIOCORE_BODY = saved
+  }
 })
 
 test('body off: no python call, no session needed', async () => {
