@@ -4685,9 +4685,44 @@ def _cosine_list(a, b):
         return 0.0
 
 
+def _event_peaks(entries):
+    """一段事件里"最重的一刻"：峰值唤醒、那时的效价、那句原文。
+
+    记忆原本只存文本与向量，事后分不出哪句是带着情绪说的；条目现在带
+    affect（v/a），这里把它聚成一段的峰值。峰终规则：一段经历记得最牢的
+    是峰值与结尾，不是平均。
+    """
+    best = None
+    for item in entries or []:
+        aff = item.get("affect") if isinstance(item, dict) else None
+        if not isinstance(aff, dict):
+            continue
+        try:
+            a = float(aff.get("a", aff.get("arousal")) or 0.0)
+            v = float(aff.get("v", aff.get("valence")) or 0.0)
+        except Exception:
+            continue
+        if best is None or a > best[0]:
+            best = (a, v, str(item.get("text") or "")[:80], item.get("ts"))
+    if best is None:
+        return {}
+    return {"peak_arousal": round(best[0], 3), "peak_valence": round(best[1], 3),
+            "peak_text": best[2], "peak_ts": best[3]}
+
+
 def _save_event_state(store, session_id, state):
     """Persist the event layer: sqlite rows only (JSON is an export format now)."""
     payload = dict(state or {})
+    # 每段事件的情绪峰值：一次扫过就把"这段里最重的一刻"钉下来
+    try:
+        for _ev in (payload.get("events") or []) + list(payload.get("open") or []):
+            if not isinstance(_ev, dict):
+                continue
+            _pk = _event_peaks(_ev.get("entries"))
+            if _pk:
+                _ev.update(_pk)
+    except Exception:
+        pass
     root = _store_root(store)
     if root is not None and store_mode() != "json":
         try:
@@ -8608,9 +8643,12 @@ def _state_block(state, budget, phase="turn", payload=None):
                 _thr = 0.01 if _k in ("mood", "load", "heart") else 0.02
                 if _d >= _thr:
                     _diffs.append("%s%+.2f→%+.2f" % (_label, float(_old_v), _now_v))
-        _boot_like = (phase == "boot") or not _prev
+        # 默认全量：这份契约有测试钉着，改动要显式开启（BIOCORE_STATE_DELTA=1）。
+        # 开了之后：首轮全量，之后只报变动；变动项多于 4 个也退回全量。
+        _delta_on = str(os.environ.get("BIOCORE_STATE_DELTA") or "").strip() in ("1", "true", "on")
+        _boot_like = (phase == "boot") or not _prev or not _delta_on
         if _boot_like or len(_diffs) > 4:
-            _text_state = numbers          # 全量
+            _text_state = "此刻：" + numbers   # 全量
         elif _diffs:
             _text_state = "变：" + "，".join(_diffs[:6]) + "（其余同前）"
         else:
@@ -8620,7 +8658,7 @@ def _state_block(state, budget, phase="turn", payload=None):
         except Exception:
             pass
     except Exception:
-        _text_state = numbers
+        _text_state = "此刻：" + numbers
     _cause = _cause_line(state)
     if _cause:
         _text_state = _text_state + " ｜ 因：" + _cause
@@ -9692,8 +9730,18 @@ def tool_call(name, args, store, session_id=None):
         extra_meta = args.get("metadata")
         if isinstance(extra_meta, dict) and extra_meta:
             entry["metadata"] = {str(k): v for k, v in extra_meta.items()}
-        # the turn's own affect when the caller has it; absent = old structure
+        # the turn's own affect when the caller has it; absent = old structure.
+        # 调用方没给时，从身体状态取当时的效价/唤醒 —— 否则每条记忆都是中性的，
+        # 事后无从判断哪句是带着情绪说的（importance 也就永远压在 0.30）。
         affect = _affect_pair_from(args.get("affect"))
+        if not affect:
+            try:
+                _b_now = body_state(store, session_id) or {}
+                if isinstance(_b_now, dict):
+                    affect = _affect_pair_from({"valence": _b_now.get("valence"),
+                                                "arousal": _b_now.get("arousal")})
+            except Exception:
+                affect = None
         if affect:
             entry["affect"] = dict(affect)
         try:
@@ -9704,7 +9752,8 @@ def tool_call(name, args, store, session_id=None):
             pass
         try:
             # 重要度不再是常数：情绪强度 + 自我相关 两层，剩下的留给淘汰层
-            _v = abs(float((entry.get("affect") or {}).get("valence") or 0.0))
+            _aff = entry.get("affect") or {}
+            _v = abs(float(_aff.get("v", _aff.get("valence")) or 0.0))
             _sr = float(entry.get("self_relevance") or 0.0)
             entry["importance"] = round(min(1.0, 0.30 + 0.40 * _v + 0.30 * _sr), 3)
         except Exception:
