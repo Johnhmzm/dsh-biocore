@@ -1980,6 +1980,29 @@
 
 
   /* --- 会话总览：时间线免费、归纳按需 --- */
+  /* 事件卡里"这段最重的一刻"：后端给了峰值就显示两位小数，没给就破折号。
+     峰值字段名按后端现有/将有的三种写法都认（peak / affect.a / peak_arousal），
+     一个都不是数字时**不猜**，直接显示「—」。 */
+  function ovPeakOf(row) {
+    if (!row) return null
+    var candidates = [row.peak, row.peak_arousal]
+    if (row.affect && typeof row.affect === 'object') {
+      candidates.push(row.affect.a, row.affect.arousal)
+    }
+    for (var i = 0; i < candidates.length; i += 1) {
+      var raw = candidates[i]
+      if (raw === null || raw === undefined || raw === '') continue
+      var num = Number(raw)
+      if (isFinite(num)) return num
+    }
+    return null
+  }
+
+  function ovPeakText(row) {
+    var got = ovPeakOf(row)
+    return got === null ? '—' : got.toFixed(2)
+  }
+
   function ovRenderTimeline(rows) {
     var box = $('ovList')
     if (!box) return
@@ -1987,9 +2010,25 @@
     var list = rows || []
     for (var i = list.length - 1; i >= 0 && i >= list.length - 60; i -= 1) {
       var row = list[i]
-      var line = document.createElement('div')
-      line.textContent = (row.date || '') + ' ' + (row.overview || '')
-      box.appendChild(line)
+      var card = document.createElement('div')
+      card.className = 'ov-event'
+      var head = document.createElement('div')
+      head.className = 'ov-event-head'
+      head.textContent = (row.date || '') + ' ' + (row.overview || '')
+      card.appendChild(head)
+      var peak = document.createElement('div')
+      peak.className = 'ov-event-peak'
+      var label = document.createElement('span')
+      label.className = 'ov-peak-label'
+      label.textContent = '这段最重的一刻'
+      var value = document.createElement('span')
+      value.className = 'ov-peak-value'
+      value.textContent = ovPeakText(row)
+      if (ovPeakOf(row) === null) value.classList.add('ov-peak-empty')
+      peak.appendChild(label)
+      peak.appendChild(value)
+      card.appendChild(peak)
+      box.appendChild(card)
     }
     if (!list.length) box.textContent = '还没有事件'
   }

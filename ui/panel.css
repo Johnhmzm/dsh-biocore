@@ -3,6 +3,7 @@
  * One spec: .archify/design-mock/endfield14.html. Flat surfaces only — solid
  * page background, no texture, no contour, no slanted decoration. Every unit
  * is a card: 12px gap, 1px border, inner shadow, 14px corner cut, a 22px
+
  * orange rule on the top-left edge, and a header of orange square + uppercase
  * English + Chinese + right-aligned small print.
  *
@@ -1155,3 +1156,21 @@ body[data-tab='settings'] .card.open .field-wide { grid-column: auto; }
 .core-log li{display:flex;gap:6px;opacity:.85}
 .core-log time{opacity:.5;font-variant-numeric:tabular-nums}
 
+
+/* --- 会话总览的事件卡：一行日期+概述，一行「这段最重的一刻」（没有就破折号）--- */
+.ov-event {
+  padding: 4px 0;
+  border-bottom: 1px solid rgba(127, 127, 127, 0.12);
+}
+.ov-event:last-child { border-bottom: 0; }
+.ov-event-head { line-height: 1.5; }
+.ov-event-peak {
+  display: flex;
+  gap: 6px;
+  align-items: baseline;
+  font-size: 11px;
+  opacity: 0.72;
+}
+.ov-peak-label { white-space: nowrap; }
+.ov-peak-value { font-variant-numeric: tabular-nums; }
+.ov-peak-empty { opacity: 0.5; }
