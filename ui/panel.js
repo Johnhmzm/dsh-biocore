@@ -23,7 +23,9 @@
 
   // 版本优先来自 /api/biocore/settings（不受 HTML 缓存影响）；HTML 注入只作兜底
   var PANEL_VERSION = (function () {
-    var injected = (typeof window !== 'undefined' && window.__BIOCORE_VERSION__) || ''
+    // NB: the global must not be spelled like the placeholder — the host does a
+  // blunt string replace of __BIOCORE_VERSION__ and would mangle the identifier.
+  var injected = (typeof window !== 'undefined' && window.BIOCORE_UI_VERSION) || ''
     return injected && injected.indexOf('__') !== 0 ? injected : ''
   })()
 
