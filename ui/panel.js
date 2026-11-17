@@ -464,6 +464,26 @@
         ? ' · MB ' + fmt(Number(m.mb_approach) - Number(m.mb_avoid)) : '')
   }
 
+  /** 0.6 reverse injection: her own sentence is fed back into the body. Show
+   *  the push only when the latest one came from her reply — a push from the
+   *  user's line is the ordinary input side, not "her words changed something". */
+  function renderSelfPush(data) {
+    var el = $('selfPush')
+    if (!el) return
+    var push = live(data) && data.reverse_push && typeof data.reverse_push === 'object'
+      ? data.reverse_push : null
+    if (!push || String(push.source || '') !== '我上一句') {
+      el.textContent = DASH
+      return
+    }
+    var parts = ['我上一句']
+    var v = Number(push.valence)
+    var s = Number(push.stress)
+    if (Number.isFinite(v)) parts.push('v ' + fmt(v))
+    if (Number.isFinite(s)) parts.push('stress ' + fmt(s))
+    el.textContent = parts.join(' · ')
+  }
+
   /* 核心读数：第一次给全部，之后只报变动（跨档才算变） */
   var CORE_LAST = null
   var CORE_AT = 0
@@ -573,6 +593,7 @@
 
   function renderState(data) {
     renderBodyTruth(data)
+    renderSelfPush(data)
     try { renderCore(data) } catch (e) {}
     var on = live(data)
     setText('stateRelation', on ? joinRelation(data) : DASH)
