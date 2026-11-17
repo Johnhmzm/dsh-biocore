@@ -532,17 +532,17 @@
 
 
 
-      <section class="card" data-card-id="recall" data-card-label="召回注入">
+      <section class="card" data-card-id="recall" data-card-label="召回预算">
         <header class="card-head">
           <i class="sq" aria-hidden="true"></i>
-          <b>RECALL</b><span class="zh">/ 召回注入</span>
+          <b>RECALL</b><span class="zh">/ 召回预算（工具）</span>
           <span class="r" id="recallStatus">读取中</span>
         </header>
         <div class="field-grid">
           <label class="field"><span>事件预算</span>
             <input id="recallEvents" type="number" min="1" max="20" step="1" value="8">
           </label>
-          <label class="field"><span>注入预算</span>
+          <label class="field"><span>字符预算（旧路径）</span>
             <input id="recallChars" type="number" min="500" max="200000" step="1000" value="14000">
           </label>
           <label class="field"><span>交付方式</span>
@@ -552,7 +552,7 @@
             </select>
           </label>
         </div>
-        <p class="hint" id="recallHint">交付按事件计数：每轮最多投放多少个整事件（1–20，默认 12），保存后立即生效。干净事件交付路径不再按字符截断——件数与长件分层才是预算；字符预算只对旧的逐句路径生效。同库同题的命中率：5k→76.5%　10k→85.9%　14k→88.2%　20k→90.6%　40k→97.6%。</p>
+        <p class="hint" id="recallHint">自动召回默认关闭：记忆由 memory 工具按需调用，只有工具调用时才会出现【相关记忆】块，注入里不再每轮带记忆。这里配置的是单次工具交付的上限——事件数 1–20（默认 8）；字符预算（500–200000）只对旧的逐句路径生效，按事件的干净路径不再按字符截断。同库同题的命中率：5k→76.5%　10k→85.9%　14k→88.2%　20k→90.6%　40k→97.6%。</p>
         <div class="btn-row">
           <button id="recallSave" class="btn btn-accent" type="button">保存</button>
         </div>
@@ -690,7 +690,7 @@
 
 <script>window.__BIOCORE_VERSION__='__BIOCORE_VERSION__'</script>
 <script src="panel-layout.js?v=12"></script>
-<script src="trace-view.js?v=6"></script>
+<script src="trace-view.js?v=7"></script>
 <script src="panel.js?v=17"></script>
 </body>
 </html>

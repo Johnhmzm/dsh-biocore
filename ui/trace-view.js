@@ -105,7 +105,8 @@
     if (!memory || typeof memory !== 'object') return DASH
     var recalled = asList(memory.recalled_ids)
     var captured = text(memory.captured_id || '', 24)
-    var parts = ['召回 ' + recalled.length]
+    // 0.6: recall runs through the memory tool, not an automatic per-turn block.
+    var parts = ['工具召回 ' + recalled.length]
     parts.push(captured ? '写入 ' + captured.slice(0, 12) : '未写入')
     return parts.join(' · ')
   }
