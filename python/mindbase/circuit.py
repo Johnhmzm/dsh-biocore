@@ -5,6 +5,32 @@ import random
 import numpy as np
 from .fly_mb import FlyMushroomBody
 
+# Cacioppo & Berntson 1999 (Evaluative Space Model)：正负效价不是一根轴上的两个方向，
+# 而是两个各自独立的激活系统（bivariate），可以同时为 0，也可以同时为高。
+# 同一个模型还说：零输入时正向系统的活动高于中性基线（positivity offset）。
+# 所以 v 不再以"带符号的一列"进蘑菇体，而是拆成两列正/负激活。
+# 依据：Cacioppo, Gardner & Berntson 1999, "The affect system has parallel and
+# integrative processing components", J Pers Soc Psychol 76:839。
+POSITIVITY_OFFSET = 0.0   # 先取 0；A/B 定值后再改这一处（不要在各调用点加常数）
+
+
+def positive_activation(v) -> float:
+    """正向激活 = max(v, 0) + offset。"""
+    try:
+        value = float(v)
+    except Exception:
+        value = 0.0
+    return max(value, 0.0) + float(POSITIVITY_OFFSET)
+
+
+def negative_activation(v) -> float:
+    """负向激活 = max(-v, 0)。"""
+    try:
+        value = float(v)
+    except Exception:
+        value = 0.0
+    return max(-value, 0.0)
+
 
 class Circuit:
     """Coarse mushroom-body populations and sparse activity (FlyWire-style scale)."""
@@ -51,13 +77,14 @@ class Circuit:
         self.sparsity = 0.05
         self.fly_mb = None
         self.pending_features = None
+        self._v_trace = None    # L1 时间维：dv / v_int 的跨拍状态（懒建）
         self.second_order_events = 0
         self.second_order_gain = 0.0
         self.chronic_scar = 0.0
         self.scar_floor = 0.05
 
     def update(self, salience: float, sparse: float | None = None, reward: float = 0.0, punishment: float = 0.0,
-               intero=None, affect=None, systems=None) -> Dict[str, float]:
+               intero=None, affect=None, systems=None, dt_s=None) -> Dict[str, float]:
         for region, left in list(self.lesion_timers.items()):
             self.lesion_strength[region] = max(0.0, self.lesion_strength.get(region, 0.0) - self.lesion_rate.get(region, 0.0))
             if left <= 1 or self.lesion_strength[region] <= 1e-9:
@@ -71,8 +98,9 @@ class Circuit:
         features = np.array([s, self.dan_reward, self.dan_punishment, 1.0,
                              s * (1.0 - self.dan_reward), s * (1.0 - self.dan_punishment),
                              self.chronic_scar, 0.5], dtype=float)
-        # 情绪也进蘑菇体：L1 内感受四量 + L2 v/a/stress（只增列，老 8 列不动；
-        # FlyMushroomBody.N_IN=23，不足补 0）。这一层是"感知情绪"，不是决策。
+        # 情绪也进蘑菇体：L1 内感受四量 + L2 正/负激活 + a/stress（只增列，老 8 列不动；
+        # FlyMushroomBody.N_IN=24，不足补 0）。这一层是"感知情绪"，不是决策。
+        # v 按评价空间模型拆成 pos/neg 两列（见文件头 POSITIVITY_OFFSET）。
         try:
             _intero = intero if isinstance(intero, dict) else {}
             _affect = affect if isinstance(affect, dict) else {}
@@ -87,15 +115,41 @@ class Circuit:
                 except Exception:
                     return 0.0
             _g = float(self.EMOTION_FEATURE_GAIN)
-            features = np.concatenate([features, np.array([
-                _clip01(_intero.get("tension")),
-                _clip01(_intero.get("warmth")),
-                _clip01(_intero.get("heaviness")),
-                _clip01(_intero.get("clarity")),
-                _clipv(_affect.get("v")),
-                _clip01(_affect.get("a")),
-                _clip01(_affect.get("stress")),
-            ], dtype=float) * _g])
+            _coords = None
+            try:                                    # L1：坐标化（默认关）
+                from biocore_model import mb_coord as _mb_coord
+                if _mb_coord.enabled():
+                    _coords = _mb_coord.coord_vector(_intero, _affect)
+            except Exception:
+                _coords = None
+            # L1 的时间维：dv（一阶差分）与 v_int（指数滑动积分）。
+            # 依据 affective chronometry：情绪的起始/上升/恢复是参数，单点强度不够。
+            _cols = None
+            try:
+                from biocore_model import mb_coord as _mb_temporal
+                if self._v_trace is None:
+                    self._v_trace = _mb_temporal.TemporalTrace()
+                _cols = _mb_temporal.temporal_columns(
+                    self._v_trace, _clipv(_affect.get("v")), dt_s)
+            except Exception:
+                _cols = None
+            if _coords is not None:
+                features = np.concatenate([features, np.array(_coords, dtype=float) * _g])
+            else:
+                features = np.concatenate([features, np.array([
+                    _clip01(_intero.get("tension")),
+                    _clip01(_intero.get("warmth")),
+                    _clip01(_intero.get("heaviness")),
+                    _clip01(_intero.get("clarity")),
+                    positive_activation(_clipv(_affect.get("v"))),
+                    negative_activation(_clipv(_affect.get("v"))),
+                    _clip01(_affect.get("a")),
+                    _clip01(_affect.get("stress")),
+                ], dtype=float) * _g])
+            if _cols:
+                # 与情绪块同一份放大系数：不这么写，两列时间维就比别的情绪列小 6 倍，
+                # 等于在 w·f 里天生没有话语权（这是量纲一致，不是调参）。
+                features = np.concatenate([features, np.array(_cols, dtype=float) * _g])
         except Exception:
             pass
         if self.fly_mb is None:
@@ -125,7 +179,8 @@ class Circuit:
             }
         mb = self.fly_mb.step(features, reward=self.dan_reward * dan_factor,
                               punishment=self.dan_punishment * dan_factor,
-                              emotion=_emotion_readout, systems=systems)
+                              emotion=_emotion_readout, systems=systems,
+                              dt_s=dt_s)
         # 七系统读数单独存，不塞进 activity：activity 是按 POPULATIONS 加权的，
         # 多出七个键会把脑区活动率算错。
         if self.fly_mb is not None and self.fly_mb.systems_enabled:
