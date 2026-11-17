@@ -571,22 +571,11 @@
         <header class="card-head">
           <i class="sq" aria-hidden="true"></i>
           <b>EXPRESSION</b><span class="zh">/ 表达</span>
-          <span class="r" id="expressionStatus">长度由人设决定</span>
+          <span class="r" id="expressionStatus">由提示词判断</span>
         </header>
-        <label class="switch-row">
-          <span class="switch-text">
-            <span class="switch-label">长度约束</span>
-            <span class="switch-desc">按目标与上限字数约束表达</span>
-          </span>
-          <input id="expressionToggle" type="checkbox">
-        </label>
-        <div class="field-grid" id="expressionFields" hidden>
-          <label class="field"><span>目标字数</span><input id="lengthTarget" type="number" min="1" max="200" value="10"></label>
-          <label class="field"><span>上限字数</span><input id="lengthMax" type="number" min="2" max="400" value="30"></label>
-        </div>
-        <div class="btn-row">
-          <button id="expressionSave" class="btn btn-accent" type="button">保存表达</button>
-        </div>
+        <div class="kv"><span class="k">LENGTH</span><span id="expressionLength">由提示词判断</span></div>
+        <div class="kv"><span class="k">CAP</span><span>不下发数字上限</span></div>
+        <p class="hint" id="expressionHint">0.6 起长度由提示词判断，面板不再下发“目标字数 / 上限字数”；只有 config.json 里显式打开 length_hint 时，旧的数字上限路径才会生效。</p>
       </section>
 
       <section class="card" data-card-id="advanced" data-card-label="维护">
@@ -691,6 +680,6 @@
 <script>window.__BIOCORE_VERSION__='__BIOCORE_VERSION__'</script>
 <script src="panel-layout.js?v=12"></script>
 <script src="trace-view.js?v=7"></script>
-<script src="panel.js?v=17"></script>
+<script src="panel.js?v=18"></script>
 </body>
 </html>

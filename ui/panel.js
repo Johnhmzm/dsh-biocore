@@ -1418,74 +1418,8 @@
     } catch { return null }
   }
 
-  function expressionInputs() {
-    return {
-      toggle: $('expressionToggle'),
-      fields: $('expressionFields'),
-      target: $('lengthTarget'),
-      max: $('lengthMax'),
-      status: $('expressionStatus'),
-      save: $('expressionSave'),
-    }
-  }
-
-  function syncExpressionFields() {
-    var inputs = expressionInputs()
-    if (!inputs.toggle) return
-    var on = inputs.toggle.checked === true
-    if (inputs.fields) inputs.fields.hidden = !on
-    if (inputs.status) inputs.status.textContent = on ? '按目标与上限约束' : '长度由人设决定'
-  }
-
-  function fillExpression(value) {
-    var inputs = expressionInputs()
-    var data = value && typeof value === 'object' ? value : {}
-    if (inputs.toggle) inputs.toggle.checked = data.length_hint === true
-    if (inputs.target) inputs.target.value = String(data.length_target || 10)
-    if (inputs.max) inputs.max.value = String(data.length_max || 30)
-    syncExpressionFields()
-  }
-
-  function expressionValues() {
-    var inputs = expressionInputs()
-    var target = Number(inputs.target ? inputs.target.value : 10)
-    var max = Number(inputs.max ? inputs.max.value : 30)
-    return {
-      length_hint: !!(inputs.toggle && inputs.toggle.checked),
-      length_target: Number.isFinite(target) ? Math.max(1, Math.min(200, Math.round(target))) : 10,
-      length_max: Number.isFinite(max) ? Math.max(2, Math.min(400, Math.round(max))) : 30,
-    }
-  }
-
-  function bindExpression() {
-    var inputs = expressionInputs()
-    if (inputs.toggle) inputs.toggle.addEventListener('change', syncExpressionFields)
-    if (!inputs.save) return
-    inputs.save.addEventListener('click', function () {
-      var values = expressionValues()
-      if (inputs.save.disabled) return
-      inputs.save.disabled = true
-      if (inputs.status) inputs.status.textContent = '保存中'
-      fetch('/api/biocore/settings', {
-        method: 'POST',
-        headers: { 'content-type': 'application/json', accept: 'application/json' },
-        body: JSON.stringify({ confirm: true, expression: values }),
-      })
-        .then(function (response) { return response.ok ? response.json() : null })
-        .then(function (body) {
-          if (body && body.ok === true && body.expression) {
-            fillExpression(body.expression)
-            if (inputs.status) inputs.status.textContent = '已保存，重启后生效'
-            return
-          }
-          if (inputs.status) inputs.status.textContent = '保存失败 ' + ((body && body.reason) || 'unknown')
-        })
-        .catch(function () {
-          if (inputs.status) inputs.status.textContent = '保存失败 连不上宿主'
-        })
-        .then(function () { inputs.save.disabled = false })
-    })
-  }
+  // 0.6.7: length is decided inside the prompt; the panel no longer sends
+  // length_target / length_max, so the numeric form is gone with them.
 
   function fillRecall(recall) {
     var chars = $('recallChars')
@@ -1532,7 +1466,6 @@
         if (body && body.ok === true && embedding) {
           fillModel(embedding)
           fillRerank(body.rerank)
-          fillExpression(body.expression)
           fillRecall(body.recall)
           applyVersion(body.plugin_version)
           setText('sanitizeReplyText', body.sanitize_reply === false ? '关' : '开')
@@ -2584,7 +2517,6 @@
     bindModelActions()
   bindRecallActions()
     bindMemorySettings()
-    bindExpression()
     loadModelSettings()
     buildSwitches()
 
