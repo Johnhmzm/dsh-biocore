@@ -1175,6 +1175,15 @@
     el.classList.toggle('warn', tone === 'error')
   }
 
+  /** 0.6: the persona prompt is injected once, at boot — never per turn.
+   *  Show the length it will cost so the card cannot read as "every turn". */
+  function setPersonaInject(text) {
+    var length = String(text || '').length
+    setText('personaInject', length
+      ? '人设 ' + length + ' 字 · 只在开场注入一次；之后每轮只带状态行（约 250–700 字）'
+      : '未设置人设 · 设置后只在开场注入一次')
+  }
+
   function loadPersona() {
     return fetch('/api/biocore/persona', { headers: { accept: 'application/json' } })
       .then(function (response) { return response.json() })
@@ -1187,10 +1196,12 @@
         var area = $('personaText')
         if (area) area.value = personaText
         personaDirty = false
+        setPersonaInject(personaText)
         personaStatus(body.text ? '已载入' : '未设置', body.text ? 'ok' : '')
         return body
       })
       .catch(function () {
+        setText('personaInject', '注入：读取失败')
         personaStatus('连不上宿主', 'error')
         return null
       })
@@ -1221,6 +1232,7 @@
         }
         personaDirty = false
         personaText = String(body.text || text)
+        setPersonaInject(personaText)
         personaStatus('已编译 ' + new Date().toLocaleTimeString(), 'ok')
         return body
       })
